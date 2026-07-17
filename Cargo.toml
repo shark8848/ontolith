@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ontolith-core",
+    "crates/ontolith-rdf",
+    "crates/ontolith-parser",
+    "crates/ontolith-query",
+    "crates/ontolith-storage",
+    "crates/ontolith-reasoner",
+    "crates/ontolith-cluster",
+    "crates/ontolith-server",
+    "crates/ontolith-sdk",
+    "crates/ontolith-transaction",
+    "crates/ontolith-security",
+    "crates/ontolith-observability",
+    "crates/ontolith-plugin-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.97"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
