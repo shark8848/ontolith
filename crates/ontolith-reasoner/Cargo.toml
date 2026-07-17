@@ -1,0 +1,9 @@
+[package]
+name = "ontolith-reasoner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ontolith-core = { path = "../ontolith-core" }
+ontolith-rdf = { path = "../ontolith-rdf" }
+ontolith-query = { path = "../ontolith-query" }

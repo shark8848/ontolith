@@ -1,0 +1,15 @@
+[package]
+name = "ontolith-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ontolith-core = { path = "../ontolith-core" }
+ontolith-query = { path = "../ontolith-query" }
+ontolith-storage = { path = "../ontolith-storage" }
+ontolith-transaction = { path = "../ontolith-transaction" }
+ontolith-cluster = { path = "../ontolith-cluster" }
+ontolith-security = { path = "../ontolith-security" }
+ontolith-observability = { path = "../ontolith-observability" }
+ontolith-reasoner = { path = "../ontolith-reasoner" }
+ontolith-sdk = { path = "../ontolith-sdk" }

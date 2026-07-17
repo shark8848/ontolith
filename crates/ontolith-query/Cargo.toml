@@ -1,0 +1,10 @@
+[package]
+name = "ontolith-query"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ontolith-core = { path = "../ontolith-core" }
+ontolith-rdf = { path = "../ontolith-rdf" }
+ontolith-storage = { path = "../ontolith-storage" }
+ontolith-transaction = { path = "../ontolith-transaction" }
