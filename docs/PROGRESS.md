@@ -5,7 +5,7 @@
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-12 工作区（根仓库尚无 Git 提交）
+对照代码快照: 2026-07-12 工作区；Git 基线: `main` @ `8d7eca1`（2026-07-17 推送）
 
 ---
 
@@ -55,7 +55,7 @@
 
 | 优先级 | 焦点 | 负责人 | 目标日期 |
 |--------|------|--------|----------|
-| P0 | 建立进度台账与首次 Git 基线 | TBD | 2026-07-15 |
+| P0 | 建立进度台账与首次 Git 基线 | — | 2026-07-17 已完成 |
 | P1 | 补完 Phase 0 治理模板 | TBD | TBD |
 | P2 | 夯实 Phase 1 Knowledge Object | TBD | TBD |
 | P3 | Phase 2 RocksDB 适配启动 | TBD | TBD |
@@ -263,7 +263,7 @@
 | [~] Cargo.lock 可复现构建 | 部分完成 | lock 已有；第三方运行时依赖几乎未接入 |
 | [ ] Tier A 依赖 RFC/ADR | 未开始 | adr/rfc 空 |
 | [ ] 依赖登记（owner/风险/回退） | 未开始 | — |
-| [ ] 首次 Git 提交基线 | 未开始 | 根仓库 No commits yet |
+| [x] 首次 Git 提交基线 | 已完成 | `main` @ `8d7eca1` → `origin/main`（含 docs + 13 crates + LICENSE） |
 
 ### 已有测试资产（事实清单，非门禁通过）
 
@@ -282,6 +282,7 @@
 | 日期 | 作者 | 变更 |
 |------|------|------|
 | 2026-07-15 | Claude Code | 初建台账 PROG-0001；基于 PLAN-0001 与工作区代码对照录入基线完成度 |
+| 2026-07-17 | Claude Code | 移除 crates 嵌套 `.git`；提交 docs+crates 基线并推送 `origin/main`（`8d7eca1`） |
 
 ---
 
@@ -290,7 +291,7 @@
 ### 本周建议
 
 - [x] 建立 `docs/PROGRESS.md` 进度台账
-- [ ] 根仓库首次 commit（文档 + 骨架 + 现有实现）作为进度基线
+- [x] 根仓库首次 commit（文档 + 骨架 + 现有实现）作为进度基线（`main` / `8d7eca1`）
 - [ ] 新增 `adr/0000-template.md` 与 `rfc/0000-template.md`
 - [ ] 新增依赖登记表（Tier / owner / 风险 / 回退）
 - [ ] 确认 Stream A/B/C/D 负责人并回填 §2 焦点表
