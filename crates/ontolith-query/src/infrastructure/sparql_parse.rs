@@ -451,6 +451,10 @@ impl<'a> SparqlParser<'a> {
                 let values = self.parse_values()?;
                 acc = join(acc, values);
                 self.logical.push("values".into());
+            } else if self.looking_at_keyword("SELECT") {
+                let subquery = self.parse_subquery_select()?;
+                acc = join(acc, subquery);
+                self.logical.push("subquery".into());
             } else if self.peek_char() == Some('{') {
                 // Nested group or Union left side already in group: `{ A } UNION { B }`
                 let nested = self.parse_group_graph_pattern()?;
@@ -503,6 +507,134 @@ impl<'a> SparqlParser<'a> {
             self.skip();
         }
         Ok(acc)
+    }
+
+    fn parse_subquery_select(&mut self) -> Result<Algebra, OntolithError> {
+        self.expect_keyword("SELECT")?;
+        self.skip();
+
+        let mut distinct = false;
+        let mut select_vars: Vec<String> = Vec::new();
+
+        if self.eat_keyword("DISTINCT") {
+            distinct = true;
+            self.skip();
+        }
+
+        if self.peek_char() == Some('*') {
+            self.bump();
+            self.skip();
+        } else {
+            while self.peek_char() == Some('?') || self.peek_char() == Some('$') {
+                select_vars.push(self.parse_var_name()?);
+                self.skip();
+            }
+            if select_vars.is_empty() {
+                return Err(self.err("subquery SELECT requires '*' or variables"));
+            }
+        }
+
+        let _ = self.eat_keyword("WHERE");
+        self.skip();
+        if self.peek_char() != Some('{') {
+            return Err(self.err("subquery SELECT requires group graph pattern"));
+        }
+
+        let mut algebra = self.parse_group_graph_pattern()?;
+
+        self.skip();
+        if self.eat_keyword("ORDER") {
+            self.skip();
+            self.expect_keyword("BY")?;
+            let mut keys = Vec::new();
+            self.skip();
+            loop {
+                let ascending = if self.eat_keyword("DESC") {
+                    self.skip();
+                    false
+                } else {
+                    let _ = self.eat_keyword("ASC");
+                    self.skip();
+                    true
+                };
+                if self.peek_char() == Some('(') {
+                    self.bump();
+                    self.skip();
+                }
+                if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
+                    let v = self.parse_var_name()?;
+                    keys.push(OrderKey {
+                        variable: v,
+                        ascending,
+                    });
+                } else {
+                    break;
+                }
+                self.skip();
+                if self.peek_char() == Some(')') {
+                    self.bump();
+                    self.skip();
+                }
+                if !(self.peek_char() == Some('?')
+                    || self.peek_char() == Some('$')
+                    || self.looking_at_keyword("ASC")
+                    || self.looking_at_keyword("DESC"))
+                {
+                    break;
+                }
+            }
+            if !keys.is_empty() {
+                algebra = Algebra::OrderBy {
+                    keys,
+                    input: Box::new(algebra),
+                };
+            }
+        }
+
+        let mut offset = 0usize;
+        let mut limit = None;
+        self.skip();
+        if self.eat_keyword("OFFSET") {
+            self.skip();
+            offset = self.parse_usize()?;
+            self.skip();
+        }
+        if self.eat_keyword("LIMIT") {
+            self.skip();
+            limit = Some(self.parse_usize()?);
+            self.skip();
+        }
+        if limit.is_none() && self.eat_keyword("LIMIT") {
+            self.skip();
+            limit = Some(self.parse_usize()?);
+            self.skip();
+        }
+        if offset == 0 && self.eat_keyword("OFFSET") {
+            self.skip();
+            offset = self.parse_usize()?;
+            self.skip();
+        }
+
+        if distinct {
+            algebra = Algebra::Distinct {
+                input: Box::new(algebra),
+            };
+        }
+
+        algebra = Algebra::Project {
+            variables: select_vars,
+            input: Box::new(algebra),
+        };
+
+        if offset > 0 || limit.is_some() {
+            algebra = Algebra::Slice {
+                offset,
+                limit,
+                input: Box::new(algebra),
+            };
+        }
+
+        Ok(algebra)
     }
 
     fn parse_values(&mut self) -> Result<Algebra, OntolithError> {

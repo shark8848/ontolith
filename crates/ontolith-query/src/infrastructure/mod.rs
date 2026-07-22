@@ -569,4 +569,23 @@ mod tests {
         assert!(matches!(err, OntolithError::Failed(_)));
         assert!(err.message().contains("GROUP BY"));
     }
+
+    #[test]
+    fn subquery_select_with_limit() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT ?s WHERE {
+                    {
+                        SELECT ?s WHERE { ?s ?p ?o }
+                        LIMIT 1
+                    }
+                }"#,
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert!(result.variables.contains(&"s".to_string()));
+        assert!(result.solutions[0].get("s").is_some());
+    }
 }
