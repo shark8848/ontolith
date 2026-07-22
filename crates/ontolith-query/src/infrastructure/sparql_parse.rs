@@ -26,6 +26,7 @@ struct SparqlParser<'a> {
     pos: usize,
     line: usize,
     col: usize,
+    path_var_seq: usize,
     prefixes: BTreeMap<String, String>,
     base: Option<String>,
     logical: Vec<String>,
@@ -53,6 +54,7 @@ impl<'a> SparqlParser<'a> {
             pos: 0,
             line: 1,
             col: 1,
+            path_var_seq: 0,
             prefixes,
             base: None,
             logical: vec!["normalize_query".into()],
@@ -471,6 +473,13 @@ impl<'a> SparqlParser<'a> {
                 } else {
                     acc = join(acc, nested);
                 }
+            } else if let Some(path) = self.try_parse_property_path_sequence()? {
+                self.skip();
+                if self.peek_char() == Some('.') {
+                    self.bump();
+                }
+                self.logical.push("property_path:seq2".into());
+                acc = join(acc, path);
             } else if let Some(pattern) = self.try_parse_triple_pattern()? {
                 // collect consecutive triple patterns into one BGP
                 let mut bgp = vec![pattern];
@@ -507,6 +516,83 @@ impl<'a> SparqlParser<'a> {
             self.skip();
         }
         Ok(acc)
+    }
+
+    fn try_parse_property_path_sequence(&mut self) -> Result<Option<Algebra>, OntolithError> {
+        self.skip();
+        let save = self.checkpoint();
+
+        let subject = match self.parse_var_or_term(true) {
+            Ok(v) => v,
+            Err(_) => {
+                self.restore(save);
+                return Ok(None);
+            }
+        };
+
+        self.skip();
+        let first = match self.parse_var_or_term(false) {
+            Ok(TermPattern::Iri(i)) => TermPattern::Iri(i),
+            Ok(_) => {
+                self.restore(save);
+                return Ok(None);
+            }
+            Err(_) => {
+                self.restore(save);
+                return Ok(None);
+            }
+        };
+
+        self.skip();
+        if self.peek_char() != Some('/') {
+            self.restore(save);
+            return Ok(None);
+        }
+        self.bump();
+
+        self.skip();
+        let second = match self.parse_var_or_term(false) {
+            Ok(TermPattern::Iri(i)) => TermPattern::Iri(i),
+            Ok(_) => {
+                self.restore(save);
+                return Ok(None);
+            }
+            Err(_) => {
+                self.restore(save);
+                return Ok(None);
+            }
+        };
+
+        self.skip();
+        let object = match self.parse_var_or_term(false) {
+            Ok(v) => v,
+            Err(_) => {
+                self.restore(save);
+                return Ok(None);
+            }
+        };
+
+        let mid = self.next_path_variable();
+        let left = TriplePattern {
+            subject,
+            predicate: first,
+            object: TermPattern::Variable(mid.clone()),
+        };
+        let right = TriplePattern {
+            subject: TermPattern::Variable(mid),
+            predicate: second,
+            object,
+        };
+
+        Ok(Some(Algebra::Join {
+            left: Box::new(Algebra::Bgp(vec![left])),
+            right: Box::new(Algebra::Bgp(vec![right])),
+        }))
+    }
+
+    fn next_path_variable(&mut self) -> String {
+        self.path_var_seq += 1;
+        format!("__ontolith_pp{}", self.path_var_seq)
     }
 
     fn parse_subquery_select(&mut self) -> Result<Algebra, OntolithError> {

@@ -30,6 +30,11 @@ pub trait QueryReadService: Send + Sync {
         txn_id: Option<ontolith_transaction::domain::TxnId>,
     ) -> Result<Vec<Triple>, OntolithError>;
 
+    /// Optional dictionary bridge for features that need subject-node lookup by IRI.
+    fn node_for_iri(&self, _iri: &Iri) -> Result<Option<NodeId>, OntolithError> {
+        Ok(None)
+    }
+
     /// Multi-bound pattern probe (L2 `matching_in_txn`); default filters single-index results.
     fn matching(
         &self,

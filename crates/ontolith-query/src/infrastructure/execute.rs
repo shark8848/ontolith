@@ -320,7 +320,7 @@ fn eval_bgp(patterns: &[TriplePattern], ctx: &ExecCtx<'_>) -> Result<Vec<Solutio
         for sol in &solutions {
             let candidates = fetch_candidates(pattern, sol, ctx)?;
             for triple in candidates {
-                if let Some(extended) = match_triple(pattern, &triple, sol) {
+                if let Some(extended) = match_triple(pattern, &triple, sol, ctx)? {
                     next.push(extended);
                 }
             }
@@ -339,64 +339,118 @@ fn fetch_candidates(
     ctx: &ExecCtx<'_>,
 ) -> Result<Vec<Triple>, OntolithError> {
     // Specialize pattern with current solution bindings, then use L2 multi-bound probe.
-    let subj = bound_node(&pattern.subject, sol);
+    let subj = bound_node(&pattern.subject, sol, ctx)?;
     let pred = bound_iri(&pattern.predicate, sol);
     let obj = bound_term(&pattern.object, sol);
     ctx.read
         .matching(subj, pred.as_ref(), obj.as_ref(), ctx.txn_id)
 }
 
-fn match_triple(pattern: &TriplePattern, triple: &Triple, sol: &Solution) -> Option<Solution> {
+fn match_triple(
+    pattern: &TriplePattern,
+    triple: &Triple,
+    sol: &Solution,
+    ctx: &ExecCtx<'_>,
+) -> Result<Option<Solution>, OntolithError> {
     let mut out = sol.clone();
-    bind_pattern(&pattern.subject, BoundValue::Node(triple.subject), &mut out)?;
-    bind_pattern(
+    if bind_pattern(
+        &pattern.subject,
+        BoundValue::Node(triple.subject),
+        &mut out,
+        ctx,
+    )?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    if bind_pattern(
         &pattern.predicate,
         BoundValue::Iri(triple.predicate.clone()),
         &mut out,
-    )?;
-    bind_pattern(
+        ctx,
+    )?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    if bind_pattern(
         &pattern.object,
         BoundValue::from_term(&triple.object),
         &mut out,
-    )?;
-    Some(out)
+        ctx,
+    )?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(out))
 }
 
-fn bind_pattern(pattern: &TermPattern, value: BoundValue, sol: &mut Solution) -> Option<()> {
+fn bind_pattern(
+    pattern: &TermPattern,
+    value: BoundValue,
+    sol: &mut Solution,
+    ctx: &ExecCtx<'_>,
+) -> Result<Option<()>, OntolithError> {
     match pattern {
         TermPattern::Variable(v) | TermPattern::Blank(v) => {
             if let Some(existing) = sol.get(v) {
-                if existing != &value {
-                    return None;
+                if existing == &value {
+                    return Ok(Some(()));
                 }
+
+                if iri_node_compatible(existing, &value, ctx)? {
+                    return Ok(Some(()));
+                }
+
+                return Ok(None);
             } else {
                 sol.insert(v.clone(), value);
             }
-            Some(())
+            Ok(Some(()))
         }
         TermPattern::Node(n) => match value {
-            BoundValue::Node(id) | BoundValue::Blank(id) if id == *n => Some(()),
-            _ => None,
+            BoundValue::Node(id) | BoundValue::Blank(id) if id == *n => Ok(Some(())),
+            _ => Ok(None),
         },
         TermPattern::Iri(i) => match value {
-            BoundValue::Iri(ref j) if j == i => Some(()),
-            _ => None,
+            BoundValue::Iri(ref j) if j == i => Ok(Some(())),
+            _ => Ok(None),
         },
         TermPattern::Literal(l) => match value {
-            BoundValue::Literal(ref v) if v == l => Some(()),
-            _ => None,
+            BoundValue::Literal(ref v) if v == l => Ok(Some(())),
+            _ => Ok(None),
         },
     }
 }
 
-fn bound_node(p: &TermPattern, sol: &Solution) -> Option<NodeId> {
+fn iri_node_compatible(
+    left: &BoundValue,
+    right: &BoundValue,
+    ctx: &ExecCtx<'_>,
+) -> Result<bool, OntolithError> {
+    match (left, right) {
+        (BoundValue::Iri(iri), BoundValue::Node(node) | BoundValue::Blank(node))
+        | (BoundValue::Node(node) | BoundValue::Blank(node), BoundValue::Iri(iri)) => {
+            Ok(ctx.read.node_for_iri(iri)?.is_some_and(|mapped| mapped == *node))
+        }
+        _ => Ok(false),
+    }
+}
+
+fn bound_node(
+    p: &TermPattern,
+    sol: &Solution,
+    ctx: &ExecCtx<'_>,
+) -> Result<Option<NodeId>, OntolithError> {
     match p {
-        TermPattern::Node(n) => Some(*n),
+        TermPattern::Node(n) => Ok(Some(*n)),
         TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v) {
-            Some(BoundValue::Node(n) | BoundValue::Blank(n)) => Some(*n),
-            _ => None,
+            Some(BoundValue::Node(n) | BoundValue::Blank(n)) => Ok(Some(*n)),
+            Some(BoundValue::Iri(iri)) => ctx.read.node_for_iri(iri),
+            _ => Ok(None),
         },
-        _ => None,
+        _ => Ok(None),
     }
 }
 

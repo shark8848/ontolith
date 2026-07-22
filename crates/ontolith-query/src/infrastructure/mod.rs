@@ -17,7 +17,7 @@ use crate::domain::{QueryPlan, QueryRequest, QueryResult};
 use ontolith_core::domain::{Iri, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
-use ontolith_storage::application::TripleRepository;
+use ontolith_storage::application::{DictionaryCodec, TripleRepository};
 use ontolith_transaction::domain::TxnId;
 use std::sync::Arc;
 
@@ -28,11 +28,25 @@ pub use sparql_parse::{parse_subject_hint, plan_query};
 /// Storage-backed read service using SPO/POS/OSP indexes.
 pub struct InMemoryQueryReadService {
     triple_repo: Arc<dyn TripleRepository>,
+    dictionary: Option<Arc<dyn DictionaryCodec>>,
 }
 
 impl InMemoryQueryReadService {
     pub fn new(triple_repo: Arc<dyn TripleRepository>) -> Self {
-        Self { triple_repo }
+        Self {
+            triple_repo,
+            dictionary: None,
+        }
+    }
+
+    pub fn with_dictionary(
+        triple_repo: Arc<dyn TripleRepository>,
+        dictionary: Arc<dyn DictionaryCodec>,
+    ) -> Self {
+        Self {
+            triple_repo,
+            dictionary: Some(dictionary),
+        }
     }
 }
 
@@ -63,6 +77,13 @@ impl QueryReadService for InMemoryQueryReadService {
         txn_id: Option<TxnId>,
     ) -> Result<Vec<Triple>, OntolithError> {
         Ok(self.triple_repo.by_object_in_txn(object, txn_id))
+    }
+
+    fn node_for_iri(&self, iri: &Iri) -> Result<Option<NodeId>, OntolithError> {
+        Ok(self
+            .dictionary
+            .as_ref()
+            .map(|dict| dict.encode_node(iri.as_str())))
     }
 
     fn matching(
@@ -127,6 +148,24 @@ pub fn standard_pipeline(
     )
 }
 
+/// Build standard L3 pipeline with a dictionary bridge for subject/IRI joins.
+pub fn standard_pipeline_with_dictionary(
+    repo: Arc<dyn TripleRepository>,
+    dictionary: Arc<dyn DictionaryCodec>,
+) -> crate::application::QueryPipeline<
+    SimpleQueryPlanner,
+    RuleBasedOptimizer,
+    ReadServiceQueryExecutor,
+> {
+    let read: Arc<dyn QueryReadService> =
+        Arc::new(InMemoryQueryReadService::with_dictionary(repo, dictionary));
+    crate::application::QueryPipeline::new(
+        SimpleQueryPlanner,
+        RuleBasedOptimizer,
+        ReadServiceQueryExecutor::new(read),
+    )
+}
+
 pub fn status() -> &'static str {
     "infrastructure"
 }
@@ -138,8 +177,10 @@ mod tests {
     use crate::domain::{Algebra, BoundValue, QueryRequest, TermPattern};
     use ontolith_core::domain::{Iri, LiteralValue, NodeId};
     use ontolith_rdf::domain::{Term, Triple};
-    use ontolith_storage::application::{StorageEngine, TripleRepository};
-    use ontolith_storage::infrastructure::{InMemoryStorageEngine, InMemoryTripleRepository};
+    use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
+    use ontolith_storage::infrastructure::{
+        InMemoryDictionary, InMemoryStorageEngine, InMemoryTripleRepository,
+    };
     use ontolith_transaction::domain::TxnId;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -587,5 +628,49 @@ mod tests {
         assert_eq!(result.solutions.len(), 1);
         assert!(result.variables.contains(&"s".to_string()));
         assert!(result.solutions[0].get("s").is_some());
+    }
+
+    #[test]
+    fn property_path_sequence_two_predicates() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/alice");
+        let bob = dict.encode_node("http://ex.org/bob");
+
+        let txn = TxnId::new(1);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/bob")),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            txn,
+            Triple {
+                subject: bob,
+                predicate: Iri::new("http://ex.org/age"),
+                object: Term::Literal(LiteralValue::Integer(30)),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s ?age WHERE { ?s <http://ex.org/knows>/<http://ex.org/age> ?age }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("age"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(30)))
+        );
     }
 }
