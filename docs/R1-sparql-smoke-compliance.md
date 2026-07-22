@@ -1,7 +1,7 @@
 # R1 SPARQL Smoke Compliance Profile
 
 文档 ID: COMP-R1-0001  
-版本: 1.2.0  
+版本: 1.3.0  
 日期: 2026-07-22  
 Crate: [`ontolith-compliance`](../crates/ontolith-compliance)
 
@@ -53,7 +53,10 @@ Classification:
 Current known gaps:
 
 - Subquery
-- Aggregate / GROUP BY
+
+Current must-pass increment:
+
+- Aggregate COUNT (no GROUP BY)
 
 Current unsupported:
 
@@ -62,7 +65,8 @@ Current unsupported:
 
 ## Out of scope (R1+)
 
-- Property paths, subqueries, aggregates, GROUP BY
+- Property paths, subqueries
+- Full aggregates/GROUP BY/HAVING beyond COUNT baseline
 - SPARQL Update
 - Full W3C manifest-driven suite
 - Performance / SLO gates
