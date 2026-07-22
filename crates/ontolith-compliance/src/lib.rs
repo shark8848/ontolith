@@ -37,10 +37,10 @@ pub const SPARQL_W3C_SUBSET_FEATURES: &[&str] = &[
     "FILTER(BOUND)",
     "BIND",
     "VALUES",
+    "Aggregate COUNT",
     "DISTINCT/ORDER BY/LIMIT",
     "PREFIX + Turtle ingest",
     "known-gap: subquery",
-    "known-gap: aggregate",
     "unsupported: property path",
     "unsupported: update",
 ];
