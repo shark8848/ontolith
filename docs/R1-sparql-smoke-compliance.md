@@ -1,7 +1,7 @@
 # R1 SPARQL Smoke Compliance Profile
 
 文档 ID: COMP-R1-0001  
-版本: 1.1.0  
+版本: 1.2.0  
 日期: 2026-07-22  
 Crate: [`ontolith-compliance`](../crates/ontolith-compliance)
 
@@ -25,6 +25,8 @@ cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture
 Strict subset mode (no xfail / no skip):
 
 ```bash
+ONTOLITH_W3C_SUBSET_STRICT=1 ./scripts/ci-local.sh
+# backward-compatible alias:
 ONTOLITH_W3C_SUBSET_REQUIRED=1 ./scripts/ci-local.sh
 ```
 
@@ -68,10 +70,11 @@ Current unsupported:
 ## CI gating mode
 
 - `sparql_r1_smoke`: required (blocking).
-- `sparql_w3c_subset`: non-blocking (`continue-on-error: true`) during stabilization.
+- `sparql_w3c_subset`: required-lite (blocking must-pass regressions).
+- `sparql_w3c_subset_strict`: non-blocking observer (`ONTOLITH_W3C_SUBSET_STRICT=1`) for xfail/skip debt trend.
 
 ## Next
 
 1. Expand subset from current seed to 20-40 cases with feature-tagged skip/xfail.
-2. Promote `sparql_w3c_subset` to required after stable must-pass trend.
+2. Keep required-lite stable for at least 3 CI samples, then evaluate strict promotion.
 3. Move toward manifest-driven import of official W3C test artifacts.
