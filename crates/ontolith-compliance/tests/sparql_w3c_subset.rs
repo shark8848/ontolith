@@ -13,6 +13,7 @@ use ontolith_storage::infrastructure::{
 use ontolith_transaction::domain::TxnId;
 use std::sync::Arc;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaseClass {
     MustPass,
@@ -382,12 +383,15 @@ fn cases() -> Vec<W3cCase> {
             id: "w3c-subquery-gap",
             source: "W3C SPARQL 1.1 Query tests (subquery)",
             feature: "Subquery",
-            class: CaseClass::KnownGap,
-            reason: "subquery support is out of current R1 engine scope",
+            class: CaseClass::MustPass,
+            reason: "subquery baseline (nested SELECT + LIMIT)",
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/subquery_gap.rq"),
-            expected: None,
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 1,
+                vars: &["s"],
+            }),
         },
         W3cCase {
             id: "w3c-aggregate-gap",
