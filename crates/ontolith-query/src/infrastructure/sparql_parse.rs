@@ -5,8 +5,8 @@
 //! VALUES, DISTINCT, ORDER BY, LIMIT/OFFSET, PREFIX/BASE.
 
 use crate::domain::{
-    Algebra, Expression, OrderKey, QueryKind, QueryPlan, QueryPlanId, QueryRequest, TermPattern,
-    TriplePattern,
+    AggregateFunction, Algebra, Expression, OrderKey, QueryKind, QueryPlan, QueryPlanId,
+    QueryRequest, TermPattern, TriplePattern,
 };
 use ontolith_core::domain::{Iri, LiteralValue};
 use ontolith_core::error::OntolithError;
@@ -29,6 +29,11 @@ struct SparqlParser<'a> {
     prefixes: BTreeMap<String, String>,
     base: Option<String>,
     logical: Vec<String>,
+}
+
+struct SelectCountProjection {
+    variable: Option<String>,
+    output: String,
 }
 
 impl<'a> SparqlParser<'a> {
@@ -101,6 +106,7 @@ impl<'a> SparqlParser<'a> {
 
         let mut distinct = false;
         let mut select_vars: Vec<String> = Vec::new();
+        let mut select_count_projection: Option<SelectCountProjection> = None;
         let mut construct_template = Vec::new();
 
         if kind == QueryKind::Select {
@@ -157,6 +163,20 @@ impl<'a> SparqlParser<'a> {
                 object: TermPattern::Variable("o".into()),
             }])
         };
+                self.skip();
+                if self.peek_char() == Some('(') {
+                    if !select_vars.is_empty() {
+                        return Err(OntolithError::query(
+                            "mixed aggregate and non-aggregate projection requires GROUP BY",
+                        ));
+                    }
+                    let projection = self.parse_select_count_projection()?;
+                    self.logical
+                        .push(format!("aggregate:count:as=?{}", projection.output));
+                    select_vars.push(projection.output.clone());
+                    select_count_projection = Some(projection);
+                    self.skip();
+                }
         // Legacy `# subject=N` specializes unbound subjects even when WHERE is present.
         if let Some(hint_subj) = parse_subject_hint(self.input)?
             && apply_subject_hint(&mut body, hint_subj)
@@ -165,8 +185,25 @@ impl<'a> SparqlParser<'a> {
         }
         self.logical.push(format!("where:{}", algebra_tag(&body)));
 
+            if distinct && select_count_projection.is_some() {
+                return Err(OntolithError::query(
+                    "DISTINCT with aggregate projection is not yet supported",
+                ));
+            }
+
         // solution modifiers
         let mut algebra = body;
+
+        if let Some(aggregate) = select_count_projection {
+            algebra = Algebra::Aggregate {
+                function: AggregateFunction::Count {
+                    variable: aggregate.variable,
+                },
+                output: aggregate.output,
+                input: Box::new(algebra),
+            };
+        }
+
         self.skip();
 
         // ORDER BY
@@ -318,6 +355,37 @@ impl<'a> SparqlParser<'a> {
         }
         self.expect_char('}')?;
         Ok(patterns)
+    }
+
+    fn parse_select_count_projection(&mut self) -> Result<SelectCountProjection, OntolithError> {
+        self.expect_char('(')?;
+        self.skip();
+        if !self.eat_keyword("COUNT") {
+            return Err(self.err("only COUNT aggregate is currently supported"));
+        }
+        self.skip();
+        self.expect_char('(')?;
+        self.skip();
+
+        let variable = if self.peek_char() == Some('*') {
+            self.bump();
+            None
+        } else if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
+            Some(self.parse_var_name()?)
+        } else {
+            return Err(self.err("COUNT expects '*' or variable"));
+        };
+
+        self.skip();
+        self.expect_char(')')?;
+        self.skip();
+        self.expect_keyword("AS")?;
+        self.skip();
+        let output = self.parse_var_name()?;
+        self.skip();
+        self.expect_char(')')?;
+
+        Ok(SelectCountProjection { variable, output })
     }
 
     fn parse_group_graph_pattern(&mut self) -> Result<Algebra, OntolithError> {
@@ -1049,7 +1117,8 @@ fn apply_subject_hint(algebra: &mut Algebra, node: ontolith_core::domain::NodeId
         | Algebra::Distinct { input }
         | Algebra::Project { input, .. }
         | Algebra::OrderBy { input, .. }
-        | Algebra::Slice { input, .. } => apply_subject_hint(input, node),
+        | Algebra::Slice { input, .. }
+        | Algebra::Aggregate { input, .. } => apply_subject_hint(input, node),
         _ => false,
     }
 }
@@ -1061,6 +1130,7 @@ fn algebra_tag(a: &Algebra) -> &'static str {
         Algebra::LeftJoin { .. } => "leftjoin",
         Algebra::Union { .. } => "union",
         Algebra::Filter { .. } => "filter",
+        Algebra::Aggregate { .. } => "aggregate",
         Algebra::Identity => "identity",
         _ => "algebra",
     }
@@ -1137,6 +1207,21 @@ fn walk_physical(algebra: &Algebra, steps: &mut Vec<String>) {
         } => {
             walk_physical(input, steps);
             steps.push(format!("slice:{offset}:{limit:?}"));
+        }
+        Algebra::Aggregate {
+            function,
+            output,
+            input,
+        } => {
+            walk_physical(input, steps);
+            match function {
+                AggregateFunction::Count { variable: None } => {
+                    steps.push(format!("aggregate_count:*->{output}"));
+                }
+                AggregateFunction::Count { variable: Some(v) } => {
+                    steps.push(format!("aggregate_count:?{v}->?{output}"));
+                }
+            }
         }
     }
 }

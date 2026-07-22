@@ -524,4 +524,49 @@ mod tests {
             .expect_err("update");
         assert!(matches!(err, OntolithError::Unsupported(_)));
     }
+
+    #[test]
+    fn aggregate_count_without_group_by() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT (COUNT(?s) AS ?c) WHERE { ?s ?p ?o }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(result.variables, vec!["c".to_string()]);
+        assert_eq!(
+            result.solutions[0].get("c"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(4)))
+        );
+    }
+
+    #[test]
+    fn aggregate_count_star_without_group_by() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("c"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(4)))
+        );
+    }
+
+    #[test]
+    fn aggregate_mixed_projection_without_group_by_rejected() {
+        let planner = SimpleQueryPlanner;
+        let err = planner
+            .plan(&QueryRequest::new(
+                "SELECT ?s (COUNT(?s) AS ?c) WHERE { ?s ?p ?o }",
+            ))
+            .expect_err("mixed projection requires group by");
+        assert!(matches!(err, OntolithError::Failed(_)));
+        assert!(err.message().contains("GROUP BY"));
+    }
 }

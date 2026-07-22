@@ -92,6 +92,15 @@ fn eliminate_identity(algebra: Algebra) -> Algebra {
             limit,
             input: Box::new(eliminate_identity(*input)),
         },
+        Algebra::Aggregate {
+            function,
+            output,
+            input,
+        } => Algebra::Aggregate {
+            function,
+            output,
+            input: Box::new(eliminate_identity(*input)),
+        },
         other => other,
     }
 }
@@ -157,6 +166,15 @@ fn reorder_and_merge(algebra: Algebra) -> Algebra {
         } => Algebra::Slice {
             offset,
             limit,
+            input: Box::new(reorder_and_merge(*input)),
+        },
+        Algebra::Aggregate {
+            function,
+            output,
+            input,
+        } => Algebra::Aggregate {
+            function,
+            output,
             input: Box::new(reorder_and_merge(*input)),
         },
         other => other,
@@ -244,6 +262,15 @@ fn push_filters(algebra: Algebra) -> Algebra {
         } => Algebra::Slice {
             offset,
             limit,
+            input: Box::new(push_filters(*input)),
+        },
+        Algebra::Aggregate {
+            function,
+            output,
+            input,
+        } => Algebra::Aggregate {
+            function,
+            output,
             input: Box::new(push_filters(*input)),
         },
         other => other,

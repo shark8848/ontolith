@@ -86,6 +86,13 @@ pub enum Expression {
     GreaterEq(Box<Expression>, Box<Expression>),
 }
 
+/// Aggregate function subset for SELECT projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateFunction {
+    /// COUNT(*) when `variable` is None, COUNT(?v) otherwise.
+    Count { variable: Option<String> },
+}
+
 /// SPARQL algebra (W3C-style subset used by the executor).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Algebra {
@@ -131,6 +138,11 @@ pub enum Algebra {
     Slice {
         offset: usize,
         limit: Option<usize>,
+        input: Box<Algebra>,
+    },
+    Aggregate {
+        function: AggregateFunction,
+        output: String,
         input: Box<Algebra>,
     },
     /// Empty identity multiset (one empty solution) — unit for joins.
@@ -233,6 +245,17 @@ pub fn summarize_algebra(algebra: &Algebra) -> String {
             "Slice(offset={offset}, limit={limit:?}, {})",
             summarize_algebra(input)
         ),
+        Algebra::Aggregate {
+            function,
+            output,
+            input,
+        } => {
+            let fun = match function {
+                AggregateFunction::Count { variable: None } => "COUNT(*)".to_string(),
+                AggregateFunction::Count { variable: Some(v) } => format!("COUNT(?{v})"),
+            };
+            format!("Aggregate({fun} AS ?{output}, {})", summarize_algebra(input))
+        }
     }
 }
 

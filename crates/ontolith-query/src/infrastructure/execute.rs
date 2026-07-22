@@ -2,8 +2,8 @@
 
 use crate::application::QueryReadService;
 use crate::domain::{
-    Algebra, BoundValue, Expression, QueryKind, QueryPlan, QueryRequest, QueryResult, Solution,
-    TermPattern, TriplePattern,
+    AggregateFunction, Algebra, BoundValue, Expression, QueryKind, QueryPlan, QueryRequest,
+    QueryResult, Solution, TermPattern, TriplePattern,
 };
 use ontolith_core::domain::{Iri, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
@@ -282,7 +282,31 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
                 None => skipped.collect(),
             })
         }
+        Algebra::Aggregate {
+            function,
+            output,
+            input,
+        } => eval_aggregate(function, output, input, ctx),
     }
+}
+
+fn eval_aggregate(
+    function: &AggregateFunction,
+    output: &str,
+    input: &Algebra,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Solution>, OntolithError> {
+    let rows = eval_algebra(input, ctx)?;
+    let count = match function {
+        AggregateFunction::Count { variable: None } => rows.len(),
+        AggregateFunction::Count { variable: Some(v) } => {
+            rows.iter().filter(|s| s.get(v).is_some()).count()
+        }
+    };
+
+    let mut out = Solution::new();
+    out.insert(output.to_owned(), BoundValue::Literal(LiteralValue::Integer(count as i64)));
+    Ok(vec![out])
 }
 
 fn eval_bgp(patterns: &[TriplePattern], ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, OntolithError> {
@@ -594,7 +618,8 @@ fn select_variables(algebra: &Algebra) -> Vec<String> {
         | Algebra::OrderBy { input, .. }
         | Algebra::Distinct { input }
         | Algebra::Filter { input, .. }
-        | Algebra::Extend { input, .. } => select_variables(input),
+        | Algebra::Extend { input, .. }
+        | Algebra::Aggregate { input, .. } => select_variables(input),
         _ => Vec::new(),
     }
 }
