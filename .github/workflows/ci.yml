@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system deps (RocksDB)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-dev pkg-config libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace --all-targets
+
+      - name: SPARQL R1 smoke (integration)
+        run: cargo test -p ontolith-compliance --test sparql_r1_smoke -- --nocapture
+
+  # Exploratory gate: W3C-inspired subset runs in CI but does not block merges
+  # until coverage stabilizes and known gaps are closed.
+  w3c-subset:
+    name: sparql w3c subset (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+
+      - name: SPARQL W3C subset (integration)
+        run: cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture
+
+  # Optional slower job: rocksdb feature is default on server/storage;
+  # kept separate so failures are obvious in the matrix later.
+  rocksdb-smoke:
+    name: rocksdb reopen smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+      - name: storage rocksdb tests
+        run: cargo test -p ontolith-storage --features rocksdb-backend -- --nocapture
+      - name: server rocksdb backend test
+        run: cargo test -p ontolith-server --features rocksdb-backend rocksdb_backend -- --nocapture

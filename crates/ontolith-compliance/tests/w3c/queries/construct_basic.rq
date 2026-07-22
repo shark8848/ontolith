@@ -1,0 +1,6 @@
+CONSTRUCT {
+  ?s <http://ex.org/link> ?o .
+}
+WHERE {
+  ?s <http://ex.org/knows> ?o .
+}

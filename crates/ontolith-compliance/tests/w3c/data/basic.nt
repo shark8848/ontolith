@@ -1,0 +1,5 @@
+<http://ex.org/alice> <http://ex.org/knows> <http://ex.org/bob> .
+<http://ex.org/alice> <http://ex.org/name> "Alice" .
+<http://ex.org/bob> <http://ex.org/knows> <http://ex.org/carol> .
+<http://ex.org/bob> <http://ex.org/age> "30" .
+<http://ex.org/carol> <http://ex.org/name> "Carol" .

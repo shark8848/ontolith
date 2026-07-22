@@ -1,0 +1,5 @@
+SELECT ?x WHERE {
+  { ?x <http://ex.org/name> ?n }
+  UNION
+  { ?x <http://ex.org/age> ?a }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "ontolith-compliance"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "R1 SPARQL / RDF compliance smoke harness (not full W3C suite)"
+
+[dependencies]
+ontolith-core = { path = "../ontolith-core" }
+ontolith-rdf = { path = "../ontolith-rdf" }
+ontolith-query = { path = "../ontolith-query" }
+ontolith-storage = { path = "../ontolith-storage", default-features = false }
+ontolith-transaction = { path = "../ontolith-transaction" }
+ontolith-parser = { path = "../ontolith-parser" }
+
+[[test]]
+name = "sparql_r1_smoke"
+path = "tests/sparql_r1_smoke.rs"
+
+[[test]]
+name = "sparql_w3c_subset"
+path = "tests/sparql_w3c_subset.rs"

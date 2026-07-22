@@ -5,7 +5,7 @@
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-12 工作区；Git 基线: `main` @ `8d7eca1`（2026-07-17 推送）
+对照代码快照: 2026-07-22（L0–L5 + CI/合规烟雾 + W3C 子集门禁 + 文件审计）；Git 基线: `main` @ `8d7eca1`（后续本地增量未全部推送）
 
 ---
 
@@ -38,27 +38,42 @@
 
 | 维度 | 状态 | 完成度 | 备注 |
 |------|------|--------|------|
-| 仓库与 crate 骨架 | 部分完成 | ~85% | 13 crate 已拆分；根仓库无 commit |
-| Phase 0 规划与治理 | 未开始 | ~10% | 仅有计划草稿；adr/rfc 空 |
-| Phase 1 核心模型与存储抽象 | 部分完成 | ~35% | 基础类型 + trait；KO 模型不全 |
-| Phase 2 持久化与事务内核 | 部分完成 | ~40% | 内存路径较完整；无 RocksDB |
-| Phase 3 查询引擎 MVP | 部分完成 | ~12% | 极简 SELECT；非真 SPARQL |
-| Phase 4 集群与一致性 MVP | 未开始 | ~5% | 仅领域类型 |
-| Phase 5 接入层与安全基线 | 部分完成 | ~18% | 指标采样有；网关/鉴权无 |
+| 仓库与 crate 骨架 | 部分完成 | ~95% | 14 crate（+compliance）；Git 已有基线提交 |
+| Phase 0 规划与治理 | 部分完成 | ~55% | 台账 + ADR 模板 + RFC 模板 + 依赖登记；签批仍缺 |
+| Phase 1 核心模型与存储抽象 | 部分完成 | ~70% | L0/L1 文档化；ConsistencyLevel；存储契约固化 |
+| Phase 2 持久化与事务内核 | 部分完成 | ~85% | 内存六索引 + RocksDB 耐久；无真 MVCC / 纯 CF 扫描 |
+| Phase 3 查询引擎 | 部分完成 | ~78% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + W3C 子集门禁（non-blocking）；缺属性路径/聚合/Update |
+| Phase 4 集群与一致性 MVP | 部分完成 | ~80% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API；无多进程 Raft |
+| Phase 5 接入层与安全基线 | 部分完成 | ~80% | HTTP 全路由 + 文件审计 + cluster 权限；无 TLS/OIDC |
 | Phase 6 推理与验证 | 未开始 | ~5% | 仅类型占位 |
-| Phase 7 企业运维与发布 | 未开始 | ~0% | 目录空、无 CI |
+| Phase 7 企业运维与发布 | 部分完成 | ~15% | GitHub Actions CI + 本地 ci-local；无发布/回滚 |
 | Phase 8 AI-Native 扩展 | 未开始 | 0% | — |
-| **相对 R1 退出标准** | **进行中** | **~20%** | 未达可验收 MVP |
-| **相对 R1–R4 全计划** | **进行中** | **~8%** | — |
+| **分层内核 L0–L3** | **部分完成** | **~80%** | 语义+存储+查询主路径可用 |
+| **相对 R1 退出标准** | **进行中** | **~64–67%** | 内核+HTTP+集群+CI/烟雾合规 + W3C 子集；多节点数据面/W3C 全量/SLO 仍缺 |
+| **相对 R1–R4 全计划** | **进行中** | **~12–15%** | — |
+
+### 架构分层完成度（实现视图）
+
+| 层 | 完成度 | 状态 |
+|----|--------|------|
+| L0 core | ~85% | KO/Canonical/Error/ConsistencyLevel |
+| L1 rdf | ~80% | Triple/Quad/Dataset |
+| L2 storage/txn | ~85% | 内存+RocksDB |
+| L3 parser/query | ~78% | 完整核心，非仅 MVP；新增 W3C 子集运行器 |
+| L4 cluster | ~80% | +session/partition/rebalance/commit + HTTP /cluster；14 测 |
+| L5 server/security/obs | ~80% | 双后端、文件审计、Results JSON、ingest、增强指标 |
+| L6 reasoner | ~5% | 占位 |
+| L7 平台工程 | ~15% | CI workflow + ci-local + compliance crate |
+| L8 AI-Native | 0% | — |
 
 ### 当前焦点
 
 | 优先级 | 焦点 | 负责人 | 目标日期 |
 |--------|------|--------|----------|
-| P0 | 建立进度台账与首次 Git 基线 | — | 2026-07-17 已完成 |
-| P1 | 补完 Phase 0 治理模板 | TBD | TBD |
-| P2 | 夯实 Phase 1 Knowledge Object | TBD | TBD |
-| P3 | Phase 2 RocksDB 适配启动 | TBD | TBD |
+| P0 | CI 与 SPARQL R1 烟雾门禁 | — | 2026-07-17 已完成基线 |
+| P1 | W3C 官方测试子集接入 / 性能基线 | TBD | 进行中（2026-07-22 起） |
+| P2 | TLS 或 OIDC 最小安全加固 | TBD | TBD |
+| P3 | 多进程 Raft ADR / openraft | TBD | TBD |
 
 ---
 
@@ -69,9 +84,9 @@
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
 | P0-01 | 已批准范围基线 | 未开始 | 0% | 计划仍为 Draft | 评审并签批 PLAN-0001 |
-| P0-02 | 架构例外审批模板 | 未开始 | 0% | `adr/` 空 | 新增 ADR 模板 |
-| P0-03 | 依赖登记模板与评审规则 | 未开始 | 0% | — | 新增依赖登记表 |
-| P0-04 | RFC 流程落地 | 未开始 | 0% | `rfc/` 空 | 新增 RFC 模板 |
+| P0-02 | 架构例外审批模板 | 已完成 | 100% | [adr/0000-template.md](../adr/0000-template.md) + ADR-0001/0002 | 按需新增 ADR |
+| P0-03 | 依赖登记模板与评审规则 | 部分完成 | 70% | [DEPENDENCY_REGISTER.md](./DEPENDENCY_REGISTER.md) | 持续维护 + CI 审计 |
+| P0-04 | RFC 流程落地 | 部分完成 | 40% | [rfc/0000-template.md](../rfc/0000-template.md) | 首个实质 RFC 试用 |
 | P0-05 | 进度台账 | 已完成 | 100% | 本文档 | 按增量维护 |
 
 **阶段退出条件：** P0-01～P0-04 均为已完成。
@@ -82,10 +97,10 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P1-01 | Knowledge Object 领域模型 | 部分完成 | 25% | `ontolith-core`/`ontolith-rdf` 基础类型 | 对齐 SAS-0401 补 Resource/Statement/Graph/Ontology |
-| P1-02 | Node 标识与字典管理器 | 部分完成 | 50% | `InMemoryDictionary` | 持久字典契约 + 并发语义 |
-| P1-03 | 存储抽象接口 | 部分完成 | 60% | `StorageEngine` 等 trait | 契约文档与错误语义固化 |
-| P1-04 | 确定性标识与规范化编码规则 | 未开始 | 0% | — | 定义 canonical encoding 规范 |
+| P1-01 | Knowledge Object 领域模型 | 部分完成 | 70% | L0 KO + L1 Statement/Graph/Dataset；见 IMPL-L0/L1 文档 | Part II 序列化；Ontology 载荷联动 reasoner |
+| P1-02 | Node 标识与字典管理器 | 部分完成 | 75% | 内存字典 + RocksDB 持久字典 | 并发字典契约文档 |
+| P1-03 | 存储抽象接口 | 部分完成 | 90% | stats/matching/snapshot_with/delete 精确 API | 版本冻结说明 |
+| P1-04 | 确定性标识与规范化编码规则 | 部分完成 | 90% | 六置换物理键 + triple/quad set key | 独立编码 RFC；磁盘布局 |
 
 **阶段退出条件：** P1-01～P1-04 达到可被 Phase 2 依赖的稳定契约。
 
@@ -95,12 +110,12 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P2-01 | RocksDB 适配（抽象层下） | 未开始 | 0% | 无依赖/适配器 | 引入绑定并实现 StorageEngine |
-| P2-02 | WAL / 快照恢复 / MVCC 基线 | 部分完成 | 55% | 内存 WAL、恢复、事务内可见性 | 磁盘 WAL + 真 MVCC 读快照 |
-| P2-03 | 三元组/四元组物理编码 | 未开始 | 0% | — | 设计二进制编码 |
-| P2-04 | 索引基线 SPO/POS/OSP | 部分完成 | 30% | 仅 SPO 投影 | 补 POS/OSP |
-| P2-05 | 可恢复耐久写入路径 | 部分完成 | 40% | 内存路径 + 单测 | RocksDB 耐久路径 |
-| P2-06 | 事务行为规范文档 | 未开始 | 0% | — | 撰写事务语义说明 |
+| P2-01 | RocksDB 适配（抽象层下） | 部分完成 | 80% | `RocksDbStorageEngine` + CF + ADR-0001 | 纯 CF 索引扫描；运维参数调优 |
+| P2-02 | WAL / 快照恢复 / MVCC 基线 | 部分完成 | 75% | 内存+Rocks WAL CF、reopen 恢复、snapshot+consistency | 真 MVCC 版本链 |
+| P2-03 | 三元组/四元组物理编码 | 部分完成 | 90% | codec + 六置换键 + CF 落盘 | 列族级索引键直接扫描 |
+| P2-04 | 索引基线 SPO/POS/OSP | 部分完成 | 95% | 六置换增量（内存侧）+ GraphIndex + matching | 命名图六置换；Async 维护 |
+| P2-05 | 可恢复耐久写入路径 | 部分完成 | 85% | RocksDB commit/reopen/delete 单测通过 | fsync 策略/备份演练 |
+| P2-06 | 事务行为规范文档 | 部分完成 | 95% | [L2 文档 v3](./L2-ontolith-storage-transaction-kernel.md) | 随真 MVCC 修订 |
 
 **阶段退出条件：** 耐久写入可恢复；至少 SPO/POS/OSP；事务文档发布。
 
@@ -110,11 +125,11 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P3-01 | SPARQL 解析到执行主链路 | 部分完成 | 10% | 极简 SELECT pipeline | 真 SPARQL 解析与代数 |
-| P3-02 | 规则优化基线 | 未开始 | 0% | — | 基础 rewrite 规则 |
-| P3-03 | Explain 输出 | 未开始 | 5% | 仅 steps 字符串 | 对外 Explain API |
-| P3-04 | 超时与取消 API | 未开始 | 0% | — | request 级 timeout/cancel |
-| P3-05 | MVP 标准符合性子集 | 未开始 | 0% | — | 选定 profile 与测试集 |
+| P3-01 | SPARQL 解析到执行主链路 | 部分完成 | 80% | SELECT/ASK/CONSTRUCT + JOIN/OPT/UNION/FILTER/BIND/VALUES | 属性路径/子查询/聚合 |
+| P3-02 | 规则优化基线 | 部分完成 | 55% | BGP 重排、Identity 消除、Filter 下推、POS/OSP 选路 | 代价模型/统计 |
+| P3-03 | Explain 输出 | 部分完成 | 85% | logical/physical/algebra + optimize 步骤 | HTTP Explain API |
+| P3-04 | 超时与取消 API | 部分完成 | 75% | timeout_ms + Arc\<AtomicBool\> cancel | 异步抢占/token |
+| P3-05 | MVP 标准符合性子集 | 部分完成 | 55% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 15 烟雾 + W3C 子集运行器（must-pass/known-gap/unsupported）+ CI non-blocking 作业 | 扩展到 20–40 case；稳定后转 required |
 
 **阶段退出条件：** MVP profile 查询可跑通；Explain/超时/取消可用。
 
@@ -124,11 +139,11 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P4-01 | 元数据服务与主从选举 | 未开始 | 5% | 领域类型占位 | 设计元数据 API |
-| P4-02 | Raft 控制基线 | 未开始 | 0% | — | 选型与 ADR |
-| P4-03 | 单区域分片与复制 | 未开始 | 5% | `ShardId`/`ReplicaSet` | 分片映射实现 |
-| P4-04 | 故障转移基线 | 未开始 | 0% | — | 故障注入场景 |
-| P4-05 | 读一致性级别与 API 说明 | 未开始 | 0% | — | 定义一致性枚举与文档 |
+| P4-01 | 元数据服务与主从选举 | 部分完成 | 85% | membership/status + bootstrap + 分区感知选主 | 多进程 RPC |
+| P4-02 | Raft 控制基线 | 部分完成 | 55% | 任期/日志 + **commit_index 多数派**；ADR-0002 | openraft |
+| P4-03 | 单区域分片与复制 | 部分完成 | 85% | hash slot + lag + **rebalance** | 跨节点数据搬迁 |
+| P4-04 | 故障转移基线 | 部分完成 | 85% | failover + **partition 注入/愈合** | 真实网络分区 |
+| P4-05 | 读一致性级别与 API 说明 | 部分完成 | 95% | Session 粘性 + [L4 文档 v2](./L4-ontolith-cluster-consistency.md) + **/cluster HTTP** | — |
 
 **阶段退出条件：** 单区域复制 + 选主/故障转移可演示。
 
@@ -138,11 +153,11 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P5-01 | 网关与服务接入边界 | 未开始 | 10% | bootstrap 打印，无监听 | HTTP/gRPC 接入 |
-| P5-02 | 鉴权 / 授权 | 部分完成 | 15% | `AuthContext::can` | 中间件与策略引擎 |
-| P5-03 | 租户隔离 | 未开始 | 10% | `TenantId` 类型 | 请求路径强制隔离 |
-| P5-04 | 审计日志 | 未开始 | 0% | — | 审计事件模型 |
-| P5-05 | 指标 / 追踪 / 日志基线 | 部分完成 | 40% | 指标采样 + Prometheus 文本 | 接入 Tracing 与结构化日志 |
+| P5-01 | 网关与服务接入边界 | 部分完成 | 85% | 全路由 + memory/rocksdb 工厂 + SPARQL Results JSON | TLS；gRPC |
+| P5-02 | 鉴权 / 授权 | 部分完成 | 60% | Header/API-Key + Permission + `cluster:admin` | OIDC/JWT |
+| P5-03 | 租户隔离 | 部分完成 | 55% | 审计租户过滤 + `tenant_graph` 写入命名图 | 强制分库/行级 |
+| P5-04 | 审计日志 | 部分完成 | 80% | 内存 + `FileAuditLog` JSONL（`ONTOLITH_AUDIT_PATH`） | 哈希链/不可篡改 |
+| P5-05 | 指标 / 追踪 / 日志基线 | 部分完成 | 70% | 延迟/状态码/错误计数 + access log | Tracing 全链路 |
 
 **阶段退出条件：** 安全基线挂在真实请求路径；统一遥测可用。
 
@@ -166,7 +181,7 @@
 |----|--------|------|--------|------|----------|
 | P7-01 | 在线重平衡与灾备演练 | 未开始 | 0% | — | 演练手册骨架 |
 | P7-02 | 性能回归门禁与 SLO 看板 | 未开始 | 0% | `benchmarks/` 空 | 基线基准用例 |
-| P7-03 | 发布流水线与回滚验证 | 未开始 | 0% | 无 CI | 最小 CI 门禁 |
+| P7-03 | 发布流水线与回滚验证 | 部分完成 | 25% | [.github/workflows/ci.yml](../.github/workflows/ci.yml) + `scripts/ci-local.sh` | 发布/回滚手册 |
 | P7-04 | 运维手册与证据包 | 未开始 | 0% | — | 按阶段产出 |
 
 **阶段退出条件：** CI 门禁、演练证据、发布/回滚手册齐备。
@@ -191,16 +206,16 @@
 
 | 检查项 | 状态 | 备注 |
 |--------|------|------|
-| [ ] RDF 核心运行时可验收 | 未完成 | 模型与解析未闭环 |
-| [ ] SPARQL 查询基线 | 未完成 | 非真 SPARQL |
-| [ ] 单区域集群核心 | 未完成 | 仅类型 |
-| [ ] 安全与审计基线 | 未完成 | 无请求路径 |
-| [ ] 标准符合性门禁通过 | 未完成 | 无测试集 |
+| [~] RDF 核心运行时可验收 | 部分完成 | L0–L3 + 解析/存储闭环；缺正式验收包 |
+| [~] SPARQL 查询基线 | 部分完成 | SELECT/ASK/CONSTRUCT 核心；非完整 1.1 |
+| [~] 单区域集群核心 | 部分完成 | 控制面可测+HTTP 演示；无多节点数据面 |
+| [~] 安全与审计基线 | 部分完成 | HTTP 鉴权+审计+JSONL 落盘；无 OIDC |
+| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（non-blocking）；无完整 W3C 套件 |
 | [ ] 核心 SLO 基线达标 | 未完成 | 无基准 |
-| [ ] 恢复演练通过 | 未完成 | 仅内存 WAL 单测 |
+| [~] 恢复演练通过 | 部分完成 | RocksDB reopen 单测；无演练手册 |
 | [ ] 回滚演练通过 | 未完成 | 无发布链路 |
 
-**R1 判定：** 未达退出标准（约 20%）。
+**R1 判定：** 未达退出标准（约 **57–62%**；内核+HTTP+集群控制面可演示，已引入 W3C 子集门禁；多节点数据面/符合性全量/SLO 仍缺）。
 
 ### R2
 
@@ -236,14 +251,14 @@
 
 | WBS | 名称 | 状态 | 完成度 | 主要缺口 |
 |-----|------|------|--------|----------|
-| WBS-01 | 核心运行时与知识模型 | 部分完成 | ~25% | 完整 KO、规范编码 |
-| WBS-02 | 解析与导入 | 未开始 | ~5% | 仅类型；无解析实现 |
-| WBS-03 | 存储与事务 | 部分完成 | ~40% | RocksDB、编码、POS/OSP、文档 |
-| WBS-04 | 查询与优化 | 部分完成 | ~12% | 真 SPARQL 全链路 |
+| WBS-01 | 核心运行时与知识模型 | 部分完成 | ~70% | L0+L1；Part II 序列化仍缺 |
+| WBS-02 | 解析与导入 | 部分完成 | ~80% | N-T/N-Q/Turtle/TriG/流式；JSON-LD 未做 |
+| WBS-03 | 存储与事务 | 部分完成 | ~85% | RocksDB 已接；真 MVCC / 纯 CF 扫描仍缺 |
+| WBS-04 | 查询与优化 | 部分完成 | ~72% | 完整核心代数+优化+绑定 + W3C 子集门禁；缺属性路径/聚合 |
 | WBS-05 | 推理与 SHACL | 未开始 | ~5% | 全部实现 |
-| WBS-06 | 分布式运行时 | 未开始 | ~5% | 共识/复制/故障转移 |
-| WBS-07 | API、安全与集成 | 部分完成 | ~15% | 网关、鉴权、审计、插件宿主 |
-| WBS-08 | 平台工程 | 未开始 | ~5% | CI/CD、审计、手册；局部指标除外 |
+| WBS-06 | 分布式运行时 | 部分完成 | ~75% | 控制面增强+HTTP；无多进程数据复制 |
+| WBS-07 | API、安全与集成 | 部分完成 | ~75% | 双后端网关+文件审计+Results JSON+ingest；无 TLS/OIDC |
+| WBS-08 | 平台工程 | 部分完成 | ~20% | CI workflow + compliance crate；无发布/SLO |
 
 ---
 
@@ -251,27 +266,29 @@
 
 | 门禁/治理项 | 状态 | 证据 / 缺口 |
 |-------------|------|-------------|
-| [ ] RDF/SPARQL 标准测试 | 未开始 | — |
+| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（含 skip/xfail 分类）；非完整 W3C 官方 |
 | [ ] 故障注入（选主/复制/恢复） | 未开始 | — |
 | [ ] 幂等写入验证 | 未开始 | 部分事务单测不足替代 |
 | [ ] 性能回归门禁 | 未开始 | `benchmarks/` 空 |
 | [ ] 鉴权与租户隔离测试 | 未开始 | — |
 | [ ] 许可证与漏洞审计 CI | 未开始 | — |
-| [ ] `cargo fmt` / `clippy -D warnings` CI | 未开始 | 无流水线 |
-| [ ] 全量测试 CI | 未开始 | 本地可跑部分单测 |
+| [x] `cargo fmt` / `clippy -D warnings` CI | 已完成 | GitHub Actions + `scripts/ci-local.sh` |
+| [x] 全量测试 CI | 已完成 | workspace + rocksdb-smoke job |
 | [ ] Miri/sanitizer（敏感模块） | 未开始 | — |
 | [~] Cargo.lock 可复现构建 | 部分完成 | lock 已有；第三方运行时依赖几乎未接入 |
-| [ ] Tier A 依赖 RFC/ADR | 未开始 | adr/rfc 空 |
-| [ ] 依赖登记（owner/风险/回退） | 未开始 | — |
+| [x] Tier A 依赖 RFC/ADR | 已完成 | ADR-0001 RocksDB |
+| [x] 依赖登记（owner/风险/回退） | 已完成 | DEPENDENCY_REGISTER.md |
 | [x] 首次 Git 提交基线 | 已完成 | `main` @ `8d7eca1` → `origin/main`（含 docs + 13 crates + LICENSE） |
+| [x] Tier A RocksDB ADR/登记 | 已完成 | ADR-0001 + DEPENDENCY_REGISTER |
 
 ### 已有测试资产（事实清单，非门禁通过）
 
 | Crate | 测试覆盖概要 | 路径 |
 |-------|--------------|------|
-| ontolith-storage | 字典、写批、abort 可见性、WAL 恢复/checkpoint、metrics | `crates/ontolith-storage/src/infrastructure/mod.rs` |
+| ontolith-storage | 内存六索引 + RocksDB 耐久（reopen/abort/delete）+ codec（35 测） | `crates/ontolith-storage/src/infrastructure/**` |
 | ontolith-transaction | begin/commit/abort、超时清理、active 上限、metrics | `crates/ontolith-transaction/src/infrastructure/mod.rs` |
-| ontolith-query | select all/by subject、txn 可见性、pipeline 拒绝非 SELECT | `crates/ontolith-query/src/infrastructure/mod.rs` |
+| ontolith-query | SELECT/ASK、POS/OSP、LIMIT、Explain、timeout、hint | `crates/ontolith-query/src/infrastructure/**` |
+| ontolith-parser | N-Triples/N-Quads、blank、错误、Unsupported 格式 | `crates/ontolith-parser/src/infrastructure/**` |
 | ontolith-observability | sink、导出、采样循环、Prometheus 文本 | `crates/ontolith-observability/src/**` |
 | ontolith-server | metrics path、采样配置解析 | `crates/ontolith-server/src/{api,bootstrap}/mod.rs` |
 
@@ -283,6 +300,21 @@
 |------|------|------|
 | 2026-07-15 | Claude Code | 初建台账 PROG-0001；基于 PLAN-0001 与工作区代码对照录入基线完成度 |
 | 2026-07-17 | Claude Code | 移除 crates 嵌套 `.git`；提交 docs+crates 基线并推送 `origin/main`（`8d7eca1`） |
+| 2026-07-17 | Claude Code | L0：`ontolith-core` 落地 SAS-0401 KO 基座（identity/resource/knowledge/canonical/error）；11 单测通过，下游 crate 回归绿 |
+| 2026-07-17 | Claude Code | 新增 `docs/L0-...Foundation.md`；L1：`ontolith-rdf` Term/Triple/Quad/Dataset + KO 桥接 + canonical；11 单测；下游回归绿；`docs/L1-...Dataset.md` |
+| 2026-07-17 | Claude Code | L2：SPO/POS/OSP 编码与内存索引、字典契约增强、StorageEngine 查询扩展；storage 24 测；`docs/L2-...kernel.md` |
+| 2026-07-17 | Claude Code | L3：parser N-Triples/N-Quads；query SPARQL SELECT/ASK 子集 + algebra/explain/timeout；`docs/L3-...query.md` |
+| 2026-07-17 | Claude Code | L3 完整化 v2：Turtle/TriG/流式错误；SPARQL JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/优化/Solution 绑定/cancel；parser11+query21 测 |
+| 2026-07-17 | Claude Code | L2 v2：增量六索引、精确删/去重、GraphIndex、StorageStats、ConsistencyLevel、matching；L3 接入 matching；storage 30 测；L2 文档 v2 |
+| 2026-07-17 | Claude Code | L2 v3 / P2-01：RocksDB 适配（CF、崩溃恢复、feature 门控）、ADR-0001、依赖登记；storage 35 测；L2 文档 v3 |
+| 2026-07-17 | Claude Code | 进度回写：分层 L0–L8 仪表盘、R1 上修至 35–40%、焦点切 L5 HTTP 接入 |
+| 2026-07-17 | Claude Code | L5：HTTP 网关 /sparql/explain/metrics/health/audit/data/nt；Header 鉴权+审计；server6+security5 测；L5 文档 |
+| 2026-07-17 | Claude Code | L5 v2：EngineTripleRepository、RocksDB 切换、Turtle/TriG/NQ 写入、SPARQL Results JSON、/ready、增强 metrics/access log、tenant_graph；server 8 测 |
+| 2026-07-17 | Claude Code | L4：InMemoryClusterRuntime（选主/分片/复制/failover/一致性路由）；10 测；ADR-0002；L4 文档 |
+| 2026-07-17 | Claude Code | L4 v2：session 粘性、commit_index、partition、rebalance、ClusterStatus；L5 /cluster/*；cluster 14 + server 9 测 |
+| 2026-07-17 | Claude Code | L5 systemd：user unit + install 脚本；release 二进制；服务 active @ 127.0.0.1:8090 |
+| 2026-07-17 | Claude Code | 平台工程：ADR/RFC 模板、GitHub Actions CI、`scripts/ci-local.sh`、`ontolith-compliance` R1 烟雾 15、FileAuditLog 审计落盘、clippy 清零；R1 ~62–65% |
+| 2026-07-22 | GitHub Copilot | 合规增量：新增 `sparql_w3c_subset`（must-pass/known-gap/unsupported 分类、strict 开关）、`tests/w3c/*` 子集样例、CI `w3c-subset` non-blocking 作业、本地 `ci-local.sh` 可选 required 模式；更新 `R1-sparql-smoke-compliance.md` |
 
 ---
 
@@ -292,18 +324,18 @@
 
 - [x] 建立 `docs/PROGRESS.md` 进度台账
 - [x] 根仓库首次 commit（文档 + 骨架 + 现有实现）作为进度基线（`main` / `8d7eca1`）
-- [ ] 新增 `adr/0000-template.md` 与 `rfc/0000-template.md`
-- [ ] 新增依赖登记表（Tier / owner / 风险 / 回退）
+- [x] 新增 ADR-0001（RocksDB）与依赖登记表
+- [x] 新增通用 `adr/0000-template.md` / `rfc/0000-template.md`
 - [ ] 确认 Stream A/B/C/D 负责人并回填 §2 焦点表
 
 ### R1 关键路径（按依赖序）
 
-1. [ ] Phase 0 签批与模板
-2. [ ] Phase 1 KO 模型 + 存储契约文档
-3. [ ] Phase 2 RocksDB + 多索引 + 事务文档
-4. [ ] Phase 3 真 SPARQL MVP + Explain/超时
-5. [ ] Phase 4 单区域集群最小闭环（可与 3 并行）
-6. [ ] Phase 5 网关 + 鉴权/租户/审计 + Tracing
+1. [~] Phase 0 签批与模板（模板齐；签批未做）
+2. [~] Phase 1 KO 模型 + 存储契约文档
+3. [~] Phase 2 RocksDB + 多索引 + 事务文档
+4. [~] Phase 3 真 SPARQL MVP + Explain/超时 + R1 烟雾
+5. [~] Phase 4 单区域集群最小闭环（可与 3 并行）
+6. [~] Phase 5 网关 + 鉴权/租户/审计落盘（Tracing/OIDC 仍缺）
 7. [ ] R1 退出标准全表勾选
 
 ---
@@ -315,3 +347,12 @@
 - [软件架构规范](./Ontolith_Software_Architecture_Specification.md)
 - [SAS-0401 Knowledge Object Model](./SAS-0401%20—%20Knowledge%20Object%20Model.md)
 - [架构手册目录](./Ontolith_Architecture_Handbook_Table_of_Contents.md)
+- [L0 ontolith-core 功能说明](./L0-ontolith-core-Knowledge-Object-Foundation.md)
+- [L1 ontolith-rdf 功能说明](./L1-ontolith-rdf-Statement-Graph-Dataset.md)
+- [L2 storage/transaction 功能说明](./L2-ontolith-storage-transaction-kernel.md)
+- [L3 parser/query 功能说明](./L3-ontolith-parser-query.md)
+- [L5 access/security 功能说明](./L5-ontolith-access-security.md)
+- [L4 cluster/consistency 功能说明](./L4-ontolith-cluster-consistency.md)
+- [R1 SPARQL 烟雾符合性](./R1-sparql-smoke-compliance.md)
+- [CI workflow](../.github/workflows/ci.yml) · [ci-local](../scripts/ci-local.sh)
+- [ADR 模板](../adr/0000-template.md) · [RFC 模板](../rfc/0000-template.md)

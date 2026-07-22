@@ -1,14 +1,27 @@
 use crate::application::{
     DictionaryCodec, QuadRepository, StorageEngine, TripleRepository, WriteAheadLog,
 };
-use crate::domain::{SnapshotRef, StorageKey, WalPhase, WalRecord, WriteBatch, WriteOperation};
-use ontolith_core::domain::{Iri, NodeId};
+use crate::domain::{
+    SnapshotRef, StorageKey, StorageStats, WalPhase, WalRecord, WriteBatch, WriteOperation,
+};
+use ontolith_core::domain::{ConsistencyLevel, Iri, NodeId};
 use ontolith_core::error::OntolithError;
-use ontolith_rdf::domain::{Quad, Triple};
+use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_transaction::domain::TxnId;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+#[cfg(feature = "rocksdb-backend")]
+mod codec;
+#[cfg(feature = "rocksdb-backend")]
+mod indexes;
+
+#[cfg(feature = "rocksdb-backend")]
+mod rocks;
+
+#[cfg(feature = "rocksdb-backend")]
+pub use rocks::{RocksDbStorageEngine, open_rocksdb_engine};
 
 #[derive(Default)]
 struct DictionaryState {
@@ -188,26 +201,16 @@ impl InMemoryStorageEngine {
             committed_put_triple_operations: self
                 .committed_put_triple_ops_count
                 .load(Ordering::SeqCst),
-            committed_put_quad_operations: self
-                .committed_put_quad_ops_count
-                .load(Ordering::SeqCst),
+            committed_put_quad_operations: self.committed_put_quad_ops_count.load(Ordering::SeqCst),
             committed_delete_key_operations: self
                 .committed_delete_key_ops_count
                 .load(Ordering::SeqCst),
             aborted_transactions: self.aborted_txn_count.load(Ordering::SeqCst),
             failed_abort_transactions: self.failed_abort_txn_count.load(Ordering::SeqCst),
-            aborted_put_triple_operations: self
-                .aborted_put_triple_ops_count
-                .load(Ordering::SeqCst),
-            aborted_put_quad_operations: self
-                .aborted_put_quad_ops_count
-                .load(Ordering::SeqCst),
-            aborted_delete_key_operations: self
-                .aborted_delete_key_ops_count
-                .load(Ordering::SeqCst),
-            checkpoint_truncated_records: self
-                .checkpoint_truncated_count
-                .load(Ordering::SeqCst),
+            aborted_put_triple_operations: self.aborted_put_triple_ops_count.load(Ordering::SeqCst),
+            aborted_put_quad_operations: self.aborted_put_quad_ops_count.load(Ordering::SeqCst),
+            aborted_delete_key_operations: self.aborted_delete_key_ops_count.load(Ordering::SeqCst),
+            checkpoint_truncated_records: self.checkpoint_truncated_count.load(Ordering::SeqCst),
             pending_transactions,
             wal_records: self.wal.entries().len(),
         }
@@ -221,10 +224,7 @@ impl InMemoryStorageEngine {
         Self::recover_internal(records, true)
     }
 
-    fn recover_internal(
-        records: &[WalRecord],
-        tolerant: bool,
-    ) -> Result<Self, OntolithError> {
+    fn recover_internal(records: &[WalRecord], tolerant: bool) -> Result<Self, OntolithError> {
         let wal = Arc::new(InMemoryWal::new());
         let mut state = StorageState::default();
 
@@ -317,13 +317,26 @@ impl InMemoryStorageEngine {
         triples: &mut Vec<Triple>,
         operations: &[WriteOperation],
         subject_filter: Option<NodeId>,
+        predicate_filter: Option<&Iri>,
+        object_filter: Option<&Term>,
     ) {
         for op in operations {
             match op {
                 WriteOperation::PutTriple(triple) => {
-                    if subject_filter.is_none_or(|subject| subject == triple.subject) {
+                    let subject_ok = subject_filter.is_none_or(|subject| subject == triple.subject);
+                    let predicate_ok =
+                        predicate_filter.is_none_or(|predicate| predicate == &triple.predicate);
+                    let object_ok = object_filter.is_none_or(|object| object == &triple.object);
+                    if subject_ok
+                        && predicate_ok
+                        && object_ok
+                        && !triples.iter().any(|t| t == triple)
+                    {
                         triples.push(triple.clone());
                     }
+                }
+                WriteOperation::DeleteTriple(triple) => {
+                    triples.retain(|existing| existing != triple);
                 }
                 WriteOperation::DeleteKey(key) => {
                     if let Some(subject_id) = key.components.first().copied()
@@ -332,7 +345,7 @@ impl InMemoryStorageEngine {
                         triples.retain(|existing| existing.subject != subject_id);
                     }
                 }
-                WriteOperation::PutQuad(_) => {}
+                WriteOperation::PutQuad(_) | WriteOperation::DeleteQuad(_) => {}
             }
         }
     }
@@ -340,10 +353,20 @@ impl InMemoryStorageEngine {
     fn apply_committed_operation(state: &mut StorageState, op: WriteOperation) {
         match op {
             WriteOperation::PutTriple(triple) => {
-                state.default_graph.push(triple);
+                if !state.default_graph.iter().any(|t| t == &triple) {
+                    state.default_graph.push(triple);
+                }
             }
             WriteOperation::PutQuad(quad) => {
-                state.named_graph_quads.push(quad);
+                if !state.named_graph_quads.iter().any(|q| q == &quad) {
+                    state.named_graph_quads.push(quad);
+                }
+            }
+            WriteOperation::DeleteTriple(triple) => {
+                state.default_graph.retain(|t| t != &triple);
+            }
+            WriteOperation::DeleteQuad(quad) => {
+                state.named_graph_quads.retain(|q| q != &quad);
             }
             WriteOperation::DeleteKey(key) => {
                 if let Some(subject_id) = key.components.first().copied() {
@@ -392,14 +415,12 @@ impl StorageEngine for InMemoryStorageEngine {
 
     fn commit_transaction(&self, txn_id: TxnId) -> Result<(), OntolithError> {
         let mut guard = self.state.write().map_err(|_| {
-            self.failed_commit_txn_count
-                .fetch_add(1, Ordering::SeqCst);
+            self.failed_commit_txn_count.fetch_add(1, Ordering::SeqCst);
             OntolithError::InvalidState("storage state lock poisoned")
         })?;
 
         let Some(operations) = guard.pending_writes.remove(&txn_id) else {
-            self.failed_commit_txn_count
-                .fetch_add(1, Ordering::SeqCst);
+            self.failed_commit_txn_count.fetch_add(1, Ordering::SeqCst);
             return Err(OntolithError::InvalidState(
                 "pending storage transaction not found",
             ));
@@ -413,7 +434,9 @@ impl StorageEngine for InMemoryStorageEngine {
             match &op {
                 WriteOperation::PutTriple(_) => put_triple_ops += 1,
                 WriteOperation::PutQuad(_) => put_quad_ops += 1,
-                WriteOperation::DeleteKey(_) => delete_key_ops += 1,
+                WriteOperation::DeleteKey(_)
+                | WriteOperation::DeleteTriple(_)
+                | WriteOperation::DeleteQuad(_) => delete_key_ops += 1,
             }
             Self::apply_committed_operation(&mut guard, op);
         }
@@ -425,8 +448,7 @@ impl StorageEngine for InMemoryStorageEngine {
             operation_count: 0,
             operations: Vec::new(),
         }) {
-            self.failed_commit_txn_count
-                .fetch_add(1, Ordering::SeqCst);
+            self.failed_commit_txn_count.fetch_add(1, Ordering::SeqCst);
             return Err(err);
         }
 
@@ -443,8 +465,7 @@ impl StorageEngine for InMemoryStorageEngine {
 
     fn abort_transaction(&self, txn_id: TxnId) -> Result<(), OntolithError> {
         let mut guard = self.state.write().map_err(|_| {
-            self.failed_abort_txn_count
-                .fetch_add(1, Ordering::SeqCst);
+            self.failed_abort_txn_count.fetch_add(1, Ordering::SeqCst);
             OntolithError::InvalidState("storage state lock poisoned")
         })?;
         let removed = guard.pending_writes.remove(&txn_id);
@@ -458,7 +479,9 @@ impl StorageEngine for InMemoryStorageEngine {
                 match op {
                     WriteOperation::PutTriple(_) => put_triple_ops += 1,
                     WriteOperation::PutQuad(_) => put_quad_ops += 1,
-                    WriteOperation::DeleteKey(_) => delete_key_ops += 1,
+                    WriteOperation::DeleteKey(_)
+                    | WriteOperation::DeleteTriple(_)
+                    | WriteOperation::DeleteQuad(_) => delete_key_ops += 1,
                 }
             }
 
@@ -468,8 +491,7 @@ impl StorageEngine for InMemoryStorageEngine {
                 operation_count: ops.len(),
                 operations: Vec::new(),
             }) {
-                self.failed_abort_txn_count
-                    .fetch_add(1, Ordering::SeqCst);
+                self.failed_abort_txn_count.fetch_add(1, Ordering::SeqCst);
                 return Err(err);
             }
 
@@ -501,10 +523,58 @@ impl StorageEngine for InMemoryStorageEngine {
     }
 
     fn snapshot(&self) -> SnapshotRef {
+        self.snapshot_with(ConsistencyLevel::Strong, None)
+    }
+
+    fn snapshot_with(
+        &self,
+        consistency: ConsistencyLevel,
+        read_txn_id: Option<TxnId>,
+    ) -> SnapshotRef {
         let snapshot_id = self.next_snapshot_id.fetch_add(1, Ordering::SeqCst);
         SnapshotRef {
             snapshot_id,
-            read_txn_id: None,
+            read_txn_id,
+            consistency,
+        }
+    }
+
+    fn stats(&self) -> StorageStats {
+        let guard = match self.state.read() {
+            Ok(state) => state,
+            Err(_) => return StorageStats::default(),
+        };
+
+        let mut subjects = HashSet::new();
+        let mut predicates = HashSet::new();
+        let mut objects: Vec<Term> = Vec::new();
+        let mut named_graphs = HashSet::new();
+
+        for triple in &guard.default_graph {
+            subjects.insert(triple.subject);
+            predicates.insert(triple.predicate.clone());
+            if !objects.iter().any(|o| o == &triple.object) {
+                objects.push(triple.object.clone());
+            }
+        }
+
+        for quad in &guard.named_graph_quads {
+            if let Some(g) = &quad.graph_name {
+                named_graphs.insert(g.clone());
+            }
+        }
+
+        StorageStats {
+            triple_count: guard.default_graph.len() as u64,
+            quad_count: guard.named_graph_quads.len() as u64,
+            distinct_subjects: subjects.len() as u64,
+            distinct_predicates: predicates.len() as u64,
+            distinct_objects: objects.len() as u64,
+            named_graph_count: named_graphs.len() as u64,
+            dictionary_entries: 0,
+            pending_transactions: guard.pending_writes.len() as u64,
+            wal_records: self.wal.entries().len() as u64,
+            index_kinds_active: 1,
         }
     }
 
@@ -522,7 +592,7 @@ impl StorageEngine for InMemoryStorageEngine {
         if let Some(txn_id) = txn_id
             && let Some(operations) = guard.pending_writes.get(&txn_id)
         {
-            Self::apply_ops_to_triple_projection(&mut triples, operations, None);
+            Self::apply_ops_to_triple_projection(&mut triples, operations, None, None, None);
         }
         triples
     }
@@ -537,8 +607,70 @@ impl StorageEngine for InMemoryStorageEngine {
         if let Some(txn_id) = txn_id
             && let Some(operations) = guard.pending_writes.get(&txn_id)
         {
-            Self::apply_ops_to_triple_projection(&mut triples, operations, Some(subject));
+            Self::apply_ops_to_triple_projection(
+                &mut triples,
+                operations,
+                Some(subject),
+                None,
+                None,
+            );
         }
+        triples
+    }
+
+    fn triples_by_predicate_in_txn(&self, predicate: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
+        let guard = match self.state.read() {
+            Ok(state) => state,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut triples: Vec<Triple> = guard
+            .default_graph
+            .iter()
+            .filter(|t| &t.predicate == predicate)
+            .cloned()
+            .collect();
+
+        if let Some(txn_id) = txn_id
+            && let Some(operations) = guard.pending_writes.get(&txn_id)
+        {
+            Self::apply_ops_to_triple_projection(
+                &mut triples,
+                operations,
+                None,
+                Some(predicate),
+                None,
+            );
+        }
+
+        triples
+    }
+
+    fn triples_by_object_in_txn(&self, object: &Term, txn_id: Option<TxnId>) -> Vec<Triple> {
+        let guard = match self.state.read() {
+            Ok(state) => state,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut triples: Vec<Triple> = guard
+            .default_graph
+            .iter()
+            .filter(|t| &t.object == object)
+            .cloned()
+            .collect();
+
+        if let Some(txn_id) = txn_id
+            && let Some(operations) = guard.pending_writes.get(&txn_id)
+        {
+            Self::apply_ops_to_triple_projection(
+                &mut triples,
+                operations,
+                None,
+                None,
+                Some(object),
+            );
+        }
+
         triples
     }
 
@@ -631,6 +763,51 @@ impl TripleRepository for InMemoryTripleRepository {
     fn by_subject_in_txn(&self, subject: NodeId, txn_id: Option<TxnId>) -> Vec<Triple> {
         self.engine.triples_by_subject_in_txn(subject, txn_id)
     }
+
+    fn by_predicate_in_txn(&self, predicate: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.engine.triples_by_predicate_in_txn(predicate, txn_id)
+    }
+
+    fn by_object_in_txn(&self, object: &Term, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.engine.triples_by_object_in_txn(object, txn_id)
+    }
+}
+
+/// StorageEngine-backed triple repository adapter usable across memory/rocksdb engines.
+pub struct EngineTripleRepository {
+    engine: Arc<dyn StorageEngine>,
+}
+
+impl EngineTripleRepository {
+    pub fn new(engine: Arc<dyn StorageEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+impl TripleRepository for EngineTripleRepository {
+    fn insert(&self, txn_id: TxnId, triple: Triple) -> Result<(), OntolithError> {
+        let batch = WriteBatch {
+            txn_id,
+            operations: vec![WriteOperation::PutTriple(triple)],
+        };
+        self.engine.apply_write_batch(&batch)
+    }
+
+    fn all_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.engine.default_graph_triples_in_txn(txn_id)
+    }
+
+    fn by_subject_in_txn(&self, subject: NodeId, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.engine.triples_by_subject_in_txn(subject, txn_id)
+    }
+
+    fn by_predicate_in_txn(&self, predicate: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.engine.triples_by_predicate_in_txn(predicate, txn_id)
+    }
+
+    fn by_object_in_txn(&self, object: &Term, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.engine.triples_by_object_in_txn(object, txn_id)
+    }
 }
 
 pub struct InMemoryQuadRepository {
@@ -679,13 +856,13 @@ mod tests {
         TripleRepository, WriteAheadLog,
     };
     use crate::domain::{StorageKey, WalPhase, WalRecord, WriteBatch, WriteOperation};
-    use ontolith_core::error::OntolithError;
     use ontolith_core::domain::{Iri, NodeId};
+    use ontolith_core::error::OntolithError;
     use ontolith_rdf::domain::{Quad, Term, Triple};
-    use std::sync::Arc;
-    use std::sync::RwLock;
     use ontolith_transaction::domain::{TxnId, TxnMode};
     use ontolith_transaction::infrastructure::InMemoryTransactionManager;
+    use std::sync::Arc;
+    use std::sync::RwLock;
 
     struct FailOnPhaseWal {
         fail_phase: Option<WalPhase>,
@@ -716,7 +893,10 @@ mod tests {
         }
 
         fn entries(&self) -> Vec<WalRecord> {
-            self.records.read().map(|records| records.clone()).unwrap_or_default()
+            self.records
+                .read()
+                .map(|records| records.clone())
+                .unwrap_or_default()
         }
 
         fn truncate_prefix(&self, upto_exclusive: usize) -> Result<(), OntolithError> {
@@ -746,7 +926,10 @@ mod tests {
         let id_b = dictionary.encode_node("urn:test:alice");
 
         assert_eq!(id_a, id_b);
-        assert_eq!(dictionary.decode_node(id_a).as_deref(), Some("urn:test:alice"));
+        assert_eq!(
+            dictionary.decode_node(id_a).as_deref(),
+            Some("urn:test:alice")
+        );
     }
 
     #[test]
@@ -764,7 +947,9 @@ mod tests {
             operations: vec![WriteOperation::PutTriple(triple.clone())],
         };
 
-        storage.apply_write_batch(&batch).expect("write batch must succeed");
+        storage
+            .apply_write_batch(&batch)
+            .expect("write batch must succeed");
         storage
             .commit_transaction(txn_id)
             .expect("storage commit must succeed");
@@ -823,7 +1008,10 @@ mod tests {
         assert!(repo.all().is_empty());
         assert_eq!(repo.all_in_txn(Some(txn_id)).len(), 1);
         assert_eq!(repo.by_subject_in_txn(subject, Some(txn_id)).len(), 1);
-        assert!(repo.by_subject_in_txn(subject, Some(TxnId::new(999))).is_empty());
+        assert!(
+            repo.by_subject_in_txn(subject, Some(TxnId::new(999)))
+                .is_empty()
+        );
 
         engine
             .commit_transaction(txn_id)
@@ -993,7 +1181,11 @@ mod tests {
         assert_eq!(repo.by_subject(NodeId::new(77)).len(), 1);
         assert!(repo.by_subject(NodeId::new(88)).is_empty());
         assert!(repo.by_subject(NodeId::new(99)).is_empty());
-        assert_eq!(repo.by_subject_in_txn(NodeId::new(99), Some(pending_txn)).len(), 1);
+        assert_eq!(
+            repo.by_subject_in_txn(NodeId::new(99), Some(pending_txn))
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1207,9 +1399,7 @@ mod tests {
                 ],
             })
             .expect("stage commit txn");
-        storage
-            .commit_transaction(commit_txn)
-            .expect("commit txn");
+        storage.commit_transaction(commit_txn).expect("commit txn");
 
         storage
             .apply_write_batch(&WriteBatch {
@@ -1235,9 +1425,7 @@ mod tests {
                 ],
             })
             .expect("stage abort txn");
-        storage
-            .abort_transaction(abort_txn)
-            .expect("abort txn");
+        storage.abort_transaction(abort_txn).expect("abort txn");
 
         let _ = storage
             .checkpoint_wal_with_retention(1)
@@ -1263,9 +1451,8 @@ mod tests {
 
     #[test]
     fn storage_metrics_snapshot_tracks_write_failures() {
-        let stage_fail_storage = InMemoryStorageEngine::with_wal(Arc::new(FailOnPhaseWal::new(
-            Some(WalPhase::Staged),
-        )));
+        let stage_fail_storage =
+            InMemoryStorageEngine::with_wal(Arc::new(FailOnPhaseWal::new(Some(WalPhase::Staged))));
 
         let stage_err = stage_fail_storage.apply_write_batch(&WriteBatch {
             txn_id: TxnId::new(2001),
@@ -1310,9 +1497,8 @@ mod tests {
         assert_eq!(commit_metrics.committed_transactions, 0);
         assert_eq!(commit_metrics.failed_commit_transactions, 1);
 
-        let abort_fail_storage = InMemoryStorageEngine::with_wal(Arc::new(FailOnPhaseWal::new(
-            Some(WalPhase::Aborted),
-        )));
+        let abort_fail_storage =
+            InMemoryStorageEngine::with_wal(Arc::new(FailOnPhaseWal::new(Some(WalPhase::Aborted))));
         let abort_fail_txn = TxnId::new(2003);
         abort_fail_storage
             .apply_write_batch(&WriteBatch {

@@ -1,0 +1,4 @@
+SELECT ?s ?n WHERE {
+  ?s <http://ex.org/name> ?n .
+  FILTER(BOUND(?n))
+}

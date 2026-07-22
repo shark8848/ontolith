@@ -1,0 +1,4 @@
+PREFIX ex: <http://ex.org/>
+ASK WHERE {
+  ?s ex:knows ?o .
+}

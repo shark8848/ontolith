@@ -1,0 +1,4 @@
+@prefix ex: <http://ex.org/> .
+
+ex:dave ex:knows ex:erin .
+ex:erin ex:name "Erin" .

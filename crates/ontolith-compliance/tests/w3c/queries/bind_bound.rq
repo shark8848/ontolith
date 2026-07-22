@@ -1,0 +1,4 @@
+SELECT ?s ?hasAge WHERE {
+  ?s <http://ex.org/knows> ?o .
+  BIND(BOUND(?o) AS ?hasAge)
+}

@@ -1,6 +1,6 @@
 use crate::application::{
-    collect_runtime_metrics, runtime_snapshot_to_metric_points, RuntimeMetricsSnapshot,
-    StorageMetricsReader, TransactionMetricsReader,
+    RuntimeMetricsSnapshot, StorageMetricsReader, TransactionMetricsReader,
+    collect_runtime_metrics, runtime_snapshot_to_metric_points,
 };
 use crate::domain::{MetricKind, MetricPoint};
 use ontolith_core::error::OntolithError;
@@ -39,6 +39,10 @@ impl InMemoryMetricSink {
 
     pub fn len(&self) -> usize {
         self.points.read().map(|points| points.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -204,8 +208,8 @@ pub fn status() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_and_export_runtime_metrics, render_prometheus_text, run_runtime_sampling_loop,
-        InMemoryMetricSink, MetricSink, RuntimeSamplingConfig,
+        InMemoryMetricSink, MetricSink, RuntimeSamplingConfig, collect_and_export_runtime_metrics,
+        render_prometheus_text, run_runtime_sampling_loop,
     };
     use crate::domain::{MetricKind, MetricPoint};
     use ontolith_storage::infrastructure::InMemoryStorageEngine;
