@@ -14,6 +14,7 @@ members = [
     "crates/ontolith-security",
     "crates/ontolith-observability",
     "crates/ontolith-plugin-api",
+    "crates/ontolith-compliance",
 ]
 
 [workspace.package]

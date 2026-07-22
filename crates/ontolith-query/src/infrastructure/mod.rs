@@ -1,51 +1,31 @@
+//! Query infrastructure: SPARQL parse, optimize, execute (L3 full).
+
+mod execute;
+mod optimize;
+mod sparql_parse;
+
+// Keep legacy name available for external references.
+#[allow(dead_code)]
+mod sparql_mvp_legacy {
+    // Intentionally empty shim — full engine replaces sparql_mvp.
+}
+
 use crate::application::{QueryExecutor, QueryPlanner, QueryReadService};
-use crate::domain::{QueryKind, QueryPlan, QueryPlanId, QueryRequest, QueryResultSummary};
-use ontolith_core::domain::NodeId;
+#[cfg(test)]
+use crate::domain::QueryResultSummary;
+use crate::domain::{QueryPlan, QueryRequest, QueryResult};
+use ontolith_core::domain::{Iri, NodeId};
 use ontolith_core::error::OntolithError;
+use ontolith_rdf::domain::{Term, Triple};
 use ontolith_storage::application::TripleRepository;
+use ontolith_transaction::domain::TxnId;
 use std::sync::Arc;
-use std::time::Instant;
 
-fn parse_subject_hint(query: &str) -> Result<Option<NodeId>, OntolithError> {
-    let normalized = query.to_ascii_lowercase();
-    let marker = "subject=";
-    let Some(marker_pos) = normalized.find(marker) else {
-        return Ok(None);
-    };
+pub use execute::AlgebraExecutor;
+pub use optimize::RuleBasedOptimizer;
+pub use sparql_parse::{parse_subject_hint, plan_query};
 
-    let start = marker_pos + marker.len();
-    let rest = &normalized[start..];
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return Err(OntolithError::InvalidState("invalid subject hint"));
-    }
-
-    let value = digits
-        .parse::<u64>()
-        .map_err(|_| OntolithError::InvalidState("invalid subject hint"))?;
-    Ok(Some(NodeId::new(value)))
-}
-
-fn kind_name(kind: QueryKind) -> &'static str {
-    match kind {
-        QueryKind::Select => "SELECT",
-        QueryKind::Construct => "CONSTRUCT",
-        QueryKind::Ask => "ASK",
-        QueryKind::Describe => "DESCRIBE",
-        QueryKind::Update => "UPDATE",
-    }
-}
-
-fn plan_id_from_query(query: &str) -> QueryPlanId {
-    // FNV-1a like hash for deterministic test-friendly plan IDs.
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in query.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    QueryPlanId(hash)
-}
-
+/// Storage-backed read service using SPO/POS/OSP indexes.
 pub struct InMemoryQueryReadService {
     triple_repo: Arc<dyn TripleRepository>,
 }
@@ -57,111 +37,67 @@ impl InMemoryQueryReadService {
 }
 
 impl QueryReadService for InMemoryQueryReadService {
-    fn execute_select_all(
-        &self,
-        request: &QueryRequest,
-    ) -> Result<QueryResultSummary, OntolithError> {
-        let started_at = Instant::now();
-        let rows = self.triple_repo.all_in_txn(request.txn_id);
-        Ok(QueryResultSummary {
-            row_count: rows.len(),
-            elapsed_ms: started_at.elapsed().as_millis() as u64,
-        })
+    fn all_triples(&self, txn_id: Option<TxnId>) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self.triple_repo.all_in_txn(txn_id))
     }
 
-    fn execute_select_by_subject(
+    fn by_subject(
         &self,
-        request: &QueryRequest,
         subject: NodeId,
-    ) -> Result<QueryResultSummary, OntolithError> {
-        let started_at = Instant::now();
-        let rows = self
+        txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self.triple_repo.by_subject_in_txn(subject, txn_id))
+    }
+
+    fn by_predicate(
+        &self,
+        predicate: &Iri,
+        txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self.triple_repo.by_predicate_in_txn(predicate, txn_id))
+    }
+
+    fn by_object(
+        &self,
+        object: &Term,
+        txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self.triple_repo.by_object_in_txn(object, txn_id))
+    }
+
+    fn matching(
+        &self,
+        subject: Option<NodeId>,
+        predicate: Option<&Iri>,
+        object: Option<&Term>,
+        txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
             .triple_repo
-            .by_subject_in_txn(subject, request.txn_id);
-        Ok(QueryResultSummary {
-            row_count: rows.len(),
-            elapsed_ms: started_at.elapsed().as_millis() as u64,
-        })
+            .matching_in_txn(subject, predicate, object, txn_id))
     }
 }
 
+/// Full SPARQL planner.
+#[derive(Debug, Default, Clone, Copy)]
 pub struct SimpleQueryPlanner;
-
-impl SimpleQueryPlanner {
-    fn kind_from_query(query: &str) -> QueryKind {
-        let normalized = query.trim().to_ascii_lowercase();
-        if normalized.starts_with("ask") {
-            QueryKind::Ask
-        } else if normalized.starts_with("construct") {
-            QueryKind::Construct
-        } else if normalized.starts_with("describe") {
-            QueryKind::Describe
-        } else if normalized.starts_with("insert")
-            || normalized.starts_with("delete")
-            || normalized.starts_with("with")
-        {
-            QueryKind::Update
-        } else {
-            QueryKind::Select
-        }
-    }
-}
 
 impl QueryPlanner for SimpleQueryPlanner {
     fn plan(&self, request: &QueryRequest) -> Result<QueryPlan, OntolithError> {
-        if request.query.0.trim().is_empty() {
-            return Err(OntolithError::InvalidState("query text is empty"));
-        }
-
-        let kind = Self::kind_from_query(&request.query.0);
-        let subject_hint = parse_subject_hint(&request.query.0)?;
-        let mut logical_steps = vec!["normalize_query".to_owned()];
-        let mut physical_steps = Vec::new();
-
-        match kind {
-            QueryKind::Select => {
-                logical_steps.push("build_logical_scan".to_owned());
-                if subject_hint.is_some() {
-                    logical_steps.push("apply_subject_filter".to_owned());
-                    physical_steps.push("execute_subject_lookup".to_owned());
-                } else {
-                    physical_steps.push("execute_scan".to_owned());
-                }
-            }
-            QueryKind::Ask => {
-                logical_steps.push("build_logical_ask".to_owned());
-                physical_steps.push("execute_boolean_probe".to_owned());
-            }
-            QueryKind::Construct => {
-                logical_steps.push("build_logical_construct".to_owned());
-                physical_steps.push("execute_graph_materialization".to_owned());
-            }
-            QueryKind::Describe => {
-                logical_steps.push("build_logical_describe".to_owned());
-                physical_steps.push("execute_resource_description".to_owned());
-            }
-            QueryKind::Update => {
-                logical_steps.push("build_logical_update".to_owned());
-                physical_steps.push("execute_update".to_owned());
-            }
-        }
-
-        Ok(QueryPlan {
-            id: plan_id_from_query(&request.query.0),
-            kind,
-            logical_steps,
-            physical_steps,
-        })
+        plan_query(request)
     }
 }
 
+/// Executor adapter implementing [`QueryExecutor`].
 pub struct ReadServiceQueryExecutor {
-    read_service: Arc<dyn QueryReadService>,
+    inner: AlgebraExecutor,
 }
 
 impl ReadServiceQueryExecutor {
     pub fn new(read_service: Arc<dyn QueryReadService>) -> Self {
-        Self { read_service }
+        Self {
+            inner: AlgebraExecutor::new(read_service),
+        }
     }
 }
 
@@ -170,21 +106,25 @@ impl QueryExecutor for ReadServiceQueryExecutor {
         &self,
         plan: &QueryPlan,
         request: &QueryRequest,
-    ) -> Result<QueryResultSummary, OntolithError> {
-        if !matches!(plan.kind, QueryKind::Select) {
-            return Err(OntolithError::Unsupported(
-                kind_name(plan.kind),
-            ));
-        }
-
-        if let Some(subject) = parse_subject_hint(&request.query.0)? {
-            return self
-                .read_service
-                .execute_select_by_subject(request, subject);
-        }
-
-        self.read_service.execute_select_all(request)
+    ) -> Result<QueryResult, OntolithError> {
+        self.inner.execute(plan, request)
     }
+}
+
+/// Build the standard L3 pipeline: parse → rule optimize → execute.
+pub fn standard_pipeline(
+    repo: Arc<dyn TripleRepository>,
+) -> crate::application::QueryPipeline<
+    SimpleQueryPlanner,
+    RuleBasedOptimizer,
+    ReadServiceQueryExecutor,
+> {
+    let read: Arc<dyn QueryReadService> = Arc::new(InMemoryQueryReadService::new(repo));
+    crate::application::QueryPipeline::new(
+        SimpleQueryPlanner,
+        RuleBasedOptimizer,
+        ReadServiceQueryExecutor::new(read),
+    )
 }
 
 pub fn status() -> &'static str {
@@ -193,251 +133,395 @@ pub fn status() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::InMemoryQueryReadService;
-    use super::{ReadServiceQueryExecutor, SimpleQueryPlanner};
-    use crate::application::{QueryPipeline, QueryPlanner, QueryReadService};
-    use crate::domain::{QueryRequest, QueryText};
-    use ontolith_core::error::OntolithError;
-    use ontolith_core::domain::{Iri, NodeId};
+    use super::*;
+    use crate::application::QueryPipeline;
+    use crate::domain::{Algebra, BoundValue, QueryRequest, TermPattern};
+    use ontolith_core::domain::{Iri, LiteralValue, NodeId};
     use ontolith_rdf::domain::{Term, Triple};
     use ontolith_storage::application::{StorageEngine, TripleRepository};
     use ontolith_storage::infrastructure::{InMemoryStorageEngine, InMemoryTripleRepository};
     use ontolith_transaction::domain::TxnId;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
-    #[test]
-    fn read_service_returns_total_rows() {
+    fn seed() -> (Arc<InMemoryStorageEngine>, Arc<dyn TripleRepository>) {
         let engine = Arc::new(InMemoryStorageEngine::new());
-        let repo: Arc<dyn TripleRepository> = Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
-        let service = InMemoryQueryReadService::new(Arc::clone(&repo));
-
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+        // alice knows bob
         repo.insert(
-            TxnId::new(100),
+            TxnId::new(1),
             Triple {
                 subject: NodeId::new(1),
-                predicate: Iri::new("urn:test:p"),
-                object: Term::Iri(Iri::new("urn:test:o")),
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/bob")),
             },
         )
-        .expect("insert must succeed");
-        engine
-            .commit_transaction(TxnId::new(100))
-            .expect("commit must make data visible");
-
-        let request = QueryRequest {
-            query: QueryText("SELECT * WHERE { ?s ?p ?o }".to_owned()),
-            txn_id: None,
-            tenant: None,
-        };
-
-        let result = service
-            .execute_select_all(&request)
-            .expect("query must succeed");
-
-        assert_eq!(result.row_count, 1);
-    }
-
-    #[test]
-    fn read_service_filters_by_subject() {
-        let engine = Arc::new(InMemoryStorageEngine::new());
-        let repo: Arc<dyn TripleRepository> = Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
-        let service = InMemoryQueryReadService::new(Arc::clone(&repo));
-        let target = NodeId::new(7);
-
+        .unwrap();
+        // alice name "Alice"
         repo.insert(
-            TxnId::new(101),
+            TxnId::new(1),
             Triple {
-                subject: target,
-                predicate: Iri::new("urn:test:p"),
-                object: Term::Iri(Iri::new("urn:test:o1")),
+                subject: NodeId::new(1),
+                predicate: Iri::new("http://ex.org/name"),
+                object: Term::Literal(LiteralValue::String("Alice".into())),
             },
         )
-        .expect("insert must succeed");
-        engine
-            .commit_transaction(TxnId::new(101))
-            .expect("commit must make first write visible");
+        .unwrap();
+        // bob knows carol
         repo.insert(
-            TxnId::new(102),
+            TxnId::new(1),
             Triple {
-                subject: NodeId::new(8),
-                predicate: Iri::new("urn:test:p"),
-                object: Term::Iri(Iri::new("urn:test:o2")),
+                subject: NodeId::new(2),
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/carol")),
             },
         )
-        .expect("insert must succeed");
-        engine
-            .commit_transaction(TxnId::new(102))
-            .expect("commit must make second write visible");
-
-        let request = QueryRequest {
-            query: QueryText("SELECT * WHERE { ?s ?p ?o }".to_owned()),
-            txn_id: None,
-            tenant: None,
-        };
-
-        let result = service
-            .execute_select_by_subject(&request, target)
-            .expect("query must succeed");
-
-        assert_eq!(result.row_count, 1);
-    }
-
-    #[test]
-    fn read_service_sees_pending_rows_only_with_same_txn_id() {
-        let engine = Arc::new(InMemoryStorageEngine::new());
-        let repo: Arc<dyn TripleRepository> = Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
-        let service = InMemoryQueryReadService::new(Arc::clone(&repo));
-        let txn_id = TxnId::new(200);
-
+        .unwrap();
+        // bob age 30
         repo.insert(
-            txn_id,
+            TxnId::new(1),
             Triple {
-                subject: NodeId::new(33),
-                predicate: Iri::new("urn:test:p"),
-                object: Term::Iri(Iri::new("urn:test:o")),
+                subject: NodeId::new(2),
+                predicate: Iri::new("http://ex.org/age"),
+                object: Term::Literal(LiteralValue::Integer(30)),
             },
         )
-        .expect("insert must succeed");
+        .unwrap();
+        engine.commit_transaction(TxnId::new(1)).unwrap();
+        // encode dictionary-style ids used in SPARQL via node:N and absolute IRIs on predicates/objects
+        (engine, repo)
+    }
 
-        let anonymous_request = QueryRequest {
-            query: QueryText("SELECT * WHERE { ?s ?p ?o }".to_owned()),
-            txn_id: None,
-            tenant: None,
-        };
-
-        let in_txn_request = QueryRequest {
-            query: QueryText("SELECT * WHERE { ?s ?p ?o }".to_owned()),
-            txn_id: Some(txn_id),
-            tenant: None,
-        };
-
-        let outside_rows = service
-            .execute_select_all(&anonymous_request)
-            .expect("query must succeed outside txn")
-            .row_count;
-        let inside_rows = service
-            .execute_select_all(&in_txn_request)
-            .expect("query must succeed inside txn")
-            .row_count;
-
-        assert_eq!(outside_rows, 0);
-        assert_eq!(inside_rows, 1);
+    fn pipeline(
+        repo: Arc<dyn TripleRepository>,
+    ) -> QueryPipeline<SimpleQueryPlanner, RuleBasedOptimizer, ReadServiceQueryExecutor> {
+        standard_pipeline(repo)
     }
 
     #[test]
-    fn pipeline_executes_select_with_subject_hint() {
-        let engine = Arc::new(InMemoryStorageEngine::new());
-        let repo: Arc<dyn TripleRepository> = Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
-        let read_service: Arc<dyn QueryReadService> =
-            Arc::new(InMemoryQueryReadService::new(Arc::clone(&repo)));
-        let planner = SimpleQueryPlanner;
-        let executor = ReadServiceQueryExecutor::new(read_service);
-        let pipeline = QueryPipeline::new(planner, executor);
+    fn select_star_returns_all_triples_as_solutions() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new("SELECT * WHERE { ?s ?p ?o }"))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 4);
+        assert!(result.variables.contains(&"s".into()));
+        assert!(result.variables.contains(&"p".into()));
+        assert!(result.variables.contains(&"o".into()));
+    }
 
+    #[test]
+    fn select_by_predicate_uses_pos() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s ?o WHERE { ?s <http://ex.org/knows> ?o }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 2);
+        let explain = p
+            .explain(&QueryRequest::new(
+                "SELECT ?s ?o WHERE { ?s <http://ex.org/knows> ?o }",
+            ))
+            .unwrap();
+        assert!(
+            explain
+                .physical_steps
+                .iter()
+                .any(|s| s.contains("index_pos") || s.contains("bgp"))
+        );
+    }
+
+    #[test]
+    fn join_two_patterns() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        // node:1 knows ?o . node:1 name ?n
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT ?o ?n WHERE {
+                    node:1 <http://ex.org/knows> ?o .
+                    node:1 <http://ex.org/name> ?n
+                }"#,
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("n"),
+            Some(&BoundValue::Literal(LiteralValue::String("Alice".into())))
+        );
+    }
+
+    #[test]
+    fn optional_left_join() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT ?s ?age WHERE {
+                    ?s <http://ex.org/knows> ?o .
+                    OPTIONAL { ?s <http://ex.org/age> ?age }
+                }"#,
+            ))
+            .unwrap();
+        // two knows triples; only bob(node:2) has age
+        assert_eq!(result.solutions.len(), 2);
+        let with_age = result
+            .solutions
+            .iter()
+            .filter(|s| s.get("age").is_some())
+            .count();
+        assert_eq!(with_age, 1);
+    }
+
+    #[test]
+    fn filter_bound_and_compare() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT ?s ?age WHERE {
+                    ?s <http://ex.org/age> ?age .
+                    FILTER(?age >= 30)
+                }"#,
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+    }
+
+    #[test]
+    fn union_combines_branches() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT ?x WHERE {
+                    { node:1 <http://ex.org/name> ?x }
+                    UNION
+                    { node:2 <http://ex.org/age> ?x }
+                }"#,
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 2);
+    }
+
+    #[test]
+    fn bind_extends_solution() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT ?s ?flag WHERE {
+                    ?s <http://ex.org/name> ?n .
+                    BIND(BOUND(?n) AS ?flag)
+                }"#,
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("flag"),
+            Some(&BoundValue::Literal(LiteralValue::Boolean(true)))
+        );
+    }
+
+    #[test]
+    fn values_clause() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT ?s ?o WHERE {
+                    VALUES ?s { node:1 }
+                    ?s <http://ex.org/knows> ?o
+                }"#,
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+    }
+
+    #[test]
+    fn ask_true_false() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let yes = p
+            .execute(&QueryRequest::new(
+                "ASK WHERE { ?s <http://ex.org/knows> ?o }",
+            ))
+            .unwrap();
+        assert_eq!(yes.boolean, Some(true));
+        let no = p
+            .execute(&QueryRequest::new(
+                "ASK WHERE { ?s <http://ex.org/missing> ?o }",
+            ))
+            .unwrap();
+        assert_eq!(no.boolean, Some(false));
+    }
+
+    #[test]
+    fn construct_builds_triples() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"CONSTRUCT { ?s <http://ex.org/copy> ?o }
+                   WHERE { ?s <http://ex.org/knows> ?o }"#,
+            ))
+            .unwrap();
+        assert_eq!(result.construct_triples.len(), 2);
+    }
+
+    #[test]
+    fn distinct_and_limit_offset() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT DISTINCT ?p WHERE { ?s ?p ?o } ORDER BY ?p LIMIT 1 OFFSET 0",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+    }
+
+    #[test]
+    fn explain_contains_optimize_step() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let explain = p
+            .explain(&QueryRequest::new(
+                "SELECT * WHERE { ?s <http://ex.org/knows> ?o }",
+            ))
+            .unwrap();
+        assert!(
+            explain
+                .logical_steps
+                .iter()
+                .any(|s| s.starts_with("optimize:"))
+        );
+        assert!(!explain.algebra_summary.is_empty());
+    }
+
+    #[test]
+    fn timeout_zero() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new("SELECT * WHERE { ?s ?p ?o }").with_timeout(0))
+            .unwrap();
+        assert!(result.timed_out);
+    }
+
+    #[test]
+    fn cancel_flag() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let flag = Arc::new(AtomicBool::new(true));
+        let result = p
+            .execute(&QueryRequest::new("SELECT * WHERE { ?s ?p ?o }").with_cancel(flag))
+            .unwrap();
+        assert!(result.cancelled);
+    }
+
+    #[test]
+    fn prefix_expansion() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"PREFIX ex: <http://ex.org/>
+                   SELECT ?s ?o WHERE { ?s ex:knows ?o }"#,
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 2);
+    }
+
+    #[test]
+    fn legacy_subject_hint_still_works() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT * WHERE { ?s ?p ?o } # subject=1",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 2); // alice has 2 triples
+    }
+
+    #[test]
+    fn txn_visibility() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+        let p = pipeline(Arc::clone(&repo));
+        let txn = TxnId::new(9);
         repo.insert(
-            TxnId::new(300),
+            txn,
             Triple {
-                subject: NodeId::new(100),
-                predicate: Iri::new("urn:test:p"),
-                object: Term::Iri(Iri::new("urn:test:o1")),
+                subject: NodeId::new(99),
+                predicate: Iri::new("http://ex.org/p"),
+                object: Term::Iri(Iri::new("http://ex.org/o")),
             },
         )
-        .expect("insert must succeed");
-        engine
-            .commit_transaction(TxnId::new(300))
-            .expect("commit must succeed");
-
-        repo.insert(
-            TxnId::new(301),
-            Triple {
-                subject: NodeId::new(101),
-                predicate: Iri::new("urn:test:p"),
-                object: Term::Iri(Iri::new("urn:test:o2")),
-            },
-        )
-        .expect("insert must succeed");
-        engine
-            .commit_transaction(TxnId::new(301))
-            .expect("commit must succeed");
-
-        let request = QueryRequest {
-            query: QueryText("SELECT * WHERE { ?s ?p ?o } # subject=100".to_owned()),
-            txn_id: None,
-            tenant: None,
-        };
-
-        let result = pipeline.execute(&request).expect("pipeline execute must succeed");
-        assert_eq!(result.row_count, 1);
+        .unwrap();
+        let outside = p
+            .execute(&QueryRequest::new("SELECT * WHERE { ?s ?p ?o }"))
+            .unwrap();
+        assert_eq!(outside.solutions.len(), 0);
+        let inside = p
+            .execute(&QueryRequest::new("SELECT * WHERE { ?s ?p ?o }").with_txn(txn))
+            .unwrap();
+        assert_eq!(inside.solutions.len(), 1);
     }
 
     #[test]
-    fn planner_emits_subject_filter_steps_when_hint_present() {
-        let planner = SimpleQueryPlanner;
-        let request = QueryRequest {
-            query: QueryText("SELECT * WHERE { ?s ?p ?o } # subject=42".to_owned()),
-            txn_id: None,
-            tenant: None,
-        };
-
-        let plan = planner.plan(&request).expect("planner must succeed");
-        assert!(plan.logical_steps.contains(&"apply_subject_filter".to_owned()));
-        assert_eq!(plan.physical_steps, vec!["execute_subject_lookup".to_owned()]);
+    fn summary_compat() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let summary: QueryResultSummary = p
+            .execute_summary(&QueryRequest::new(
+                "SELECT * WHERE { ?s <http://ex.org/knows> ?o }",
+            ))
+            .unwrap();
+        assert_eq!(summary.row_count, 2);
     }
 
     #[test]
-    fn planner_rejects_invalid_subject_hint() {
+    fn algebra_binds_node_subject() {
         let planner = SimpleQueryPlanner;
-        let request = QueryRequest {
-            query: QueryText("SELECT * WHERE { ?s ?p ?o } # subject=abc".to_owned()),
-            txn_id: None,
-            tenant: None,
-        };
-
-        let err = planner
-            .plan(&request)
-            .expect_err("planner should reject invalid subject hint");
-        assert_eq!(err, OntolithError::InvalidState("invalid subject hint"));
+        let plan = planner
+            .plan(&QueryRequest::new("SELECT * WHERE { node:1 ?p ?o }"))
+            .unwrap();
+        // after project wrapper
+        fn find_bgp(a: &Algebra) -> bool {
+            match a {
+                Algebra::Bgp(p) => matches!(p[0].subject, TermPattern::Node(_)),
+                Algebra::Project { input, .. }
+                | Algebra::Slice { input, .. }
+                | Algebra::Distinct { input }
+                | Algebra::Filter { input, .. } => find_bgp(input),
+                Algebra::Join { left, .. } => find_bgp(left),
+                _ => false,
+            }
+        }
+        assert!(find_bgp(&plan.algebra));
     }
 
     #[test]
-    fn pipeline_rejects_non_select_queries() {
-        let engine = Arc::new(InMemoryStorageEngine::new());
-        let repo: Arc<dyn TripleRepository> = Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
-        let read_service: Arc<dyn QueryReadService> =
-            Arc::new(InMemoryQueryReadService::new(Arc::clone(&repo)));
+    fn empty_query_rejected() {
         let planner = SimpleQueryPlanner;
-        let executor = ReadServiceQueryExecutor::new(read_service);
-        let pipeline = QueryPipeline::new(planner, executor);
-
-        let request = QueryRequest {
-            query: QueryText("ASK { ?s ?p ?o }".to_owned()),
-            txn_id: None,
-            tenant: None,
-        };
-
-        let err = pipeline.execute(&request).expect_err("ASK should be rejected");
-        assert_eq!(err, OntolithError::Unsupported("ASK"));
+        let err = planner.plan(&QueryRequest::new("   ")).expect_err("empty");
+        assert!(matches!(err, OntolithError::InvalidArgument(_)));
     }
 
     #[test]
-    fn pipeline_rejects_invalid_subject_hint() {
-        let engine = Arc::new(InMemoryStorageEngine::new());
-        let repo: Arc<dyn TripleRepository> = Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
-        let read_service: Arc<dyn QueryReadService> =
-            Arc::new(InMemoryQueryReadService::new(Arc::clone(&repo)));
-        let planner = SimpleQueryPlanner;
-        let executor = ReadServiceQueryExecutor::new(read_service);
-        let pipeline = QueryPipeline::new(planner, executor);
-
-        let request = QueryRequest {
-            query: QueryText("SELECT * WHERE { ?s ?p ?o } # subject=".to_owned()),
-            txn_id: None,
-            tenant: None,
-        };
-
-        let err = pipeline
-            .execute(&request)
-            .expect_err("pipeline should reject invalid subject hint");
-        assert_eq!(err, OntolithError::InvalidState("invalid subject hint"));
+    fn unsupported_update() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let err = p
+            .execute(&QueryRequest::new("INSERT DATA { <a> <b> <c> }"))
+            .expect_err("update");
+        assert!(matches!(err, OntolithError::Unsupported(_)));
     }
 }

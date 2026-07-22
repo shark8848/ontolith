@@ -2,8 +2,8 @@ use crate::application::TransactionManager;
 use crate::domain::{Transaction, TxnId, TxnMode, TxnState};
 use ontolith_core::error::OntolithError;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
 struct TransactionState {
@@ -65,7 +65,11 @@ impl InMemoryTransactionManager {
         self.clock_ms.fetch_add(delta_ms, Ordering::SeqCst);
     }
 
-    fn begin_internal(&self, mode: TxnMode, timeout_ms: Option<u64>) -> Result<Transaction, OntolithError> {
+    fn begin_internal(
+        &self,
+        mode: TxnMode,
+        timeout_ms: Option<u64>,
+    ) -> Result<Transaction, OntolithError> {
         let mut guard = self
             .state
             .write()
@@ -79,9 +83,7 @@ impl InMemoryTransactionManager {
 
         if active_count >= self.max_active {
             self.begin_rejected_count.fetch_add(1, Ordering::SeqCst);
-            return Err(OntolithError::InvalidState(
-                "too many active transactions",
-            ));
+            return Err(OntolithError::InvalidState("too many active transactions"));
         }
 
         let txn = Transaction::new(self.allocate_id(), mode);
@@ -276,7 +278,9 @@ mod tests {
     fn begin_creates_active_transaction() {
         let manager = InMemoryTransactionManager::new();
 
-        let txn = manager.begin(TxnMode::ReadWrite).expect("begin must succeed");
+        let txn = manager
+            .begin(TxnMode::ReadWrite)
+            .expect("begin must succeed");
 
         assert_eq!(txn.state, TxnState::Active);
         assert!(txn.id.0 > 0);
@@ -285,21 +289,30 @@ mod tests {
     #[test]
     fn commit_transitions_state() {
         let manager = InMemoryTransactionManager::new();
-        let txn = manager.begin(TxnMode::ReadWrite).expect("begin must succeed");
+        let txn = manager
+            .begin(TxnMode::ReadWrite)
+            .expect("begin must succeed");
 
         let committed = manager.commit(txn.id).expect("commit must succeed");
 
         assert_eq!(committed.state, TxnState::Committed);
-        assert_eq!(manager.get(txn.id).expect("stored txn").state, TxnState::Committed);
+        assert_eq!(
+            manager.get(txn.id).expect("stored txn").state,
+            TxnState::Committed
+        );
     }
 
     #[test]
     fn commit_after_abort_is_rejected() {
         let manager = InMemoryTransactionManager::new();
-        let txn = manager.begin(TxnMode::ReadWrite).expect("begin must succeed");
+        let txn = manager
+            .begin(TxnMode::ReadWrite)
+            .expect("begin must succeed");
 
         manager.abort(txn.id).expect("abort must succeed");
-        let err = manager.commit(txn.id).expect_err("commit after abort must fail");
+        let err = manager
+            .commit(txn.id)
+            .expect_err("commit after abort must fail");
 
         assert_eq!(
             err,
@@ -320,7 +333,10 @@ mod tests {
             .expect("cleanup must succeed");
 
         assert_eq!(expired, vec![txn.id]);
-        assert_eq!(manager.get(txn.id).expect("txn must still exist").state, TxnState::Aborted);
+        assert_eq!(
+            manager.get(txn.id).expect("txn must still exist").state,
+            TxnState::Aborted
+        );
     }
 
     #[test]
@@ -375,7 +391,9 @@ mod tests {
         let _ = manager.begin(TxnMode::ReadOnly);
 
         manager.advance_clock(11);
-        let _ = manager.cleanup_expired(manager.now_ms()).expect("cleanup must succeed");
+        let _ = manager
+            .cleanup_expired(manager.now_ms())
+            .expect("cleanup must succeed");
 
         let second = manager
             .begin(TxnMode::ReadOnly)

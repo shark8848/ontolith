@@ -3,7 +3,15 @@ name = "ontolith-storage"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["rocksdb-backend"]
+rocksdb-backend = ["dep:rocksdb"]
+
 [dependencies]
 ontolith-core = { path = "../ontolith-core" }
 ontolith-rdf = { path = "../ontolith-rdf" }
 ontolith-transaction = { path = "../ontolith-transaction" }
+rocksdb = { version = "0.22.0", optional = true, default-features = true }
+
+[dev-dependencies]
+tempfile = "3.14.0"
