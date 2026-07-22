@@ -6,7 +6,8 @@ Status: Draft
 Date: 2026-07-12  
 Owner: sharky-ai
 
-Progress ledger (execution status): [PROGRESS.md](./PROGRESS.md) (PROG-0001)
+Progress ledger (execution status): [PROGRESS.md](./PROGRESS.md) (PROG-0001)  
+Layer implementation notes: [L0 core](./L0-ontolith-core-Knowledge-Object-Foundation.md) · [L1 rdf](./L1-ontolith-rdf-Statement-Graph-Dataset.md) · [L2 storage/txn](./L2-ontolith-storage-transaction-kernel.md) · [L3 parser/query](./L3-ontolith-parser-query.md)
 
 ---
 

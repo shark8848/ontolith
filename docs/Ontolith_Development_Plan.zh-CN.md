@@ -6,7 +6,9 @@ sudo -v# Ontolith 开发计划
 日期: 2026-07-12  
 负责人: sharky-ai
 
-进度台账（执行状态）：[PROGRESS.md](./PROGRESS.md)（PROG-0001）
+进度台账（执行状态）：[PROGRESS.md](./PROGRESS.md)（PROG-0001）  
+层实现说明：[L0](./L0-ontolith-core-Knowledge-Object-Foundation.md) · [L1](./L1-ontolith-rdf-Statement-Graph-Dataset.md) · [L2](./L2-ontolith-storage-transaction-kernel.md) · [L3](./L3-ontolith-parser-query.md) · [L4](./L4-ontolith-cluster-consistency.md) · [L5](./L5-ontolith-access-security.md)  
+依赖治理：[DEPENDENCY_REGISTER](./DEPENDENCY_REGISTER.md) · [ADR-0001 RocksDB](../adr/0001-rocksdb-storage-backend.md) · [ADR-0002 Cluster MVP](../adr/0002-cluster-mvp-in-process.md)
 
 ---
 
