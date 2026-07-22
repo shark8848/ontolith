@@ -33,7 +33,7 @@ pub fn status() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{metrics_text, MetricsEndpoint};
+    use super::{MetricsEndpoint, metrics_text};
     use ontolith_observability::domain::{MetricKind, MetricPoint};
 
     #[test]

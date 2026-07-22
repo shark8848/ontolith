@@ -1,0 +1,38 @@
+[Unit]
+Description=Ontolith semantic runtime HTTP server (L5)
+Documentation=file:///home/ontolith/docs/L5-ontolith-access-security.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sharkyai
+Group=sharkyai
+WorkingDirectory=/home/ontolith
+
+# Environment for the process (override in /etc/ontolith/ontolith.env)
+EnvironmentFile=-/etc/ontolith/ontolith.env
+Environment=RUST_BACKTRACE=1
+
+ExecStart=/usr/local/bin/ontolith-server
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+# Hardening (compatible with local data dir access)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/ontolith /home/ontolith/data
+# Allow binding non-privileged ports
+AmbientCapabilities=
+CapabilityBoundingSet=
+
+# Logging → journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ontolith-server
+
+[Install]
+WantedBy=multi-user.target

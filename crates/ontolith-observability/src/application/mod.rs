@@ -33,10 +33,7 @@ impl StorageMetricsReader for InMemoryStorageEngine {
     }
 }
 
-pub fn collect_runtime_metrics<T, S>(
-    tx_reader: &T,
-    storage_reader: &S,
-) -> RuntimeMetricsSnapshot
+pub fn collect_runtime_metrics<T, S>(tx_reader: &T, storage_reader: &S) -> RuntimeMetricsSnapshot
 where
     T: TransactionMetricsReader,
     S: StorageMetricsReader,
@@ -55,43 +52,43 @@ pub fn runtime_snapshot_to_metric_points(snapshot: &RuntimeMetricsSnapshot) -> V
             "transaction.begun",
             snapshot.transaction.begun,
             timestamp_ms,
-            &[ ("component", "transaction") ],
+            &[("component", "transaction")],
         ),
         counter(
             "transaction.begin_rejected",
             snapshot.transaction.begin_rejected,
             timestamp_ms,
-            &[ ("component", "transaction") ],
+            &[("component", "transaction")],
         ),
         counter(
             "transaction.committed",
             snapshot.transaction.committed,
             timestamp_ms,
-            &[ ("component", "transaction") ],
+            &[("component", "transaction")],
         ),
         counter(
             "transaction.aborted",
             snapshot.transaction.aborted,
             timestamp_ms,
-            &[ ("component", "transaction") ],
+            &[("component", "transaction")],
         ),
         counter(
             "transaction.expired_cleaned",
             snapshot.transaction.expired_cleaned,
             timestamp_ms,
-            &[ ("component", "transaction") ],
+            &[("component", "transaction")],
         ),
         gauge(
             "transaction.active",
             snapshot.transaction.active as f64,
             timestamp_ms,
-            &[ ("component", "transaction") ],
+            &[("component", "transaction")],
         ),
         counter(
             "storage.staged_batches",
             snapshot.storage.staged_batches,
             timestamp_ms,
-            &[ ("component", "storage") ],
+            &[("component", "storage")],
         ),
         counter(
             "storage.write_transactions",
@@ -117,7 +114,7 @@ pub fn runtime_snapshot_to_metric_points(snapshot: &RuntimeMetricsSnapshot) -> V
             "storage.committed_transactions",
             snapshot.storage.committed_transactions,
             timestamp_ms,
-            &[ ("component", "storage") ],
+            &[("component", "storage")],
         ),
         counter(
             "storage.write_transactions",
@@ -179,7 +176,7 @@ pub fn runtime_snapshot_to_metric_points(snapshot: &RuntimeMetricsSnapshot) -> V
             "storage.aborted_transactions",
             snapshot.storage.aborted_transactions,
             timestamp_ms,
-            &[ ("component", "storage") ],
+            &[("component", "storage")],
         ),
         counter(
             "storage.write_transactions",
@@ -205,19 +202,19 @@ pub fn runtime_snapshot_to_metric_points(snapshot: &RuntimeMetricsSnapshot) -> V
             "storage.checkpoint_truncated_records",
             snapshot.storage.checkpoint_truncated_records,
             timestamp_ms,
-            &[ ("component", "storage") ],
+            &[("component", "storage")],
         ),
         gauge(
             "storage.pending_transactions",
             snapshot.storage.pending_transactions as f64,
             timestamp_ms,
-            &[ ("component", "storage") ],
+            &[("component", "storage")],
         ),
         gauge(
             "storage.wal_records",
             snapshot.storage.wal_records as f64,
             timestamp_ms,
-            &[ ("component", "storage") ],
+            &[("component", "storage")],
         ),
     ]
 }
@@ -368,8 +365,15 @@ mod tests {
             points
                 .iter()
                 .filter(|point| point.name.starts_with("transaction."))
-                .all(|point| point.labels.iter().any(|(k, v)| k == "component" && v == "transaction"))
+                .all(|point| point
+                    .labels
+                    .iter()
+                    .any(|(k, v)| k == "component" && v == "transaction"))
         );
-        assert!(points.iter().all(|point| point.timestamp_ms == snapshot.timestamp_ms));
+        assert!(
+            points
+                .iter()
+                .all(|point| point.timestamp_ms == snapshot.timestamp_ms)
+        );
     }
 }

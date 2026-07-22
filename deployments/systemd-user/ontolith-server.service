@@ -1,0 +1,23 @@
+[Unit]
+Description=Ontolith semantic runtime HTTP server (L5, user service)
+Documentation=file:///home/ontolith/docs/L5-ontolith-access-security.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ontolith
+EnvironmentFile=-%h/.config/ontolith/ontolith.env
+Environment=RUST_BACKTRACE=1
+ExecStart=/home/ontolith/target/release/ontolith-server
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ontolith-server
+
+[Install]
+WantedBy=default.target

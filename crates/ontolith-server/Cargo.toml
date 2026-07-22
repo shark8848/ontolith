@@ -3,6 +3,14 @@ name = "ontolith-server"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "ontolith-server"
+path = "src/main.rs"
+
+[features]
+default = ["rocksdb-backend"]
+rocksdb-backend = ["ontolith-storage/rocksdb-backend"]
+
 [dependencies]
 ontolith-core = { path = "../ontolith-core" }
 ontolith-query = { path = "../ontolith-query" }
@@ -13,3 +21,8 @@ ontolith-security = { path = "../ontolith-security" }
 ontolith-observability = { path = "../ontolith-observability" }
 ontolith-reasoner = { path = "../ontolith-reasoner" }
 ontolith-sdk = { path = "../ontolith-sdk" }
+ontolith-rdf = { path = "../ontolith-rdf" }
+ontolith-parser = { path = "../ontolith-parser" }
+
+[dev-dependencies]
+tempfile = "3.14.0"

@@ -1,6 +1,6 @@
 use crate::{api, runtime};
 use ontolith_observability::infrastructure::{
-    run_runtime_sampling_loop, InMemoryMetricSink, RuntimeSamplingConfig,
+    InMemoryMetricSink, RuntimeSamplingConfig, run_runtime_sampling_loop,
 };
 use ontolith_storage::infrastructure::InMemoryStorageEngine;
 use ontolith_transaction::infrastructure::InMemoryTransactionManager;
@@ -14,13 +14,8 @@ pub fn run() {
     let storage = InMemoryStorageEngine::new();
     let sink = InMemoryMetricSink::new();
     let sampling_config = load_runtime_sampling_config_from_env();
-    let snapshots = run_runtime_sampling_loop(
-        &tx_manager,
-        &storage,
-        &sink,
-        sampling_config,
-    )
-    .expect("runtime metrics sampling/export should succeed");
+    let snapshots = run_runtime_sampling_loop(&tx_manager, &storage, &sink, sampling_config)
+        .expect("runtime metrics sampling/export should succeed");
     let snapshot = snapshots
         .last()
         .expect("sampling loop must produce at least one snapshot");
