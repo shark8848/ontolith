@@ -1,7 +1,7 @@
 # R1 SPARQL Smoke Compliance Profile
 
 文档 ID: COMP-R1-0001  
-版本: 1.4.0  
+版本: 1.5.0  
 日期: 2026-07-22  
 Crate: [`ontolith-compliance`](../crates/ontolith-compliance)
 
@@ -58,15 +58,16 @@ Current must-pass increment:
 
 - Aggregate COUNT (no GROUP BY)
 - Subquery (nested SELECT + LIMIT baseline)
+- Property path sequence (iri/iri baseline)
 
 Current unsupported:
 
-- Property paths
+- Advanced property path operators (`*`, `+`, `?`, alternation, inverse)
 - SPARQL Update
 
 ## Out of scope (R1+)
 
-- Property paths
+- Advanced property path operators (`*`, `+`, `?`, alternation, inverse)
 - Advanced subquery forms beyond nested SELECT + LIMIT baseline
 - Full aggregates/GROUP BY/HAVING beyond COUNT baseline
 - SPARQL Update
