@@ -38,11 +38,11 @@ pub const SPARQL_W3C_SUBSET_FEATURES: &[&str] = &[
     "BIND",
     "VALUES",
     "Property path sequence (iri/iri baseline)",
+    "Property path +/*/|/^ (minimal set baseline)",
     "Aggregate COUNT",
     "Subquery (nested SELECT + LIMIT baseline)",
     "DISTINCT/ORDER BY/LIMIT",
     "PREFIX + Turtle ingest",
-    "unsupported: advanced property path",
     "unsupported: update",
 ];
 

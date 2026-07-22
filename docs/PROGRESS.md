@@ -1,11 +1,11 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.5  
+版本: 0.1.7  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-22（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包）；Git 当前头: `main` @ `6043a2b`（COUNT+子查询基线已收敛，当前继续底层属性路径基线收敛）
+对照代码快照: 2026-07-22（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包）；Git 当前头: `main`（本波次收工提交后刷新）（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
 
 ---
 
@@ -42,13 +42,13 @@
 | Phase 0 规划与治理 | 部分完成 | ~60% | 台账 + ADR/RFC 模板 + 依赖登记 + 计划互链；签批仍缺 |
 | Phase 1 核心模型与存储抽象 | 部分完成 | ~70% | L0/L1 文档化；ConsistencyLevel；存储契约固化 |
 | Phase 2 持久化与事务内核 | 部分完成 | ~85% | 内存六索引 + RocksDB 耐久；无真 MVCC / 纯 CF 扫描 |
-| Phase 3 查询引擎 | 部分完成 | ~88% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + COUNT 聚合基线（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径序列基线（iri/iri）+ W3C 子集门禁（required-lite，must-pass 13/13）；缺高级属性路径/完整聚合/Update |
+| Phase 3 查询引擎 | 部分完成 | ~90% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + COUNT 聚合基线（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径最小集（`/`、`+`、`*`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 17/17）；缺属性路径 `?` / 完整聚合 / Update |
 | Phase 4 集群与一致性 MVP | 部分完成 | ~80% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API；无多进程 Raft |
 | Phase 5 接入层与安全基线 | 部分完成 | ~82% | HTTP 全路由 + 文件审计 + cluster 权限 + systemd 打包；无 TLS/OIDC |
 | Phase 6 推理与验证 | 未开始 | ~5% | 仅类型占位 |
 | Phase 7 企业运维与发布 | 部分完成 | ~20% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本；无发布/回滚 |
 | Phase 8 AI-Native 扩展 | 未开始 | 0% | — |
-| **分层内核 L0–L3** | **部分完成** | **~86–88%** | 语义+存储+查询主路径可用，COUNT/子查询/属性路径序列基线已纳入回归保护 |
+| **分层内核 L0–L3** | **部分完成** | **~88–90%** | 语义+存储+查询主路径可用，COUNT/子查询/属性路径最小集已纳入回归保护 |
 | **相对 R1 退出标准** | **进行中** | **~70–73%** | 内核+HTTP+集群+CI/烟雾合规 + W3C 子集 required-lite；多节点数据面/W3C 全量/SLO 仍缺 |
 | **相对 R1–R4 全计划** | **进行中** | **~12–15%** | — |
 
@@ -59,7 +59,7 @@
 | L0 core | ~85% | KO/Canonical/Error/ConsistencyLevel |
 | L1 rdf | ~80% | Triple/Quad/Dataset |
 | L2 storage/txn | ~85% | 内存+RocksDB |
-| L3 parser/query | ~88% | 完整核心，非仅 MVP；COUNT 聚合+子查询+属性路径序列基线已落地；W3C 子集 required-lite + strict 观测双轨 |
+| L3 parser/query | ~90% | 完整核心，非仅 MVP；COUNT 聚合+子查询+属性路径最小集（`/`、`+`、`*`、`|`、`^`）已落地；W3C 子集 required-lite + strict 观测双轨 |
 | L4 cluster | ~80% | +session/partition/rebalance/commit + HTTP /cluster；14 测 |
 | L5 server/security/obs | ~82% | 双后端、文件审计、Results JSON、ingest、增强指标、部署脚本 |
 | L6 reasoner | ~5% | 占位 |
@@ -125,11 +125,11 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P3-01 | SPARQL 解析到执行主链路 | 部分完成 | 89% | SELECT/ASK/CONSTRUCT + JOIN/OPT/UNION/FILTER/BIND/VALUES + COUNT 聚合（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径序列基线（iri/iri） | 高级属性路径/完整聚合 |
+| P3-01 | SPARQL 解析到执行主链路 | 部分完成 | 91% | SELECT/ASK/CONSTRUCT + JOIN/OPT/UNION/FILTER/BIND/VALUES + COUNT 聚合（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径最小集（`/`、`+`、`*`、`|`、`^`） | 属性路径 `?` / 完整聚合 |
 | P3-02 | 规则优化基线 | 部分完成 | 55% | BGP 重排、Identity 消除、Filter 下推、POS/OSP 选路 | 代价模型/统计 |
 | P3-03 | Explain 输出 | 部分完成 | 85% | logical/physical/algebra + optimize 步骤 | HTTP Explain API |
 | P3-04 | 超时与取消 API | 部分完成 | 75% | timeout_ms + Arc\<AtomicBool\> cancel | 异步抢占/token |
-| P3-05 | MVP 标准符合性子集 | 部分完成 | 80% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 15 烟雾 + W3C 子集运行器（must-pass 13/13，known-gap xfail=0，unsupported skip=1）+ CI required-lite + strict observer + `ci-local.sh` 全链路通过 | 扩展到 20–40 case；稳定后评估 strict required |
+| P3-05 | MVP 标准符合性子集 | 部分完成 | 84% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 15 烟雾 + W3C 子集运行器（must-pass 17/17，known-gap xfail=0，unsupported skip=1）+ CI required-lite + strict observer + `ci-local.sh` 全链路通过 | 扩展到 20–40 case；稳定后评估 strict required |
 
 **阶段退出条件：** MVP profile 查询可跑通；Explain/超时/取消可用。
 
@@ -210,7 +210,7 @@
 | [~] SPARQL 查询基线 | 部分完成 | SELECT/ASK/CONSTRUCT 核心；非完整 1.1 |
 | [~] 单区域集群核心 | 部分完成 | 控制面可测+HTTP 演示；无多节点数据面 |
 | [~] 安全与审计基线 | 部分完成 | HTTP 鉴权+审计+JSONL 落盘；无 OIDC |
-| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（required-lite，must-pass 13/13，xfail=0，xpass=0）+ strict observer（non-blocking）；无完整 W3C 套件 |
+| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（required-lite，must-pass 17/17，xfail=0，xpass=0）+ strict observer（non-blocking）；无完整 W3C 套件 |
 | [ ] 核心 SLO 基线达标 | 未完成 | 无基准 |
 | [~] 恢复演练通过 | 部分完成 | RocksDB reopen 单测；无演练手册 |
 | [ ] 回滚演练通过 | 未完成 | 无发布链路 |
@@ -254,7 +254,7 @@
 | WBS-01 | 核心运行时与知识模型 | 部分完成 | ~70% | L0+L1；Part II 序列化仍缺 |
 | WBS-02 | 解析与导入 | 部分完成 | ~80% | N-T/N-Q/Turtle/TriG/流式；JSON-LD 未做 |
 | WBS-03 | 存储与事务 | 部分完成 | ~85% | RocksDB 已接；真 MVCC / 纯 CF 扫描仍缺 |
-| WBS-04 | 查询与优化 | 部分完成 | ~84% | 完整核心代数+优化+绑定 + COUNT 聚合基线 + 子查询基线 + 属性路径序列基线 + W3C 子集门禁；缺高级属性路径/完整聚合 |
+| WBS-04 | 查询与优化 | 部分完成 | ~88% | 完整核心代数+优化+绑定 + COUNT 聚合基线 + 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`|`、`^`）+ W3C 子集门禁；缺属性路径 `?` / 完整聚合 |
 | WBS-05 | 推理与 SHACL | 未开始 | ~5% | 全部实现 |
 | WBS-06 | 分布式运行时 | 部分完成 | ~75% | 控制面增强+HTTP；无多进程数据复制 |
 | WBS-07 | API、安全与集成 | 部分完成 | ~78% | 双后端网关+文件审计+Results JSON+ingest+部署脚本；无 TLS/OIDC |
@@ -266,7 +266,7 @@
 
 | 门禁/治理项 | 状态 | 证据 / 缺口 |
 |-------------|------|-------------|
-| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（must-pass 13/13，known-gap: xfail 0 / xpass 0，unsupported skip 1）+ CI required-lite / strict observer；非完整 W3C 官方 |
+| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（must-pass 17/17，known-gap: xfail 0 / xpass 0，unsupported skip 1）+ CI required-lite / strict observer；非完整 W3C 官方 |
 | [~] 故障注入（选主/复制/恢复） | 部分完成 | `ontolith-cluster` 分区注入/愈合与复制路径单测（14 测） |
 | [ ] 幂等写入验证 | 未开始 | 部分事务单测不足替代 |
 | [ ] 性能回归门禁 | 未开始 | `benchmarks/` 空 |
@@ -289,13 +289,13 @@
 | ontolith-rdf | term/triple/quad/dataset/canonical（11 测） | `crates/ontolith-rdf/src/domain/mod.rs` |
 | ontolith-storage | 内存六索引 + RocksDB 耐久（reopen/abort/delete）+ codec（25 测） | `crates/ontolith-storage/src/infrastructure/**` |
 | ontolith-transaction | begin/commit/abort、超时清理、active 上限、metrics（7 测） | `crates/ontolith-transaction/src/infrastructure/mod.rs` |
-| ontolith-query | SELECT/ASK/CONSTRUCT、JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES、COUNT 聚合（无 GROUP BY）、子查询基线（嵌套 SELECT + LIMIT）、属性路径序列基线（iri/iri）、Explain/timeout（26 测） | `crates/ontolith-query/src/infrastructure/**` |
+| ontolith-query | SELECT/ASK/CONSTRUCT、JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES、COUNT 聚合（无 GROUP BY）、子查询基线（嵌套 SELECT + LIMIT）、属性路径最小集（`/`、`+`、`*`、`|`、`^`）、Explain/timeout（30 测） | `crates/ontolith-query/src/infrastructure/**` |
 | ontolith-parser | N-Triples/N-Quads/Turtle/TriG、流式事件、错误定位、Unsupported 格式（11 测） | `crates/ontolith-parser/src/infrastructure/**` |
 | ontolith-cluster | 选主、分区、复制、commit、rebalance、session sticky（14 测） | `crates/ontolith-cluster/src/infrastructure/mod.rs` |
 | ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）（7 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
 | ontolith-observability | sink、导出、采样循环、Prometheus 文本（6 测） | `crates/ontolith-observability/src/**` |
 | ontolith-server | metrics、采样配置、HTTP query decode（6 测） | `crates/ontolith-server/src/{api,bootstrap,http}.rs` |
-| ontolith-compliance | R1 烟雾 15 + W3C 子集 profile 1 | `crates/ontolith-compliance/tests/**` |
+| ontolith-compliance | R1 烟雾 15 + W3C 子集 profile 1（must-pass 17/17） | `crates/ontolith-compliance/tests/**` |
 
 ---
 
@@ -326,6 +326,8 @@
 | 2026-07-22 | GitHub Copilot | 底层优先增量：`ontolith-query` 落地 COUNT 聚合最小能力（无 GROUP BY），新增 query 测试 3 条（总计 24）；W3C 子集 `w3c-aggregate-gap` 晋升为 must-pass，统计更新为 must-pass 11/11、known-gap xfail 1、xpass 0、skip 2 |
 | 2026-07-22 | GitHub Copilot | 底层优先增量：`ontolith-query` 落地嵌套 SELECT+LIMIT 子查询基线，新增 query 测试 1 条（总计 25）；W3C 子集 `w3c-subquery-gap` 晋升为 must-pass，统计更新为 must-pass 12/12、known-gap xfail 0、xpass 0、skip 2 |
 | 2026-07-22 | GitHub Copilot | 底层优先增量：`ontolith-query` 落地属性路径序列（iri/iri）基线，新增 query 测试 1 条（总计 26）；W3C 子集 `w3c-property-path-unsupported` 晋升为 must-pass，统计更新为 must-pass 13/13、known-gap xfail 0、xpass 0、skip 1 |
+| 2026-07-22 | GitHub Copilot | 底层优先增量：`ontolith-query` 完成属性路径高级算子最小集（`+`、`*`、`|`、`^`）并改为 `Path` 通用代数求值，新增 query 测试 4 条（总计 30）；W3C 子集新增 4 条路径 must-pass 用例并全绿，统计更新为 must-pass 17/17、known-gap xfail 0、xpass 0、skip 1 |
+| 2026-07-22 | GitHub Copilot | 收工批次：完成高级属性路径最小集代码与合规/架构/进度文档同步，执行 `cargo test -p ontolith-query` 与 `cargo test -p ontolith-compliance` 全绿，进入提交封板。 |
 
 ---
 

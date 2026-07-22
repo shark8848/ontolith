@@ -673,4 +673,157 @@ mod tests {
             Some(&BoundValue::Literal(LiteralValue::Integer(30)))
         );
     }
+
+    #[test]
+    fn property_path_one_or_more_plus() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/alice");
+        let bob = dict.encode_node("http://ex.org/bob");
+        let _carol = dict.encode_node("http://ex.org/carol");
+
+        let txn = TxnId::new(2);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/bob")),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            txn,
+            Triple {
+                subject: bob,
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/carol")),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?o WHERE { <http://ex.org/alice> <http://ex.org/knows>+ ?o }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 2);
+    }
+
+    #[test]
+    fn property_path_zero_or_more_star_includes_self() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/alice");
+        let bob = dict.encode_node("http://ex.org/bob");
+
+        let txn = TxnId::new(3);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/bob")),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?o WHERE { <http://ex.org/alice> <http://ex.org/knows>* ?o }",
+            ))
+            .unwrap();
+
+        assert_eq!(result.solutions.len(), 2);
+        assert!(result
+            .solutions
+            .iter()
+            .any(|s| s.get("o") == Some(&BoundValue::Node(alice))));
+        assert!(result
+            .solutions
+            .iter()
+            .any(|s| s.get("o") == Some(&BoundValue::Node(bob))));
+    }
+
+    #[test]
+    fn property_path_alternative_or() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/alice");
+
+        let txn = TxnId::new(4);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/name"),
+                object: Term::Literal(LiteralValue::String("Alice".into())),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/nick"),
+                object: Term::Literal(LiteralValue::String("A".into())),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?v WHERE { <http://ex.org/alice> <http://ex.org/name>|<http://ex.org/nick> ?v }",
+            ))
+            .unwrap();
+
+        assert_eq!(result.solutions.len(), 2);
+    }
+
+    #[test]
+    fn property_path_inverse_predicate() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/alice");
+
+        let txn = TxnId::new(5);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/bob")),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s WHERE { <http://ex.org/bob> ^<http://ex.org/knows> ?s }",
+            ))
+            .unwrap();
+
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(result.solutions[0].get("s"), Some(&BoundValue::Node(alice)));
+    }
 }

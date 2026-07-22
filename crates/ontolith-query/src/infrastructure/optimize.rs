@@ -101,6 +101,15 @@ fn eliminate_identity(algebra: Algebra) -> Algebra {
             output,
             input: Box::new(eliminate_identity(*input)),
         },
+        Algebra::Path {
+            subject,
+            path,
+            object,
+        } => Algebra::Path {
+            subject,
+            path,
+            object,
+        },
         other => other,
     }
 }
@@ -176,6 +185,15 @@ fn reorder_and_merge(algebra: Algebra) -> Algebra {
             function,
             output,
             input: Box::new(reorder_and_merge(*input)),
+        },
+        Algebra::Path {
+            subject,
+            path,
+            object,
+        } => Algebra::Path {
+            subject,
+            path,
+            object,
         },
         other => other,
     }
@@ -272,6 +290,15 @@ fn push_filters(algebra: Algebra) -> Algebra {
             function,
             output,
             input: Box::new(push_filters(*input)),
+        },
+        Algebra::Path {
+            subject,
+            path,
+            object,
+        } => Algebra::Path {
+            subject,
+            path,
+            object,
         },
         other => other,
     }

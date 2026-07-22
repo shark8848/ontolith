@@ -1,7 +1,7 @@
 # L3 — Parser & Query Engine 完整功能说明
 
 文档 ID: IMPL-L3-0001  
-版本: 2.3.0  
+版本: 2.4.0  
 状态: Implemented (full L3 core, not MVP-only)  
 日期: 2026-07-22  
 对应 crate:
@@ -48,9 +48,11 @@ SPARQL / RDF text
 | 解绑定 `Solution` 结果（非仅 row_count） | ✅ |
 | timeout + 协作式 cancel | ✅ |
 | 经 L2 SPO/POS/OSP 访问 | ✅ |
+| 属性路径最小集（`/`、`+`、`*`、`|`、`^`） | ✅ |
 | JSON-LD | ❌ 明确 Unsupported |
 | SPARQL Update / DESCRIBE 执行 | ❌ 解析识别，执行 Unsupported |
-| 高级属性路径 / 高级子查询 / EXISTS / 完整聚合（GROUP BY/HAVING） / 服务联邦 | ❌ 后续增强 |
+| 属性路径扩展（`?`、分组/嵌套更完整 1.1 语法） | ❌ 后续增强 |
+| 高级子查询 / EXISTS / 完整聚合（GROUP BY/HAVING） / 服务联邦 | ❌ 后续增强 |
 | 流式 Result 协议（网络层） | ❌ 属 L5 接入层 |
 
 ---
@@ -153,7 +155,7 @@ Query text
 | 构造 | 代数 | 执行 |
 |------|------|------|
 | 三元组模式序列 | `Bgp` | 逐模式求精；SPO/POS/OSP 选路 |
-| 属性路径 `p1/p2`（iri/iri 基线） | `Join(Bgp, Bgp)` 展开 | 通过字典桥接完成中间节点匹配 |
+| 属性路径最小集 `p1/p2`、`+`、`*`、`|`、`^` | `Path` + `PathExpression` | 递归求值 + 字典桥接（IRI↔Node） |
 | 并列模式 | `Join` | 哈希兼容 join（solution merge） |
 | OPTIONAL | `LeftJoin` | 左外连接 |
 | UNION | `Union` | 多重集合并 |
@@ -250,7 +252,7 @@ logical 含 `optimize:before->after`。
 | Crate | 测试数 | 覆盖 |
 |-------|--------|------|
 | parser | 11 | NT/NQ/Turtle/TriG/集合/blank 属性表/流式/定位错误/JSON-LD |
-| query | 26 | SELECT/JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/ASK/DISTINCT/ORDER/LIMIT/PREFIX/COUNT(无 GROUP BY)/子查询基线/属性路径序列基线/Explain/timeout/cancel/txn/hint |
+| query | 30 | SELECT/JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/ASK/DISTINCT/ORDER/LIMIT/PREFIX/COUNT(无 GROUP BY)/子查询基线/属性路径最小集（`/`、`+`、`*`、`|`、`^`）/Explain/timeout/cancel/txn/hint |
 | storage 回归 | 24 | 绿 |
 | core 回归 | 11 | 绿 |
 
@@ -258,7 +260,7 @@ logical 含 `optimize:before->after`。
 
 ## 6. 已知限制（完整 L3 边界，非“未开工”）
 
-1. **高级属性路径（`*`/`+`/`?`/`|`/`^` 等）**、**高级子查询（相关子查询等）**、**EXISTS/NOT EXISTS**、**GROUP BY/HAVING 与其他聚合函数**、**SERVICE** 未实现（仅 COUNT 无 GROUP BY、嵌套 SELECT+LIMIT 子查询与 `p1/p2` 属性路径序列基线已支持）。  
+1. **属性路径扩展（`?`、分组/嵌套更完整 1.1 语法）**、**高级子查询（相关子查询等）**、**EXISTS/NOT EXISTS**、**GROUP BY/HAVING 与其他聚合函数**、**SERVICE** 未实现（已支持 COUNT 无 GROUP BY、嵌套 SELECT+LIMIT 子查询与属性路径最小集 `p1/p2`、`+`、`*`、`|`、`^`）。  
 2. **SPARQL Update / DESCRIBE** 仅 kind 识别。  
 3. **JSON-LD** 未实现。  
 4. JOIN 为嵌套循环式 solution merge（正确优先，非代价模型）。  
@@ -290,3 +292,4 @@ logical 含 `optimize:before->after`。
 | 2026-07-22 | 2.1.0 | 新增 COUNT 聚合最小能力（无 GROUP BY）与对应测试；文档同步已知限制 |
 | 2026-07-22 | 2.2.0 | 新增嵌套 SELECT+LIMIT 子查询基线与对应测试；W3C subset 子查询用例可通过 |
 | 2026-07-22 | 2.3.0 | 新增属性路径序列（iri/iri）基线与对应测试；W3C subset 属性路径基线用例可通过 |
+| 2026-07-22 | 2.4.0 | 新增属性路径高级算子最小集（`+`、`*`、`|`、`^`）与对应测试；W3C subset 路径最小集用例可通过 |

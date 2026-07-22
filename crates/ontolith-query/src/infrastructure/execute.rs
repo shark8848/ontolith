@@ -2,8 +2,8 @@
 
 use crate::application::QueryReadService;
 use crate::domain::{
-    AggregateFunction, Algebra, BoundValue, Expression, QueryKind, QueryPlan, QueryRequest,
-    QueryResult, Solution, TermPattern, TriplePattern,
+    AggregateFunction, Algebra, BoundValue, Expression, PathExpression, QueryKind, QueryPlan,
+    QueryRequest, QueryResult, Solution, TermPattern, TriplePattern,
 };
 use ontolith_core::domain::{Iri, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
@@ -180,7 +180,7 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
         Algebra::Join { left, right } => {
             let l = eval_algebra(left, ctx)?;
             let r = eval_algebra(right, ctx)?;
-            Ok(hash_join(l, r))
+            hash_join(l, r, ctx)
         }
         Algebra::LeftJoin {
             left,
@@ -189,7 +189,7 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
         } => {
             let l = eval_algebra(left, ctx)?;
             let r = eval_algebra(right, ctx)?;
-            Ok(left_join(l, r, condition.as_ref()))
+            left_join(l, r, condition.as_ref(), ctx)
         }
         Algebra::Union { left, right } => {
             let mut l = eval_algebra(left, ctx)?;
@@ -287,6 +287,11 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
             output,
             input,
         } => eval_aggregate(function, output, input, ctx),
+        Algebra::Path {
+            subject,
+            path,
+            object,
+        } => eval_path_pattern(subject, path, object, ctx),
     }
 }
 
@@ -307,6 +312,274 @@ fn eval_aggregate(
     let mut out = Solution::new();
     out.insert(output.to_owned(), BoundValue::Literal(LiteralValue::Integer(count as i64)));
     Ok(vec![out])
+}
+
+fn eval_path_pattern(
+    subject: &TermPattern,
+    path: &PathExpression,
+    object: &TermPattern,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Solution>, OntolithError> {
+    let starts = enumerate_path_starts(subject, ctx)?;
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for start in starts {
+        ctx.check()?;
+        let endpoints = eval_path_from_value(path, &start, ctx)?;
+        for endpoint in endpoints {
+            let mut row = Solution::new();
+            if !bind_path_pattern(subject, &start, &mut row, ctx)? {
+                continue;
+            }
+            if !bind_path_pattern(object, &endpoint, &mut row, ctx)? {
+                continue;
+            }
+            let key = solution_key(&row);
+            if seen.insert(key) {
+                out.push(row);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn enumerate_path_starts(
+    subject: &TermPattern,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<BoundValue>, OntolithError> {
+    if let Some(bound) = term_pattern_const_bound(subject) {
+        return Ok(vec![normalize_path_value(bound, ctx)?]);
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let triples = ctx.read.all_triples(ctx.txn_id)?;
+    for triple in triples {
+        let subj = BoundValue::Node(triple.subject);
+        let subj_key = path_value_key(&subj);
+        if seen.insert(subj_key) {
+            out.push(subj);
+        }
+
+        let obj = normalize_path_value(BoundValue::from_term(&triple.object), ctx)?;
+        if !matches!(obj, BoundValue::Literal(_)) {
+            let obj_key = path_value_key(&obj);
+            if seen.insert(obj_key) {
+                out.push(obj);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn eval_path_from_value(
+    path: &PathExpression,
+    start: &BoundValue,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<BoundValue>, OntolithError> {
+    ctx.check()?;
+    match path {
+        PathExpression::Predicate(predicate) => eval_predicate_from(start, predicate, ctx),
+        PathExpression::InversePredicate(predicate) => {
+            eval_inverse_predicate_from(start, predicate, ctx)
+        }
+        PathExpression::Sequence(left, right) => {
+            let mids = eval_path_from_value(left, start, ctx)?;
+            let mut out = Vec::new();
+            let mut seen = HashSet::new();
+            for mid in mids {
+                for end in eval_path_from_value(right, &mid, ctx)? {
+                    let key = path_value_key(&end);
+                    if seen.insert(key) {
+                        out.push(end);
+                    }
+                }
+            }
+            Ok(out)
+        }
+        PathExpression::Alternative(left, right) => {
+            let mut out = Vec::new();
+            let mut seen = HashSet::new();
+            for value in eval_path_from_value(left, start, ctx)? {
+                let key = path_value_key(&value);
+                if seen.insert(key) {
+                    out.push(value);
+                }
+            }
+            for value in eval_path_from_value(right, start, ctx)? {
+                let key = path_value_key(&value);
+                if seen.insert(key) {
+                    out.push(value);
+                }
+            }
+            Ok(out)
+        }
+        PathExpression::OneOrMore(inner) => eval_one_or_more(inner, start, ctx),
+        PathExpression::ZeroOrMore(inner) => {
+            let mut out = vec![start.clone()];
+            let mut seen = HashSet::new();
+            seen.insert(path_value_key(start));
+            for value in eval_one_or_more(inner, start, ctx)? {
+                let key = path_value_key(&value);
+                if seen.insert(key) {
+                    out.push(value);
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn eval_one_or_more(
+    inner: &PathExpression,
+    start: &BoundValue,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<BoundValue>, OntolithError> {
+    let mut out = Vec::new();
+    let mut out_seen = HashSet::new();
+    let mut expanded = HashSet::new();
+    let mut stack = vec![start.clone()];
+
+    while let Some(current) = stack.pop() {
+        ctx.check()?;
+        let current_key = path_value_key(&current);
+        if !expanded.insert(current_key) {
+            continue;
+        }
+
+        for next in eval_path_from_value(inner, &current, ctx)? {
+            let key = path_value_key(&next);
+            if out_seen.insert(key.clone()) {
+                out.push(next.clone());
+            }
+            stack.push(next);
+        }
+    }
+
+    Ok(out)
+}
+
+fn eval_predicate_from(
+    start: &BoundValue,
+    predicate: &Iri,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<BoundValue>, OntolithError> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for subject in subject_nodes_from_bound(start, ctx)? {
+        ctx.check()?;
+        for triple in ctx
+            .read
+            .matching(Some(subject), Some(predicate), None, ctx.txn_id)?
+        {
+            let value = normalize_path_value(BoundValue::from_term(&triple.object), ctx)?;
+            let key = path_value_key(&value);
+            if seen.insert(key) {
+                out.push(value);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn eval_inverse_predicate_from(
+    start: &BoundValue,
+    predicate: &Iri,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<BoundValue>, OntolithError> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for triple in ctx.read.matching(None, Some(predicate), None, ctx.txn_id)? {
+        ctx.check()?;
+        let candidate = normalize_path_value(BoundValue::from_term(&triple.object), ctx)?;
+        if !bound_values_compatible(&candidate, start, ctx)? {
+            continue;
+        }
+        let value = BoundValue::Node(triple.subject);
+        let key = path_value_key(&value);
+        if seen.insert(key) {
+            out.push(value);
+        }
+    }
+
+    Ok(out)
+}
+
+fn subject_nodes_from_bound(
+    value: &BoundValue,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<NodeId>, OntolithError> {
+    match value {
+        BoundValue::Node(n) | BoundValue::Blank(n) => Ok(vec![*n]),
+        BoundValue::Iri(iri) => Ok(ctx.read.node_for_iri(iri)?.into_iter().collect()),
+        BoundValue::Literal(_) => Ok(Vec::new()),
+    }
+}
+
+fn bind_path_pattern(
+    pattern: &TermPattern,
+    value: &BoundValue,
+    sol: &mut Solution,
+    ctx: &ExecCtx<'_>,
+) -> Result<bool, OntolithError> {
+    match pattern {
+        TermPattern::Variable(v) | TermPattern::Blank(v) => {
+            if let Some(existing) = sol.get(v) {
+                return bound_values_compatible(existing, value, ctx);
+            }
+            sol.insert(v.clone(), value.clone());
+            Ok(true)
+        }
+        TermPattern::Node(expected) => match value {
+            BoundValue::Node(actual) | BoundValue::Blank(actual) => Ok(actual == expected),
+            BoundValue::Iri(actual) => {
+                Ok(ctx.read.node_for_iri(actual)?.is_some_and(|n| n == *expected))
+            }
+            BoundValue::Literal(_) => Ok(false),
+        },
+        TermPattern::Iri(expected) => match value {
+            BoundValue::Iri(actual) => Ok(actual == expected),
+            BoundValue::Node(actual) | BoundValue::Blank(actual) => {
+                Ok(ctx.read.node_for_iri(expected)?.is_some_and(|n| n == *actual))
+            }
+            BoundValue::Literal(_) => Ok(false),
+        },
+        TermPattern::Literal(expected) => match value {
+            BoundValue::Literal(actual) => Ok(actual == expected),
+            _ => Ok(false),
+        },
+    }
+}
+
+fn term_pattern_const_bound(pattern: &TermPattern) -> Option<BoundValue> {
+    match pattern {
+        TermPattern::Node(n) => Some(BoundValue::Node(*n)),
+        TermPattern::Iri(i) => Some(BoundValue::Iri(i.clone())),
+        TermPattern::Literal(l) => Some(BoundValue::Literal(l.clone())),
+        TermPattern::Variable(_) | TermPattern::Blank(_) => None,
+    }
+}
+
+fn path_value_key(value: &BoundValue) -> String {
+    format!("{value:?}")
+}
+
+fn normalize_path_value(value: BoundValue, ctx: &ExecCtx<'_>) -> Result<BoundValue, OntolithError> {
+    match value {
+        BoundValue::Iri(iri) => {
+            if let Some(node) = ctx.read.node_for_iri(&iri)? {
+                Ok(BoundValue::Node(node))
+            } else {
+                Ok(BoundValue::Iri(iri))
+            }
+        }
+        other => Ok(other),
+    }
 }
 
 fn eval_bgp(patterns: &[TriplePattern], ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, OntolithError> {
@@ -478,28 +751,33 @@ fn bound_term(p: &TermPattern, sol: &Solution) -> Option<Term> {
     }
 }
 
-fn hash_join(left: Vec<Solution>, right: Vec<Solution>) -> Vec<Solution> {
+fn hash_join(
+    left: Vec<Solution>,
+    right: Vec<Solution>,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Solution>, OntolithError> {
     let mut out = Vec::new();
     for l in &left {
         for r in &right {
-            if let Some(m) = l.merge(r) {
+            if let Some(m) = merge_solutions_compatible(l, r, ctx)? {
                 out.push(m);
             }
         }
     }
-    out
+    Ok(out)
 }
 
 fn left_join(
     left: Vec<Solution>,
     right: Vec<Solution>,
     condition: Option<&Expression>,
-) -> Vec<Solution> {
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Solution>, OntolithError> {
     let mut out = Vec::new();
     for l in &left {
         let mut matched = false;
         for r in &right {
-            if let Some(m) = l.merge(r) {
+            if let Some(m) = merge_solutions_compatible(l, r, ctx)? {
                 let ok = condition
                     .map(|c| eval_expr_bool(c, &m).unwrap_or(false))
                     .unwrap_or(true);
@@ -513,7 +791,42 @@ fn left_join(
             out.push(l.clone());
         }
     }
-    out
+    Ok(out)
+}
+
+fn merge_solutions_compatible(
+    left: &Solution,
+    right: &Solution,
+    ctx: &ExecCtx<'_>,
+) -> Result<Option<Solution>, OntolithError> {
+    let mut out = left.clone();
+    for (var, value) in &right.bindings {
+        if let Some(existing) = out.bindings.get(var) {
+            if !bound_values_compatible(existing, value, ctx)? {
+                return Ok(None);
+            }
+        } else {
+            out.bindings.insert(var.clone(), value.clone());
+        }
+    }
+    Ok(Some(out))
+}
+
+fn bound_values_compatible(
+    left: &BoundValue,
+    right: &BoundValue,
+    ctx: &ExecCtx<'_>,
+) -> Result<bool, OntolithError> {
+    if left == right {
+        return Ok(true);
+    }
+
+    match (left, right) {
+        (BoundValue::Node(a) | BoundValue::Blank(a), BoundValue::Node(b) | BoundValue::Blank(b)) => {
+            Ok(a == b)
+        }
+        _ => iri_node_compatible(left, right, ctx),
+    }
 }
 
 fn eval_expr_bool(expr: &Expression, sol: &Solution) -> Option<bool> {
@@ -674,6 +987,16 @@ fn select_variables(algebra: &Algebra) -> Vec<String> {
         | Algebra::Filter { input, .. }
         | Algebra::Extend { input, .. }
         | Algebra::Aggregate { input, .. } => select_variables(input),
+        Algebra::Path { subject, object, .. } => {
+            let mut vars = BTreeSet::new();
+            if let Some(v) = subject.as_variable() {
+                vars.insert(v.to_owned());
+            }
+            if let Some(v) = object.as_variable() {
+                vars.insert(v.to_owned());
+            }
+            vars.into_iter().collect()
+        }
         _ => Vec::new(),
     }
 }

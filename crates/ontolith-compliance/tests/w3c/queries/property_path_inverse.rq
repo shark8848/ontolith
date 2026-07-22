@@ -1,0 +1,3 @@
+SELECT ?s WHERE {
+  <http://ex.org/bob> ^<http://ex.org/knows> ?s .
+}

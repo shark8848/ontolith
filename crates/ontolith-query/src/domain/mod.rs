@@ -93,6 +93,17 @@ pub enum AggregateFunction {
     Count { variable: Option<String> },
 }
 
+/// Property path subset used by the L3 executor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathExpression {
+    Predicate(Iri),
+    InversePredicate(Iri),
+    Sequence(Box<PathExpression>, Box<PathExpression>),
+    Alternative(Box<PathExpression>, Box<PathExpression>),
+    OneOrMore(Box<PathExpression>),
+    ZeroOrMore(Box<PathExpression>),
+}
+
 /// SPARQL algebra (W3C-style subset used by the executor).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Algebra {
@@ -144,6 +155,11 @@ pub enum Algebra {
         function: AggregateFunction,
         output: String,
         input: Box<Algebra>,
+    },
+    Path {
+        subject: TermPattern,
+        path: PathExpression,
+        object: TermPattern,
     },
     /// Empty identity multiset (one empty solution) — unit for joins.
     Identity,
@@ -256,6 +272,26 @@ pub fn summarize_algebra(algebra: &Algebra) -> String {
             };
             format!("Aggregate({fun} AS ?{output}, {})", summarize_algebra(input))
         }
+        Algebra::Path {
+            subject,
+            path,
+            object,
+        } => format!("Path({subject:?}, {}, {object:?})", summarize_path(path)),
+    }
+}
+
+fn summarize_path(path: &PathExpression) -> String {
+    match path {
+        PathExpression::Predicate(p) => format!("<{}>", p.as_str()),
+        PathExpression::InversePredicate(p) => format!("^<{}>", p.as_str()),
+        PathExpression::Sequence(left, right) => {
+            format!("{}/{}", summarize_path(left), summarize_path(right))
+        }
+        PathExpression::Alternative(left, right) => {
+            format!("{}|{}", summarize_path(left), summarize_path(right))
+        }
+        PathExpression::OneOrMore(inner) => format!("{}+", summarize_path(inner)),
+        PathExpression::ZeroOrMore(inner) => format!("{}*", summarize_path(inner)),
     }
 }
 

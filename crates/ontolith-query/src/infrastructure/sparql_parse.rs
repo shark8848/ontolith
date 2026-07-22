@@ -5,8 +5,8 @@
 //! VALUES, DISTINCT, ORDER BY, LIMIT/OFFSET, PREFIX/BASE.
 
 use crate::domain::{
-    AggregateFunction, Algebra, Expression, OrderKey, QueryKind, QueryPlan, QueryPlanId,
-    QueryRequest, TermPattern, TriplePattern,
+    AggregateFunction, Algebra, Expression, OrderKey, PathExpression, QueryKind, QueryPlan,
+    QueryPlanId, QueryRequest, TermPattern, TriplePattern,
 };
 use ontolith_core::domain::{Iri, LiteralValue};
 use ontolith_core::error::OntolithError;
@@ -26,7 +26,6 @@ struct SparqlParser<'a> {
     pos: usize,
     line: usize,
     col: usize,
-    path_var_seq: usize,
     prefixes: BTreeMap<String, String>,
     base: Option<String>,
     logical: Vec<String>,
@@ -54,7 +53,6 @@ impl<'a> SparqlParser<'a> {
             pos: 0,
             line: 1,
             col: 1,
-            path_var_seq: 0,
             prefixes,
             base: None,
             logical: vec!["normalize_query".into()],
@@ -473,12 +471,12 @@ impl<'a> SparqlParser<'a> {
                 } else {
                     acc = join(acc, nested);
                 }
-            } else if let Some(path) = self.try_parse_property_path_sequence()? {
+            } else if let Some(path) = self.try_parse_property_path()? {
                 self.skip();
                 if self.peek_char() == Some('.') {
                     self.bump();
                 }
-                self.logical.push("property_path:seq2".into());
+                self.logical.push("property_path".into());
                 acc = join(acc, path);
             } else if let Some(pattern) = self.try_parse_triple_pattern()? {
                 // collect consecutive triple patterns into one BGP
@@ -518,7 +516,7 @@ impl<'a> SparqlParser<'a> {
         Ok(acc)
     }
 
-    fn try_parse_property_path_sequence(&mut self) -> Result<Option<Algebra>, OntolithError> {
+    fn try_parse_property_path(&mut self) -> Result<Option<Algebra>, OntolithError> {
         self.skip();
         let save = self.checkpoint();
 
@@ -531,32 +529,26 @@ impl<'a> SparqlParser<'a> {
         };
 
         self.skip();
-        let first = match self.parse_var_or_term(false) {
-            Ok(TermPattern::Iri(i)) => TermPattern::Iri(i),
-            Ok(_) => {
-                self.restore(save);
-                return Ok(None);
-            }
-            Err(_) => {
-                self.restore(save);
-                return Ok(None);
+        let pred_start = self.checkpoint();
+        let is_path = if self.peek_char() == Some('^') {
+            true
+        } else {
+            match self.parse_var_or_term(false) {
+                Ok(TermPattern::Iri(_)) => {
+                    self.skip();
+                    matches!(self.peek_char(), Some('/') | Some('|') | Some('+') | Some('*'))
+                }
+                _ => false,
             }
         };
-
-        self.skip();
-        if self.peek_char() != Some('/') {
+        self.restore(pred_start);
+        if !is_path {
             self.restore(save);
             return Ok(None);
         }
-        self.bump();
 
-        self.skip();
-        let second = match self.parse_var_or_term(false) {
-            Ok(TermPattern::Iri(i)) => TermPattern::Iri(i),
-            Ok(_) => {
-                self.restore(save);
-                return Ok(None);
-            }
+        let path = match self.parse_path_alternative() {
+            Ok(path) => path,
             Err(_) => {
                 self.restore(save);
                 return Ok(None);
@@ -572,27 +564,65 @@ impl<'a> SparqlParser<'a> {
             }
         };
 
-        let mid = self.next_path_variable();
-        let left = TriplePattern {
+        Ok(Some(Algebra::Path {
             subject,
-            predicate: first,
-            object: TermPattern::Variable(mid.clone()),
-        };
-        let right = TriplePattern {
-            subject: TermPattern::Variable(mid),
-            predicate: second,
+            path,
             object,
-        };
-
-        Ok(Some(Algebra::Join {
-            left: Box::new(Algebra::Bgp(vec![left])),
-            right: Box::new(Algebra::Bgp(vec![right])),
         }))
     }
 
-    fn next_path_variable(&mut self) -> String {
-        self.path_var_seq += 1;
-        format!("__ontolith_pp{}", self.path_var_seq)
+    fn parse_path_alternative(&mut self) -> Result<PathExpression, OntolithError> {
+        let mut left = self.parse_path_sequence()?;
+        self.skip();
+        while self.peek_char() == Some('|') {
+            self.bump();
+            self.skip();
+            let right = self.parse_path_sequence()?;
+            left = PathExpression::Alternative(Box::new(left), Box::new(right));
+            self.skip();
+        }
+        Ok(left)
+    }
+
+    fn parse_path_sequence(&mut self) -> Result<PathExpression, OntolithError> {
+        let mut left = self.parse_path_unary()?;
+        self.skip();
+        while self.peek_char() == Some('/') {
+            self.bump();
+            self.skip();
+            let right = self.parse_path_unary()?;
+            left = PathExpression::Sequence(Box::new(left), Box::new(right));
+            self.skip();
+        }
+        Ok(left)
+    }
+
+    fn parse_path_unary(&mut self) -> Result<PathExpression, OntolithError> {
+        self.skip();
+        let mut base = if self.peek_char() == Some('^') {
+            self.bump();
+            self.skip();
+            match self.parse_var_or_term(false)? {
+                TermPattern::Iri(iri) => PathExpression::InversePredicate(iri),
+                _ => return Err(self.err("inverse property path requires IRI predicate")),
+            }
+        } else {
+            match self.parse_var_or_term(false)? {
+                TermPattern::Iri(iri) => PathExpression::Predicate(iri),
+                _ => return Err(self.err("property path requires IRI predicates")),
+            }
+        };
+
+        self.skip();
+        if self.peek_char() == Some('+') {
+            self.bump();
+            base = PathExpression::OneOrMore(Box::new(base));
+        } else if self.peek_char() == Some('*') {
+            self.bump();
+            base = PathExpression::ZeroOrMore(Box::new(base));
+        }
+
+        Ok(base)
     }
 
     fn parse_subquery_select(&mut self) -> Result<Algebra, OntolithError> {
@@ -1263,6 +1293,10 @@ impl<'a> SparqlParser<'a> {
                         | '!'
                         | '='
                         | '>'
+                        | '/'
+                        | '^'
+                        | '+'
+                        | '*'
                         | '&'
                         | '|'
                 )
@@ -1337,6 +1371,14 @@ fn apply_subject_hint(algebra: &mut Algebra, node: ontolith_core::domain::NodeId
         | Algebra::OrderBy { input, .. }
         | Algebra::Slice { input, .. }
         | Algebra::Aggregate { input, .. } => apply_subject_hint(input, node),
+        Algebra::Path { subject, .. } => {
+            if subject.is_variable() {
+                *subject = TermPattern::Node(node);
+                true
+            } else {
+                false
+            }
+        }
         _ => false,
     }
 }
@@ -1349,6 +1391,7 @@ fn algebra_tag(a: &Algebra) -> &'static str {
         Algebra::Union { .. } => "union",
         Algebra::Filter { .. } => "filter",
         Algebra::Aggregate { .. } => "aggregate",
+        Algebra::Path { .. } => "path",
         Algebra::Identity => "identity",
         _ => "algebra",
     }
@@ -1440,6 +1483,9 @@ fn walk_physical(algebra: &Algebra, steps: &mut Vec<String>) {
                     steps.push(format!("aggregate_count:?{v}->?{output}"));
                 }
             }
+        }
+        Algebra::Path { path, .. } => {
+            steps.push(format!("property_path:{path:?}"));
         }
     }
 }
