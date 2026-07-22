@@ -5,7 +5,7 @@
 
 use ontolith_parser::infrastructure::{parse_ntriples, parse_turtle_doc};
 use ontolith_query::domain::{QueryKind, QueryRequest};
-use ontolith_query::infrastructure::standard_pipeline;
+use ontolith_query::infrastructure::standard_pipeline_with_dictionary;
 use ontolith_storage::application::{StorageEngine, TripleRepository};
 use ontolith_storage::infrastructure::{
     InMemoryDictionary, InMemoryStorageEngine, InMemoryTripleRepository,
@@ -159,8 +159,8 @@ fn w3c_subset_profile() {
 }
 
 fn run_case(case: &W3cCase) -> Result<(), String> {
-    let repo = load_repo(case.format, case.dataset)?;
-    let pipeline = standard_pipeline(repo);
+    let (repo, dict) = load_repo(case.format, case.dataset)?;
+    let pipeline = standard_pipeline_with_dictionary(repo, dict);
     let result = pipeline
         .execute(&QueryRequest::new(case.query))
         .map_err(|e| format!("query execution error: {e:?}"))?;
@@ -210,17 +210,20 @@ fn run_case(case: &W3cCase) -> Result<(), String> {
     }
 }
 
-fn load_repo(format: DatasetFormat, dataset: &str) -> Result<Arc<dyn TripleRepository>, String> {
+fn load_repo(
+    format: DatasetFormat,
+    dataset: &str,
+) -> Result<(Arc<dyn TripleRepository>, Arc<InMemoryDictionary>), String> {
     let engine = Arc::new(InMemoryStorageEngine::new());
-    let dict = InMemoryDictionary::new();
+    let dict = Arc::new(InMemoryDictionary::new());
     let repo: Arc<dyn TripleRepository> =
         Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
 
     let parsed =
         match format {
-            DatasetFormat::NTriples => parse_ntriples(dataset, &dict)
+            DatasetFormat::NTriples => parse_ntriples(dataset, dict.as_ref())
                 .map_err(|e| format!("parse ntriples failed: {e:?}"))?,
-            DatasetFormat::Turtle => parse_turtle_doc(dataset, &dict)
+            DatasetFormat::Turtle => parse_turtle_doc(dataset, dict.as_ref())
                 .map_err(|e| format!("parse turtle failed: {e:?}"))?,
         };
 
@@ -233,7 +236,7 @@ fn load_repo(format: DatasetFormat, dataset: &str) -> Result<Arc<dyn TripleRepos
         .commit_transaction(txn)
         .map_err(|e| format!("storage commit failed: {e:?}"))?;
 
-    Ok(repo)
+    Ok((repo, dict))
 }
 
 fn env_flag(name: &str) -> bool {
@@ -411,12 +414,15 @@ fn cases() -> Vec<W3cCase> {
             id: "w3c-property-path-unsupported",
             source: "W3C SPARQL 1.1 Query tests (property path)",
             feature: "Property path",
-            class: CaseClass::Unsupported,
-            reason: "property paths are not yet implemented",
+            class: CaseClass::MustPass,
+            reason: "property path sequence baseline (iri/iri)",
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/property_path_unsupported.rq"),
-            expected: None,
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 1,
+                vars: &["s"],
+            }),
         },
         W3cCase {
             id: "w3c-update-unsupported",
