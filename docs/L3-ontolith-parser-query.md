@@ -1,7 +1,7 @@
 # L3 — Parser & Query Engine 完整功能说明
 
 文档 ID: IMPL-L3-0001  
-版本: 2.1.0  
+版本: 2.2.0  
 状态: Implemented (full L3 core, not MVP-only)  
 日期: 2026-07-22  
 对应 crate:
@@ -50,7 +50,7 @@ SPARQL / RDF text
 | 经 L2 SPO/POS/OSP 访问 | ✅ |
 | JSON-LD | ❌ 明确 Unsupported |
 | SPARQL Update / DESCRIBE 执行 | ❌ 解析识别，执行 Unsupported |
-| 属性路径 / 子查询 / EXISTS / 完整聚合（GROUP BY/HAVING） / 服务联邦 | ❌ 后续增强 |
+| 属性路径 / 高级子查询 / EXISTS / 完整聚合（GROUP BY/HAVING） / 服务联邦 | ❌ 后续增强 |
 | 流式 Result 协议（网络层） | ❌ 属 L5 接入层 |
 
 ---
@@ -142,6 +142,7 @@ Query text
 |------|------|
 | SELECT [DISTINCT] * / ?vars | ✅ |
 | SELECT (COUNT(...) AS ?x)（无 GROUP BY） | ✅ |
+| 嵌套子查询 `{ SELECT ... LIMIT ... }`（基线） | ✅ |
 | ASK WHERE { ... } | ✅ → `boolean` |
 | CONSTRUCT { template } WHERE { ... } | ✅ → `construct_triples` |
 | DESCRIBE / UPDATE | 识别 kind，执行 `Unsupported` |
@@ -248,7 +249,7 @@ logical 含 `optimize:before->after`。
 | Crate | 测试数 | 覆盖 |
 |-------|--------|------|
 | parser | 11 | NT/NQ/Turtle/TriG/集合/blank 属性表/流式/定位错误/JSON-LD |
-| query | 24 | SELECT/JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/ASK/DISTINCT/ORDER/LIMIT/PREFIX/COUNT(无 GROUP BY)/Explain/timeout/cancel/txn/hint |
+| query | 25 | SELECT/JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/ASK/DISTINCT/ORDER/LIMIT/PREFIX/COUNT(无 GROUP BY)/子查询基线/Explain/timeout/cancel/txn/hint |
 | storage 回归 | 24 | 绿 |
 | core 回归 | 11 | 绿 |
 
@@ -256,7 +257,7 @@ logical 含 `optimize:before->after`。
 
 ## 6. 已知限制（完整 L3 边界，非“未开工”）
 
-1. **属性路径**、**子查询**、**EXISTS/NOT EXISTS**、**GROUP BY/HAVING 与其他聚合函数**、**SERVICE** 未实现（仅 COUNT 无 GROUP BY 基线已支持）。  
+1. **属性路径**、**高级子查询（相关子查询等）**、**EXISTS/NOT EXISTS**、**GROUP BY/HAVING 与其他聚合函数**、**SERVICE** 未实现（仅 COUNT 无 GROUP BY 与嵌套 SELECT+LIMIT 子查询基线已支持）。  
 2. **SPARQL Update / DESCRIBE** 仅 kind 识别。  
 3. **JSON-LD** 未实现。  
 4. JOIN 为嵌套循环式 solution merge（正确优先，非代价模型）。  
@@ -286,3 +287,4 @@ logical 含 `optimize:before->after`。
 | 2026-07-17 | 1.0.0 | MVP 子集 |
 | 2026-07-17 | 2.0.0 | 完整 L3：Turtle/TriG/流式；SPARQL 代数全核心；优化；解绑定；cancel |
 | 2026-07-22 | 2.1.0 | 新增 COUNT 聚合最小能力（无 GROUP BY）与对应测试；文档同步已知限制 |
+| 2026-07-22 | 2.2.0 | 新增嵌套 SELECT+LIMIT 子查询基线与对应测试；W3C subset 子查询用例可通过 |
