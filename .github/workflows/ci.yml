@@ -48,10 +48,32 @@ jobs:
       - name: SPARQL R1 smoke (integration)
         run: cargo test -p ontolith-compliance --test sparql_r1_smoke -- --nocapture
 
-  # Exploratory gate: W3C-inspired subset runs in CI but does not block merges
-  # until coverage stabilizes and known gaps are closed.
+  # Required-lite gate: block regressions in must-pass subset without requiring
+  # zero known-gap / zero unsupported yet.
   w3c-subset:
-    name: sparql w3c subset (non-blocking)
+    name: sparql w3c subset (required-lite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+
+      - name: SPARQL W3C subset (integration)
+        run: cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture
+
+  # Strict observer track: keep visibility on xfail/skip debt without blocking
+  # merges during this phase.
+  w3c-subset-strict:
+    name: sparql w3c subset (strict observer, non-blocking)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: check
@@ -68,8 +90,8 @@ jobs:
         with:
           shared-key: workspace
 
-      - name: SPARQL W3C subset (integration)
-        run: cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture
+      - name: SPARQL W3C subset strict observer
+        run: ONTOLITH_W3C_SUBSET_STRICT=1 cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture
 
   # Optional slower job: rocksdb feature is default on server/storage;
   # kept separate so failures are obvious in the matrix later.

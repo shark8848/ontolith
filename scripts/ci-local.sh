@@ -20,15 +20,20 @@ if cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"ontolith-
   echo "==> SPARQL R1 smoke (ontolith-compliance)"
   cargo test -p ontolith-compliance --test sparql_r1_smoke -- --nocapture
 
-  if [[ "${ONTOLITH_W3C_SUBSET_REQUIRED:-0}" == "1" ]]; then
-    echo "==> SPARQL W3C subset (required mode)"
+  w3c_subset_strict_mode="${ONTOLITH_W3C_SUBSET_STRICT:-0}"
+  if [[ "${ONTOLITH_W3C_SUBSET_REQUIRED:-0}" == "1" && "${w3c_subset_strict_mode}" != "1" ]]; then
+    # Backward-compatible alias from earlier script behavior.
+    echo "INFO: ONTOLITH_W3C_SUBSET_REQUIRED=1 is treated as strict mode; prefer ONTOLITH_W3C_SUBSET_STRICT=1."
+    w3c_subset_strict_mode="1"
+  fi
+
+  if [[ "${w3c_subset_strict_mode}" == "1" ]]; then
+    echo "==> SPARQL W3C subset (strict mode)"
     ONTOLITH_W3C_SUBSET_STRICT=1 \
       cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture
   else
-    echo "==> SPARQL W3C subset (non-blocking mode)"
-    if ! cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture; then
-      echo "WARN: W3C subset failed in non-blocking mode; set ONTOLITH_W3C_SUBSET_REQUIRED=1 to enforce."
-    fi
+    echo "==> SPARQL W3C subset (required-lite mode)"
+    cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture
   fi
 fi
 
