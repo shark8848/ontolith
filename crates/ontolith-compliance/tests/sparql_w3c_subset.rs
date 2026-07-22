@@ -391,14 +391,17 @@ fn cases() -> Vec<W3cCase> {
         },
         W3cCase {
             id: "w3c-aggregate-gap",
-            source: "W3C SPARQL 1.1 Query tests (aggregate)",
+            source: "W3C SPARQL 1.1 Query tests (derived aggregate)",
             feature: "Aggregate COUNT",
             class: CaseClass::KnownGap,
-            reason: "aggregate/grouping support is out of current R1 engine scope",
+            reason: "aggregate/grouping support remains out of current R1 engine scope",
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/aggregate_gap.rq"),
-            expected: None,
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 1,
+                vars: &["c"],
+            }),
         },
         W3cCase {
             id: "w3c-property-path-unsupported",
