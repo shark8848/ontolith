@@ -56,12 +56,21 @@ SLO（R1）：
   2. 轮询 `/admin/health`
   3. 校验 `/admin/monitoring` 中 `runtime_probe.reachable=true`
   4. 校验 `runtime_probe.latency_ms` 不超过阈值
+  5. 执行短窗口 SLO 检查脚本（默认 5 样本、0 秒间隔）
 
 ### CI 门禁
 
 - 工作流：`.github/workflows/ci.yml`
 - 作业：`check` 下的 `management server smoke`
 - 判据与本地一致
+
+### 窗口化 SLO 检查脚本
+
+- 脚本：`scripts/check-management-slo-window.sh`
+- 目标：在短时间窗口内验证 `runtime_probe` 成功率与 P95 延迟是否满足阈值
+- 默认阈值：
+  - `success_percent >= 99`
+  - `p95_latency_ms <= 250`
 
 ---
 
@@ -71,6 +80,11 @@ SLO（R1）：
 |------|--------|------|
 | `ONTOLITH_MANAGEMENT_SLO_MAX_LATENCY_MS` | `250` | runtime probe 延迟阈值（ms） |
 | `ONTOLITH_MANAGEMENT_SMOKE_PORT` | `19091 + RANDOM%1000` | 本地/CI smoke 使用的临时端口（避免与常驻服务冲突） |
+| `ONTOLITH_MANAGEMENT_MONITORING_URL` | `http://127.0.0.1:9091/admin/monitoring` | 窗口检查读取地址 |
+| `ONTOLITH_MANAGEMENT_SLO_WINDOW_SAMPLES` | `12` | 窗口采样次数 |
+| `ONTOLITH_MANAGEMENT_SLO_WINDOW_INTERVAL_SEC` | `5` | 采样间隔（秒） |
+| `ONTOLITH_MANAGEMENT_SLO_MIN_SUCCESS_PERCENT` | `99` | 成功率阈值（百分比） |
+| `ONTOLITH_MANAGEMENT_SLO_P95_MAX_LATENCY_MS` | `250` | P95 延迟阈值（ms） |
 | `ONTOLITH_MANAGEMENT_BIND` | `127.0.0.1:9091` | 管理服务监听地址 |
 | `ONTOLITH_BIND` | `127.0.0.1:8080` | runtime 目标地址（probe 目标） |
 
@@ -82,6 +96,7 @@ SLO（R1）：
 - 增加 P95/P99 latency 阈值
 - 增加告警策略（连续失败次数 / 延迟异常突增）
 - 与 TLS/OIDC 控制面安全策略联合评估
+- 将窗口检查脚本接入 systemd timer 或 Prometheus Alert 规则
 
 ---
 
@@ -91,4 +106,5 @@ SLO（R1）：
 - `docs/L5-systemd-service.md`
 - `docs/PROGRESS.md`
 - `scripts/ci-local.sh`
+- `scripts/check-management-slo-window.sh`
 - `.github/workflows/ci.yml`

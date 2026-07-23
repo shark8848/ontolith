@@ -76,6 +76,13 @@ if (( latency_ms > management_slo_max_latency_ms )); then
   exit 1
 fi
 
+ONTOLITH_MANAGEMENT_MONITORING_URL="http://${management_smoke_bind}/admin/monitoring" \
+ONTOLITH_MANAGEMENT_SLO_WINDOW_SAMPLES="${ONTOLITH_MANAGEMENT_SLO_WINDOW_SAMPLES:-5}" \
+ONTOLITH_MANAGEMENT_SLO_WINDOW_INTERVAL_SEC="${ONTOLITH_MANAGEMENT_SLO_WINDOW_INTERVAL_SEC:-0}" \
+ONTOLITH_MANAGEMENT_SLO_MIN_SUCCESS_PERCENT="${ONTOLITH_MANAGEMENT_SLO_MIN_SUCCESS_PERCENT:-100}" \
+ONTOLITH_MANAGEMENT_SLO_P95_MAX_LATENCY_MS="${management_slo_max_latency_ms}" \
+bash scripts/check-management-slo-window.sh
+
 kill "$mgmt_pid" >/dev/null 2>&1 || true
 wait "$mgmt_pid" 2>/dev/null || true
 trap - EXIT

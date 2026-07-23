@@ -1,11 +1,11 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.10  
+版本: 0.1.11  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁；安全加固 ADR-0003 已起草）；Git 当前头: `main`（本波次收工提交后刷新）（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
+对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁 + 窗口化 SLO 门禁；安全加固 ADR-0003 已起草）；Git 当前头: `main`（本波次收工提交后刷新）（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
 
 ---
 
@@ -70,10 +70,9 @@
 
 | 优先级 | 焦点 | 负责人 | 目标日期 |
 |--------|------|--------|----------|
-| P0 | 管理平台 SLO 阈值执行与门禁稳定化（误报/阈值回归） | TBD | 进行中 |
-| P1 | 管理平台窗口化 SLO（天/周）与性能基线（benchmarks/SLO） | TBD | TBD |
-| P2 | TLS 或 OIDC 最小安全加固（ADR-0003 起草） | TBD | 进行中 |
-| P3 | 多进程 Raft ADR / openraft | TBD | TBD |
+| P0 | 管理面安全加固落地（TLS 终止方案或 OIDC 校验链路） | TBD | 进行中 |
+| P1 | 管理平台窗口化 SLO（天/周）自动化与性能基线（benchmarks/SLO） | TBD | 进行中 |
+| P2 | 多进程 Raft ADR / openraft | TBD | TBD |
 
 ---
 
@@ -258,7 +257,7 @@
 | WBS-05 | 推理与 SHACL | 未开始 | ~5% | 全部实现 |
 | WBS-06 | 分布式运行时 | 部分完成 | ~75% | 控制面增强+HTTP；无多进程数据复制 |
 | WBS-07 | API、安全与集成 | 部分完成 | ~85% | 双后端网关+文件审计+Results JSON+ingest+部署脚本+独立管理面 API + ACL/probe；无 TLS/OIDC |
-| WBS-08 | 平台工程 | 部分完成 | ~28% | CI workflow + compliance crate + ci-local + systemd 运维文档 + 管理面 smoke；无发布/SLO |
+| WBS-08 | 平台工程 | 部分完成 | ~31% | CI workflow + compliance crate + ci-local + systemd 运维文档 + 管理面 smoke + 窗口化 SLO 检查脚本；无发布回滚 |
 
 ---
 
@@ -271,7 +270,7 @@
 | [ ] 幂等写入验证 | 未开始 | 部分事务单测不足替代 |
 | [ ] 性能回归门禁 | 未开始 | `benchmarks/` 空 |
 | [~] 鉴权与租户隔离测试 | 部分完成 | `ontolith-security` 7 测（enforced/tenant/user/audit）+ server tenant_graph 路径 |
-| [~] 管理平台控制面回归门禁 | 部分完成 | `ontolith-server` 管理面单测（ACL/probe）+ CI/local smoke + latency 阈值门禁；待补窗口化 SLO 统计 |
+| [~] 管理平台控制面回归门禁 | 部分完成 | `ontolith-server` 管理面单测（ACL/probe）+ CI/local smoke + latency 阈值门禁 + 短窗口 SLO 统计（success%/p95） |
 | [ ] 许可证与漏洞审计 CI | 未开始 | — |
 | [x] `cargo fmt` / `clippy -D warnings` CI | 已完成 | GitHub Actions + `scripts/ci-local.sh` |
 | [x] 全量测试 CI | 已完成 | workspace + rocksdb-smoke job + 本地 `./scripts/ci-local.sh`（2026-07-22 通过） |
@@ -340,6 +339,7 @@
 | 2026-07-23 | GitHub Copilot | 门禁增量：`scripts/ci-local.sh` 与 CI `check` 作业新增管理面 smoke（启动 `ontolith-management-server` 并校验 `/admin/health` 与 `runtime_probe`）。 |
 | 2026-07-23 | GitHub Copilot | SLO 增量：新增管理平台独立 SLO 文档（`docs/L5-management-platform-slo.md`），并将 smoke 门禁升级为 `runtime_probe.reachable=true` + `latency_ms` 阈值校验。 |
 | 2026-07-23 | GitHub Copilot | 安全治理增量：起草 ADR-0003（管理面最小安全基线，TLS-first / OIDC-ready 路径）。 |
+| 2026-07-23 | GitHub Copilot | SLO 增量：新增 `scripts/check-management-slo-window.sh` 窗口检查脚本（success%/p95），并接入 local/CI 管理面 smoke；补充 management env 模板阈值参数。 |
 
 ---
 
@@ -357,10 +357,10 @@
 - [x] 管理面 runtime probe（health/monitoring）
 - [x] 管理面纳入规划与台账主线（PLAN + PROGRESS）
 - [x] 管理面 SLO 基线（probe 成功率/延迟阈值）文档化并接入门禁判据
+- [x] 管理面窗口化 SLO（success%/p95）与告警阈值固化
 - [x] 管理面最小安全加固 ADR 草案（ADR-0003）
 - [ ] 确认 Stream A/B/C/D 负责人并回填 §2 焦点表
 - [ ] 将本地提交序列推送并发起 PR（附分批审阅说明）
-- [ ] 管理面窗口化 SLO（天/周）与告警阈值固化
 - [ ] 管理面安全加固（TLS 终止方案落地或 OIDC 校验链路实现）
 
 ### R1 关键路径（按依赖序）

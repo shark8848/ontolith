@@ -147,3 +147,18 @@ curl -s http://127.0.0.1:9091/admin/health
 curl -s http://127.0.0.1:9091/admin/config
 curl -s http://127.0.0.1:9091/admin/monitoring
 ```
+
+## 六、管理面窗口化 SLO 检查
+
+可使用短窗口脚本验证 `runtime_probe` 成功率与延迟阈值：
+
+```bash
+ONTOLITH_MANAGEMENT_MONITORING_URL=http://127.0.0.1:9091/admin/monitoring \
+ONTOLITH_MANAGEMENT_SLO_WINDOW_SAMPLES=12 \
+ONTOLITH_MANAGEMENT_SLO_WINDOW_INTERVAL_SEC=5 \
+ONTOLITH_MANAGEMENT_SLO_MIN_SUCCESS_PERCENT=99 \
+ONTOLITH_MANAGEMENT_SLO_P95_MAX_LATENCY_MS=250 \
+bash scripts/check-management-slo-window.sh
+```
+
+如果服务以 systemd 运行，也可将阈值写入 `ontolith-management.env` / `ontolith-management.user.env`，用于统一运维基线。

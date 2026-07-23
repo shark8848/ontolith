@@ -381,6 +381,6 @@ sudo -v# Ontolith 开发计划
 - 确认各并行流负责人与协作边界。
 - 批准 Phase 0 交付物与截止日期。
 - 启动 Phase 1，并执行周度架构与风险评审。
-- 管理平台 R1 SLO 基线已定义并文档化（`docs/L5-management-platform-slo.md`）；下一步推进窗口化 SLO 与告警阈值。
-- 管理平台 smoke 校验已纳入本地与 CI 门禁必经路径，并执行 `runtime_probe` 可达性 + 延迟阈值判据。
+- 管理平台 R1 SLO 基线与窗口化阈值已落地：local/CI smoke 现已包含 `runtime_probe` 可达性 + 延迟阈值 + 短窗口 success%/p95 检查。
+- 将窗口化 SLO 检查从短窗门禁扩展到天/周自动统计与告警（systemd timer 或 Prometheus 规则）。
 - 管理平台最小安全加固路径已形成 ADR-0003（TLS-first / OIDC-ready），下一步按 R2 路线执行实现。
