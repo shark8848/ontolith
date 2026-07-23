@@ -163,20 +163,20 @@ impl<'a> SparqlParser<'a> {
                 object: TermPattern::Variable("o".into()),
             }])
         };
-                self.skip();
-                if self.peek_char() == Some('(') {
-                    if !select_vars.is_empty() {
-                        return Err(OntolithError::query(
-                            "mixed aggregate and non-aggregate projection requires GROUP BY",
-                        ));
-                    }
-                    let projection = self.parse_select_count_projection()?;
-                    self.logical
-                        .push(format!("aggregate:count:as=?{}", projection.output));
-                    select_vars.push(projection.output.clone());
-                    select_count_projection = Some(projection);
-                    self.skip();
-                }
+        self.skip();
+        if self.peek_char() == Some('(') {
+            if !select_vars.is_empty() {
+                return Err(OntolithError::query(
+                    "mixed aggregate and non-aggregate projection requires GROUP BY",
+                ));
+            }
+            let projection = self.parse_select_count_projection()?;
+            self.logical
+                .push(format!("aggregate:count:as=?{}", projection.output));
+            select_vars.push(projection.output.clone());
+            select_count_projection = Some(projection);
+            self.skip();
+        }
         // Legacy `# subject=N` specializes unbound subjects even when WHERE is present.
         if let Some(hint_subj) = parse_subject_hint(self.input)?
             && apply_subject_hint(&mut body, hint_subj)
@@ -185,11 +185,11 @@ impl<'a> SparqlParser<'a> {
         }
         self.logical.push(format!("where:{}", algebra_tag(&body)));
 
-            if distinct && select_count_projection.is_some() {
-                return Err(OntolithError::query(
-                    "DISTINCT with aggregate projection is not yet supported",
-                ));
-            }
+        if distinct && select_count_projection.is_some() {
+            return Err(OntolithError::query(
+                "DISTINCT with aggregate projection is not yet supported",
+            ));
+        }
 
         // solution modifiers
         let mut algebra = body;
@@ -536,7 +536,10 @@ impl<'a> SparqlParser<'a> {
             match self.parse_var_or_term(false) {
                 Ok(TermPattern::Iri(_)) => {
                     self.skip();
-                    matches!(self.peek_char(), Some('/') | Some('|') | Some('+') | Some('*'))
+                    matches!(
+                        self.peek_char(),
+                        Some('/') | Some('|') | Some('+') | Some('*')
+                    )
                 }
                 _ => false,
             }

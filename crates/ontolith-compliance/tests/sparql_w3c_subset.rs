@@ -219,13 +219,12 @@ fn load_repo(
     let repo: Arc<dyn TripleRepository> =
         Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
 
-    let parsed =
-        match format {
-            DatasetFormat::NTriples => parse_ntriples(dataset, dict.as_ref())
-                .map_err(|e| format!("parse ntriples failed: {e:?}"))?,
-            DatasetFormat::Turtle => parse_turtle_doc(dataset, dict.as_ref())
-                .map_err(|e| format!("parse turtle failed: {e:?}"))?,
-        };
+    let parsed = match format {
+        DatasetFormat::NTriples => parse_ntriples(dataset, dict.as_ref())
+            .map_err(|e| format!("parse ntriples failed: {e:?}"))?,
+        DatasetFormat::Turtle => parse_turtle_doc(dataset, dict.as_ref())
+            .map_err(|e| format!("parse turtle failed: {e:?}"))?,
+    };
 
     let txn = TxnId::new(1);
     for triple in parsed.dataset.default_graph {

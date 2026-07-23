@@ -745,14 +745,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.solutions.len(), 2);
-        assert!(result
-            .solutions
-            .iter()
-            .any(|s| s.get("o") == Some(&BoundValue::Node(alice))));
-        assert!(result
-            .solutions
-            .iter()
-            .any(|s| s.get("o") == Some(&BoundValue::Node(bob))));
+        assert!(
+            result
+                .solutions
+                .iter()
+                .any(|s| s.get("o") == Some(&BoundValue::Node(alice)))
+        );
+        assert!(
+            result
+                .solutions
+                .iter()
+                .any(|s| s.get("o") == Some(&BoundValue::Node(bob)))
+        );
     }
 
     #[test]

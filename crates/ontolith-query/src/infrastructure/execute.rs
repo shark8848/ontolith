@@ -310,7 +310,10 @@ fn eval_aggregate(
     };
 
     let mut out = Solution::new();
-    out.insert(output.to_owned(), BoundValue::Literal(LiteralValue::Integer(count as i64)));
+    out.insert(
+        output.to_owned(),
+        BoundValue::Literal(LiteralValue::Integer(count as i64)),
+    );
     Ok(vec![out])
 }
 
@@ -537,16 +540,18 @@ fn bind_path_pattern(
         }
         TermPattern::Node(expected) => match value {
             BoundValue::Node(actual) | BoundValue::Blank(actual) => Ok(actual == expected),
-            BoundValue::Iri(actual) => {
-                Ok(ctx.read.node_for_iri(actual)?.is_some_and(|n| n == *expected))
-            }
+            BoundValue::Iri(actual) => Ok(ctx
+                .read
+                .node_for_iri(actual)?
+                .is_some_and(|n| n == *expected)),
             BoundValue::Literal(_) => Ok(false),
         },
         TermPattern::Iri(expected) => match value {
             BoundValue::Iri(actual) => Ok(actual == expected),
-            BoundValue::Node(actual) | BoundValue::Blank(actual) => {
-                Ok(ctx.read.node_for_iri(expected)?.is_some_and(|n| n == *actual))
-            }
+            BoundValue::Node(actual) | BoundValue::Blank(actual) => Ok(ctx
+                .read
+                .node_for_iri(expected)?
+                .is_some_and(|n| n == *actual)),
             BoundValue::Literal(_) => Ok(false),
         },
         TermPattern::Literal(expected) => match value {
@@ -704,9 +709,10 @@ fn iri_node_compatible(
 ) -> Result<bool, OntolithError> {
     match (left, right) {
         (BoundValue::Iri(iri), BoundValue::Node(node) | BoundValue::Blank(node))
-        | (BoundValue::Node(node) | BoundValue::Blank(node), BoundValue::Iri(iri)) => {
-            Ok(ctx.read.node_for_iri(iri)?.is_some_and(|mapped| mapped == *node))
-        }
+        | (BoundValue::Node(node) | BoundValue::Blank(node), BoundValue::Iri(iri)) => Ok(ctx
+            .read
+            .node_for_iri(iri)?
+            .is_some_and(|mapped| mapped == *node)),
         _ => Ok(false),
     }
 }
@@ -822,9 +828,10 @@ fn bound_values_compatible(
     }
 
     match (left, right) {
-        (BoundValue::Node(a) | BoundValue::Blank(a), BoundValue::Node(b) | BoundValue::Blank(b)) => {
-            Ok(a == b)
-        }
+        (
+            BoundValue::Node(a) | BoundValue::Blank(a),
+            BoundValue::Node(b) | BoundValue::Blank(b),
+        ) => Ok(a == b),
         _ => iri_node_compatible(left, right, ctx),
     }
 }
@@ -987,7 +994,9 @@ fn select_variables(algebra: &Algebra) -> Vec<String> {
         | Algebra::Filter { input, .. }
         | Algebra::Extend { input, .. }
         | Algebra::Aggregate { input, .. } => select_variables(input),
-        Algebra::Path { subject, object, .. } => {
+        Algebra::Path {
+            subject, object, ..
+        } => {
             let mut vars = BTreeSet::new();
             if let Some(v) = subject.as_variable() {
                 vars.insert(v.to_owned());

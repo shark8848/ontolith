@@ -270,7 +270,10 @@ pub fn summarize_algebra(algebra: &Algebra) -> String {
                 AggregateFunction::Count { variable: None } => "COUNT(*)".to_string(),
                 AggregateFunction::Count { variable: Some(v) } => format!("COUNT(?{v})"),
             };
-            format!("Aggregate({fun} AS ?{output}, {})", summarize_algebra(input))
+            format!(
+                "Aggregate({fun} AS ?{output}, {})",
+                summarize_algebra(input)
+            )
         }
         Algebra::Path {
             subject,
