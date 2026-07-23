@@ -10,9 +10,11 @@ use ontolith_security::application::{
 use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode};
 use ontolith_security::infrastructure::FileAuditLog;
 use std::env;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 const MGMT_BIND_ENV: &str = "ONTOLITH_MANAGEMENT_BIND";
 const API_BIND_ENV: &str = "ONTOLITH_BIND";
@@ -24,6 +26,7 @@ const AUDIT_PATH_ENV: &str = "ONTOLITH_AUDIT_PATH";
 const MGMT_READ_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_READ_KEY";
 const MGMT_WRITE_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_WRITE_KEY";
 const MGMT_KEY_HEADER: &str = "x-ontolith-management-key";
+const MGMT_RUNTIME_PROBE_TIMEOUT_MS_ENV: &str = "ONTOLITH_MANAGEMENT_PROBE_TIMEOUT_MS";
 
 const DEFAULT_MGMT_BIND: &str = "127.0.0.1:9091";
 const DEFAULT_API_BIND: &str = "127.0.0.1:8080";
@@ -33,6 +36,7 @@ pub struct ManagementState {
     management_bind: String,
     started_at_ms: u64,
     acl: ManagementAcl,
+    runtime_probe_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -73,12 +77,18 @@ impl ManagementAcl {
 }
 
 impl ManagementState {
-    fn new(app: Arc<AppState>, management_bind: String, acl: ManagementAcl) -> Arc<Self> {
+    fn new(
+        app: Arc<AppState>,
+        management_bind: String,
+        acl: ManagementAcl,
+        runtime_probe_timeout_ms: u64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             app,
             management_bind,
             started_at_ms: now_ms(),
             acl,
+            runtime_probe_timeout_ms,
         })
     }
 
@@ -188,14 +198,26 @@ impl ManagementState {
     fn admin_health(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
         let _ = self.authorize_read(req, "health", "read")?;
         let uptime_ms = now_ms().saturating_sub(self.started_at_ms);
+        let runtime_probe =
+            probe_runtime_bind(&self.app.bind_address, self.runtime_probe_timeout_ms);
         Ok(HttpResponse::json(
             200,
             "OK",
             format!(
-                r#"{{"status":"ok","service":"ontolith-management-server","uptime_ms":{},"management_bind":{},"runtime_bind":{}}}"#,
+                r#"{{"status":"ok","service":"ontolith-management-server","uptime_ms":{},"management_bind":{},"runtime_bind":{},"runtime_probe":{{"reachable":{},"latency_ms":{},"error":{}}}}}"#,
                 uptime_ms,
                 json_string(&self.management_bind),
                 json_string(&self.app.bind_address),
+                runtime_probe.reachable,
+                runtime_probe
+                    .latency_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "null".to_owned()),
+                runtime_probe
+                    .error
+                    .as_ref()
+                    .map(|e| json_string(e))
+                    .unwrap_or_else(|| "null".to_owned()),
             ),
         ))
     }
@@ -271,18 +293,31 @@ impl ManagementState {
             .as_ref()
             .map(|id| json_string(id.as_str()))
             .unwrap_or_else(|| "null".to_owned());
+        let runtime_probe =
+            probe_runtime_bind(&self.app.bind_address, self.runtime_probe_timeout_ms);
 
         Ok(HttpResponse::json(
             200,
             "OK",
             format!(
-                r#"{{"requests_total":{},"sparql_total":{},"sparql_errors":{},"ingest_total":{},"latency_avg_ms":{},"http_status_counts":{},"cluster":{{"epoch":{},"leader":{},"nodes":{},"healthy":{},"shards":{},"commit_index":{}}}}}"#,
+                r#"{{"requests_total":{},"sparql_total":{},"sparql_errors":{},"ingest_total":{},"latency_avg_ms":{},"http_status_counts":{},"runtime_probe":{{"target":{},"reachable":{},"latency_ms":{},"error":{}}},"cluster":{{"epoch":{},"leader":{},"nodes":{},"healthy":{},"shards":{},"commit_index":{}}}}}"#,
                 requests_total,
                 sparql_total,
                 sparql_errors,
                 ingest_total,
                 latency_avg_ms,
                 status_map,
+                json_string(&self.app.bind_address),
+                runtime_probe.reachable,
+                runtime_probe
+                    .latency_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "null".to_owned()),
+                runtime_probe
+                    .error
+                    .as_ref()
+                    .map(|e| json_string(e))
+                    .unwrap_or_else(|| "null".to_owned()),
                 cluster.epoch.get(),
                 leader,
                 cluster.node_count,
@@ -396,19 +431,26 @@ pub fn run() -> Result<(), String> {
     let management_bind = env::var(MGMT_BIND_ENV).unwrap_or_else(|_| DEFAULT_MGMT_BIND.to_owned());
     let api_bind = env::var(API_BIND_ENV).unwrap_or_else(|_| DEFAULT_API_BIND.to_owned());
     let acl = load_management_acl_from_env();
+    let runtime_probe_timeout_ms = load_runtime_probe_timeout_ms();
 
     let authenticator = load_authenticator();
     let audit = load_audit_log_from_env().map_err(|e| e.message().to_owned())?;
     let app = build_managed_app_state(api_bind, authenticator, audit)?;
-    let state = ManagementState::new(app, management_bind.clone(), acl.clone());
+    let state = ManagementState::new(
+        app,
+        management_bind.clone(),
+        acl.clone(),
+        runtime_probe_timeout_ms,
+    );
 
     println!(
-        "ontolith-management-server starting: bind={}, runtime_bind={}, backend={}, acl_read_key={}, acl_write_key={}",
+        "ontolith-management-server starting: bind={}, runtime_bind={}, backend={}, acl_read_key={}, acl_write_key={}, probe_timeout_ms={}",
         management_bind,
         state.app.bind_address,
         state.app.backend.as_str(),
         acl.read_key.is_some(),
         acl.write_key.is_some(),
+        runtime_probe_timeout_ms,
     );
 
     let server = HttpServer::new(shared_management_handler(state));
@@ -445,6 +487,66 @@ fn load_management_acl_from_env() -> ManagementAcl {
     ManagementAcl {
         read_key,
         write_key,
+    }
+}
+
+fn load_runtime_probe_timeout_ms() -> u64 {
+    env::var(MGMT_RUNTIME_PROBE_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(300)
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeProbeResult {
+    reachable: bool,
+    latency_ms: Option<u64>,
+    error: Option<String>,
+}
+
+fn probe_runtime_bind(bind: &str, timeout_ms: u64) -> RuntimeProbeResult {
+    let timeout = Duration::from_millis(timeout_ms.max(1));
+    let addrs = match bind.to_socket_addrs() {
+        Ok(addrs) => addrs.collect::<Vec<_>>(),
+        Err(err) => {
+            return RuntimeProbeResult {
+                reachable: false,
+                latency_ms: None,
+                error: Some(format!("resolve failed: {err}")),
+            };
+        }
+    };
+
+    if addrs.is_empty() {
+        return RuntimeProbeResult {
+            reachable: false,
+            latency_ms: None,
+            error: Some("resolve failed: no socket addresses".to_owned()),
+        };
+    }
+
+    let mut last_error = None;
+    for addr in addrs {
+        let started = Instant::now();
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(_) => {
+                return RuntimeProbeResult {
+                    reachable: true,
+                    latency_ms: Some(started.elapsed().as_millis() as u64),
+                    error: None,
+                };
+            }
+            Err(err) => {
+                last_error = Some(format!("{addr}: {err}"));
+            }
+        }
+    }
+
+    RuntimeProbeResult {
+        reachable: false,
+        latency_ms: None,
+        error: last_error,
     }
 }
 
@@ -596,7 +698,7 @@ mod tests {
             auth,
             InMemoryAuditLog::new(),
         );
-        ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl)
+        ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl, 10)
     }
 
     #[test]
@@ -678,5 +780,25 @@ mod tests {
             req_with_key("POST", "/admin/data/rebalance", "write-admin"),
         );
         assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn runtime_probe_succeeds_when_listener_is_up() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let probe = probe_runtime_bind(&addr.to_string(), 300);
+        assert!(probe.reachable);
+        assert!(probe.error.is_none());
+    }
+
+    #[test]
+    fn runtime_probe_reports_unreachable_port() {
+        let probe = probe_runtime_bind("127.0.0.1:9", 100);
+        assert!(!probe.reachable);
+        assert!(probe.error.is_some());
     }
 }

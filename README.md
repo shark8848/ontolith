@@ -73,6 +73,10 @@ Optional management ACL split (read/write key separation):
 - `ONTOLITH_MANAGEMENT_WRITE_KEY`: required for mutation endpoints (`POST /admin/data/*`)
 - Header: `X-Ontolith-Management-Key: <key>`
 
+Runtime probe setting for management monitoring:
+
+- `ONTOLITH_MANAGEMENT_PROBE_TIMEOUT_MS`: timeout for probing `ONTOLITH_BIND` (default `300` ms)
+
 ---
 
 ## What You Get

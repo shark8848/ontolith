@@ -61,6 +61,9 @@ ontolith-management-server (L5 management plane)
 | POST | `/admin/data/replicate` | cluster:admin | 触发 follower 复制对齐 |
 | POST | `/admin/data/rebalance` | cluster:admin | 触发 slot 重平衡 |
 
+管理面监控会探测运行时地址 `ONTOLITH_BIND` 的连通性（TCP connect），并在
+`/admin/health` 与 `/admin/monitoring` 返回 `runtime_probe` 信息（reachable/latency/error）。
+
 管理面 ACL（可选）：
 
 - `ONTOLITH_MANAGEMENT_READ_KEY`：允许读取管理视图
@@ -127,6 +130,7 @@ X-Ontolith-Tenant: acme
 | `ONTOLITH_API_KEY` | — | Enforced 时校验 |
 | `ONTOLITH_MANAGEMENT_READ_KEY` | — | 管理面只读 key（可选） |
 | `ONTOLITH_MANAGEMENT_WRITE_KEY` | — | 管理面写操作 key（可选） |
+| `ONTOLITH_MANAGEMENT_PROBE_TIMEOUT_MS` | `300` | 管理面 runtime 探测超时（毫秒） |
 
 ```bash
 # 内存
@@ -210,6 +214,7 @@ systemctl --user status ontolith-server
 | 2026-07-17 | 2.0.0 | RocksDB 切换、L3 解析写入、SPARQL Results JSON、/ready、增强 metrics、tenant graph |
 | 2026-07-23 | 2.2.0 | 新增独立 `ontolith-management-server` 管理面（二进制 + 统一配置/监控/数据管理 API） |
 | 2026-07-23 | 2.2.1 | 管理面 ACL 分离：支持 read/write key 双轨控制（`X-Ontolith-Management-Key`） |
+| 2026-07-23 | 2.2.2 | 管理面 runtime probe：健康/监控响应增加运行时连通性与探测延迟信息 |
 
 ## 8. 审计落盘与权限（v2.1）
 

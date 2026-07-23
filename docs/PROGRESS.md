@@ -334,6 +334,7 @@
 | 2026-07-23 | GitHub Copilot | L5 管理面增量：新增独立二进制 `ontolith-management-server`，提供 `/admin/config`、`/admin/monitoring`、`/admin/data/*` 统一管理接口；`cargo test -p ontolith-server` 10 测通过。 |
 | 2026-07-23 | GitHub Copilot | 运维增量：新增 management server 的 systemd user/system unit、环境模板与安装脚本，补齐管理面部署路径与健康检查文档。 |
 | 2026-07-23 | GitHub Copilot | 管理面权限增量：新增 read/write ACL 分离（`ONTOLITH_MANAGEMENT_READ_KEY` / `ONTOLITH_MANAGEMENT_WRITE_KEY` + `X-Ontolith-Management-Key`），将管理查询与变更权限解耦。 |
+| 2026-07-23 | GitHub Copilot | 管理面监控增量：新增 runtime probe（探测 `ONTOLITH_BIND` TCP 连通性与延迟），并在 `/admin/health`、`/admin/monitoring` 输出 `runtime_probe`。 |
 
 ---
 
