@@ -1,7 +1,7 @@
 # Ontolith
 
 <p align="center">
-  <img src="docs/images/ontolith-logo.png" alt="Ontolith Logo" width="220">
+  <img src="docs/images/ontolith-logo-04.png" alt="Ontolith Logo" width="220">
 </p>
 
 <p align="center">
