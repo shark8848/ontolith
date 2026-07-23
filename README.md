@@ -7,7 +7,7 @@
 <p align="center">
   <a href="docs/Ontolith_Software_Architecture_Specification.md"><img src="https://img.shields.io/badge/Architecture-SAS--0001-1f6feb?style=for-the-badge" alt="Architecture"></a>
   <a href="docs/Ontolith_Development_Plan.md"><img src="https://img.shields.io/badge/Plan-R1--R4-0a7f42?style=for-the-badge" alt="Plan"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-green?style=for-the-badge" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=for-the-badge" alt="License"></a>
 </p>
 
 **Rust-first semantic runtime and distributed knowledge graph platform.**
@@ -184,4 +184,4 @@ ontolith/
 
 ## License
 
-Apache-2.0. See `LICENSE` for full terms.
+GPL-3.0. See LICENSE for full terms.
