@@ -129,7 +129,7 @@
 | P3-02 | 规则优化基线 | 部分完成 | 55% | BGP 重排、Identity 消除、Filter 下推、POS/OSP 选路 | 代价模型/统计 |
 | P3-03 | Explain 输出 | 部分完成 | 85% | logical/physical/algebra + optimize 步骤 | HTTP Explain API |
 | P3-04 | 超时与取消 API | 部分完成 | 75% | timeout_ms + Arc\<AtomicBool\> cancel | 异步抢占/token |
-| P3-05 | MVP 标准符合性子集 | 部分完成 | 89% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 15 烟雾 + W3C 子集运行器（must-pass 24/24，known-gap xfail=0，unsupported skip=1）+ CI required-lite + strict observer + strict-promotion-readiness 自动信号 + `ci-local.sh` 全链路通过 | 观察主干连续 3 次 CI 全绿后评估 strict required |
+| P3-05 | MVP 标准符合性子集 | 部分完成 | 90% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 15 烟雾 + W3C 子集运行器（must-pass 24/24，known-gap xfail=0，unsupported skip=1，其中 Update 为 strict skip-exempt）+ CI required-lite + strict observer + strict-promotion-readiness 自动信号 + `ci-local.sh` 全链路通过 | 观察主干连续 3 次 CI 全绿后评估 strict required |
 
 **阶段退出条件：** MVP profile 查询可跑通；Explain/超时/取消可用。
 
@@ -210,7 +210,7 @@
 | [~] SPARQL 查询基线 | 部分完成 | SELECT/ASK/CONSTRUCT 核心；非完整 1.1 |
 | [~] 单区域集群核心 | 部分完成 | 控制面可测+HTTP 演示；无多节点数据面 |
 | [~] 安全与审计基线 | 部分完成 | HTTP 鉴权+审计+JSONL 落盘；无 OIDC |
-| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（required-lite，must-pass 24/24，xfail=0，xpass=0，skip=1）+ strict observer（non-blocking）+ strict readiness 自动评估；无完整 W3C 套件 |
+| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（required-lite，must-pass 24/24，xfail=0，xpass=0，skip=1，Update 为 strict skip-exempt）+ strict observer（non-blocking）+ strict readiness 自动评估；无完整 W3C 套件 |
 | [ ] 核心 SLO 基线达标 | 未完成 | 无基准 |
 | [~] 恢复演练通过 | 部分完成 | RocksDB reopen 单测；无演练手册 |
 | [ ] 回滚演练通过 | 未完成 | 无发布链路 |
@@ -266,7 +266,7 @@
 
 | 门禁/治理项 | 状态 | 证据 / 缺口 |
 |-------------|------|-------------|
-| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（must-pass 24/24，known-gap: xfail 0 / xpass 0，unsupported skip 1）+ CI required-lite / strict observer；非完整 W3C 官方 |
+| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（must-pass 24/24，known-gap: xfail 0 / xpass 0，unsupported skip 1，Update 为 strict skip-exempt）+ CI required-lite / strict observer；非完整 W3C 官方 |
 | [~] 故障注入（选主/复制/恢复） | 部分完成 | `ontolith-cluster` 分区注入/愈合与复制路径单测（14 测） |
 | [ ] 幂等写入验证 | 未开始 | 部分事务单测不足替代 |
 | [ ] 性能回归门禁 | 未开始 | `benchmarks/` 空 |
@@ -330,6 +330,7 @@
 | 2026-07-22 | GitHub Copilot | 收工批次：完成高级属性路径最小集代码与合规/架构/进度文档同步，执行 `cargo test -p ontolith-query` 与 `cargo test -p ontolith-compliance` 全绿，进入提交封板。 |
 | 2026-07-23 | GitHub Copilot | 合规扩容：W3C 子集新增 7 条 must-pass（ASK false、BGP JOIN 变体、VALUES tuple、DISTINCT+OFFSET、COUNT(*)、路径 `+/*` 变体），统计更新为 must-pass 24/24、known-gap xfail 0、xpass 0、skip 1；本地 `cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture` 全绿。 |
 | 2026-07-23 | GitHub Copilot | CI 增量：新增 `sparql w3c strict promotion readiness` 作业（仅 main push），自动回看最近 3 次 strict observer 结果并输出 READY/NOT READY 信号；用于 strict required 晋升判据自动化。 |
+| 2026-07-23 | GitHub Copilot | strict 策略优化：W3C 子集 strict 判据调整为“零 known-gap 失败 + 零 in-scope skip”，并将 `SPARQL Update` 标记为 strict skip-exempt，消除 out-of-scope 永久阻塞。 |
 
 ---
 

@@ -11,4 +11,5 @@ Case classes:
 
 Strict mode:
 
-Set ONTOLITH_W3C_SUBSET_STRICT=1 to require zero xfail and zero skipped.
+Set ONTOLITH_W3C_SUBSET_STRICT=1 to require zero xfail and zero in-scope skipped cases.
+Out-of-scope unsupported cases can be marked as strict skip-exempt.

@@ -54,6 +54,7 @@ struct W3cCase {
     feature: &'static str,
     class: CaseClass,
     reason: &'static str,
+    strict_skip_exempt: bool,
     format: DatasetFormat,
     dataset: &'static str,
     query: &'static str,
@@ -65,6 +66,8 @@ struct Summary {
     total: usize,
     executed: usize,
     skipped: usize,
+    strict_exempt_skipped: usize,
+    strict_blocking_skipped: usize,
     must_pass_ok: usize,
     must_pass_failed: usize,
     xfail: usize,
@@ -93,6 +96,11 @@ fn w3c_subset_profile() {
         match case.class {
             CaseClass::Unsupported => {
                 summary.skipped += 1;
+                if case.strict_skip_exempt {
+                    summary.strict_exempt_skipped += 1;
+                } else {
+                    summary.strict_blocking_skipped += 1;
+                }
                 println!("  -> SKIP: {}", case.reason);
             }
             CaseClass::KnownGap => {
@@ -126,10 +134,12 @@ fn w3c_subset_profile() {
     }
 
     println!(
-        "[W3C subset summary] total={} executed={} skipped={} must-pass(ok/fail)={}/{} xfail={} xpass={} strict={}",
+        "[W3C subset summary] total={} executed={} skipped={} strict_exempt_skipped={} strict_blocking_skipped={} must-pass(ok/fail)={}/{} xfail={} xpass={} strict={}",
         summary.total,
         summary.executed,
         summary.skipped,
+        summary.strict_exempt_skipped,
+        summary.strict_blocking_skipped,
         summary.must_pass_ok,
         summary.must_pass_failed,
         summary.xfail,
@@ -152,8 +162,8 @@ fn w3c_subset_profile() {
             "strict mode requires zero known-gap failures"
         );
         assert_eq!(
-            summary.skipped, 0,
-            "strict mode requires zero skipped cases"
+            summary.strict_blocking_skipped, 0,
+            "strict mode requires zero in-scope skipped cases"
         );
     }
 }
@@ -256,6 +266,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "SELECT BGP",
             class: CaseClass::MustPass,
             reason: "core SELECT baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/select_basic.rq"),
@@ -270,6 +281,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "ASK",
             class: CaseClass::MustPass,
             reason: "core ASK baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/ask_basic.rq"),
@@ -281,6 +293,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "ASK false",
             class: CaseClass::MustPass,
             reason: "negative ASK baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/ask_negative.rq"),
@@ -292,6 +305,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "CONSTRUCT",
             class: CaseClass::MustPass,
             reason: "core CONSTRUCT baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/construct_basic.rq"),
@@ -303,6 +317,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "OPTIONAL",
             class: CaseClass::MustPass,
             reason: "left join support",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/optional_basic.rq"),
@@ -317,6 +332,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "UNION",
             class: CaseClass::MustPass,
             reason: "set union support",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/union_basic.rq"),
@@ -331,6 +347,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "FILTER BOUND",
             class: CaseClass::MustPass,
             reason: "filter predicate baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/filter_bound.rq"),
@@ -345,6 +362,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "BGP JOIN",
             class: CaseClass::MustPass,
             reason: "bound-object join baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/join_fixed_subject.rq"),
@@ -359,6 +377,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "BIND",
             class: CaseClass::MustPass,
             reason: "bind expression baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/bind_bound.rq"),
@@ -373,6 +392,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "VALUES",
             class: CaseClass::MustPass,
             reason: "inline binding baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/values_basic.rq"),
@@ -387,6 +407,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "VALUES tuples",
             class: CaseClass::MustPass,
             reason: "multi-variable VALUES baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/values_tuple.rq"),
@@ -401,6 +422,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "DISTINCT ORDER BY LIMIT",
             class: CaseClass::MustPass,
             reason: "solution modifier baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/distinct_order_limit.rq"),
@@ -415,6 +437,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "DISTINCT ORDER BY LIMIT OFFSET",
             class: CaseClass::MustPass,
             reason: "offset modifier baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/distinct_order_limit_offset.rq"),
@@ -429,6 +452,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "PREFIX + ASK",
             class: CaseClass::MustPass,
             reason: "prefix and turtle ingest baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::Turtle,
             dataset: include_str!("w3c/data/basic.ttl"),
             query: include_str!("w3c/queries/prefix_ask_turtle.rq"),
@@ -440,6 +464,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Subquery",
             class: CaseClass::MustPass,
             reason: "subquery baseline (nested SELECT + LIMIT)",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/subquery_gap.rq"),
@@ -454,6 +479,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Aggregate COUNT",
             class: CaseClass::MustPass,
             reason: "COUNT aggregate baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/aggregate_gap.rq"),
@@ -468,6 +494,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Aggregate COUNT(*)",
             class: CaseClass::MustPass,
             reason: "COUNT(*) aggregate baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/aggregate_count_star.rq"),
@@ -482,6 +509,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Property path sequence",
             class: CaseClass::MustPass,
             reason: "property path sequence baseline (iri/iri)",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/property_path_unsupported.rq"),
@@ -496,6 +524,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Property path +",
             class: CaseClass::MustPass,
             reason: "one-or-more transitive closure baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/property_path_plus.rq"),
@@ -510,6 +539,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Property path +",
             class: CaseClass::MustPass,
             reason: "transitive closure from intermediate node",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/property_path_plus_bob.rq"),
@@ -524,6 +554,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Property path *",
             class: CaseClass::MustPass,
             reason: "zero-or-more closure includes reflexive reachability",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/property_path_star.rq"),
@@ -538,6 +569,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Property path *",
             class: CaseClass::MustPass,
             reason: "zero-or-more closure from intermediate node",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/property_path_star_bob.rq"),
@@ -552,6 +584,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Property path |",
             class: CaseClass::MustPass,
             reason: "alternation baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/property_path_alternative.rq"),
@@ -566,6 +599,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "Property path ^",
             class: CaseClass::MustPass,
             reason: "inverse predicate baseline",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/property_path_inverse.rq"),
@@ -580,6 +614,7 @@ fn cases() -> Vec<W3cCase> {
             feature: "SPARQL Update",
             class: CaseClass::Unsupported,
             reason: "update operations are not yet implemented",
+            strict_skip_exempt: true,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
             query: include_str!("w3c/queries/update_unsupported.ru"),

@@ -1,7 +1,7 @@
 # R1 SPARQL Smoke Compliance Profile
 
 文档 ID: COMP-R1-0001  
-版本: 1.7.0  
+版本: 1.7.1  
 日期: 2026-07-23  
 Crate: [`ontolith-compliance`](../crates/ontolith-compliance)
 
@@ -22,7 +22,7 @@ cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture
 ./scripts/ci-local.sh
 ```
 
-Strict subset mode (no xfail / no skip):
+Strict subset mode (no xfail / no in-scope skip):
 
 ```bash
 ONTOLITH_W3C_SUBSET_STRICT=1 ./scripts/ci-local.sh
@@ -48,7 +48,7 @@ Classification:
 
 - `must-pass`: blocks strict gate; must stay green.
 - `known-gap`: executed and expected to fail until feature lands.
-- `unsupported`: documented and skipped for current scope.
+- `unsupported`: documented and skipped for current scope; may be strict skip-exempt when explicitly marked out-of-scope.
 
 Current known gaps:
 
@@ -66,7 +66,7 @@ Current must-pass increment:
 Current unsupported:
 
 - Property path `?` operator and grouped/nested path forms beyond current minimal set
-- SPARQL Update
+- SPARQL Update (strict skip-exempt)
 
 ## Out of scope (R1+)
 
@@ -81,14 +81,14 @@ Current unsupported:
 
 - `sparql_r1_smoke`: required (blocking).
 - `sparql_w3c_subset`: required-lite (blocking must-pass regressions).
-- `sparql_w3c_subset_strict`: non-blocking observer (`ONTOLITH_W3C_SUBSET_STRICT=1`) for xfail/skip debt trend.
+- `sparql_w3c_subset_strict`: non-blocking observer (`ONTOLITH_W3C_SUBSET_STRICT=1`) for xfail and in-scope skip debt trend.
 - `sparql_w3c_strict_promotion_readiness`: main 分支自动评估最近 3 次 strict observer 是否连续全绿，并在 Job Summary 输出 READY/NOT READY 信号。
 
 Current profile snapshot (v0, 2026-07-23):
 
 - must-pass: 24
 - known-gap: 0
-- unsupported: 1 (SPARQL Update)
+- unsupported: 1 (SPARQL Update, strict skip-exempt)
 
 ## Next
 
