@@ -1,11 +1,11 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.11  
+版本: 0.1.12  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁 + 窗口化 SLO 门禁；安全加固 ADR-0003 已起草）；Git 当前头: `main`（本波次收工提交后刷新）（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
+对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁 + 窗口化 SLO 门禁；安全加固 ADR-0003 已起草）；Git 当前头: `main` @ `cd098db`（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
 
 ---
 
@@ -46,7 +46,7 @@
 | Phase 4 集群与一致性 MVP | 部分完成 | ~80% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API；无多进程 Raft |
 | Phase 5 接入层与安全基线 | 部分完成 | ~88% | HTTP 全路由 + 文件审计 + cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
 | Phase 6 推理与验证 | 未开始 | ~5% | 仅类型占位 |
-| Phase 7 企业运维与发布 | 部分完成 | ~26% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke 门禁；无发布/回滚 |
+| Phase 7 企业运维与发布 | 部分完成 | ~30% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁；无发布/回滚 |
 | Phase 8 AI-Native 扩展 | 未开始 | 0% | — |
 | **分层内核 L0–L3** | **部分完成** | **~88–90%** | 语义+存储+查询主路径可用，COUNT/子查询/属性路径最小集已纳入回归保护 |
 | **相对 R1 退出标准** | **进行中** | **~70–73%** | 内核+HTTP+集群+CI/烟雾合规 + W3C 子集 required-lite；多节点数据面/W3C 全量/SLO 仍缺 |
@@ -63,7 +63,7 @@
 | L4 cluster | ~80% | +session/partition/rebalance/commit + HTTP /cluster；14 测 |
 | L5 server/security/obs | ~88% | 双后端、文件审计、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
 | L6 reasoner | ~5% | 占位 |
-| L7 平台工程 | ~26% | CI workflow + ci-local + compliance crate + systemd 安装脚本（runtime + management）+ 管理面 smoke 校验 |
+| L7 平台工程 | ~30% | CI workflow + ci-local + compliance crate + systemd 安装脚本（runtime + management）+ 管理面 smoke + 窗口化 SLO 校验 |
 | L8 AI-Native | 0% | — |
 
 ### 当前焦点
@@ -340,6 +340,7 @@
 | 2026-07-23 | GitHub Copilot | SLO 增量：新增管理平台独立 SLO 文档（`docs/L5-management-platform-slo.md`），并将 smoke 门禁升级为 `runtime_probe.reachable=true` + `latency_ms` 阈值校验。 |
 | 2026-07-23 | GitHub Copilot | 安全治理增量：起草 ADR-0003（管理面最小安全基线，TLS-first / OIDC-ready 路径）。 |
 | 2026-07-23 | GitHub Copilot | SLO 增量：新增 `scripts/check-management-slo-window.sh` 窗口检查脚本（success%/p95），并接入 local/CI 管理面 smoke；补充 management env 模板阈值参数。 |
+| 2026-07-23 | GitHub Copilot | 收工快照：提交 `14ac4a7`、`cd098db` 已推送至 `origin/main`；本地 `scripts/ci-local.sh`（含 management windowed SLO）通过，工作区与远端同步。 |
 
 ---
 
@@ -360,7 +361,7 @@
 - [x] 管理面窗口化 SLO（success%/p95）与告警阈值固化
 - [x] 管理面最小安全加固 ADR 草案（ADR-0003）
 - [ ] 确认 Stream A/B/C/D 负责人并回填 §2 焦点表
-- [ ] 将本地提交序列推送并发起 PR（附分批审阅说明）
+- [x] 本波次提交已推送 `origin/main`（直推模式，无 PR）
 - [ ] 管理面安全加固（TLS 终止方案落地或 OIDC 校验链路实现）
 
 ### R1 关键路径（按依赖序）
