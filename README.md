@@ -67,6 +67,12 @@ Key admin endpoints:
 When `ONTOLITH_AUTH_MODE=enforced`, include `X-API-Key`, `X-Ontolith-Tenant`, and
 `X-Ontolith-User` headers.
 
+Optional management ACL split (read/write key separation):
+
+- `ONTOLITH_MANAGEMENT_READ_KEY`: allows read endpoints (`GET /admin/*`)
+- `ONTOLITH_MANAGEMENT_WRITE_KEY`: required for mutation endpoints (`POST /admin/data/*`)
+- Header: `X-Ontolith-Management-Key: <key>`
+
 ---
 
 ## What You Get

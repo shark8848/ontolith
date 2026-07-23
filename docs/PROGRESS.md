@@ -333,6 +333,7 @@
 | 2026-07-23 | GitHub Copilot | strict 策略优化：W3C 子集 strict 判据调整为“零 known-gap 失败 + 零 in-scope skip”，并将 `SPARQL Update` 标记为 strict skip-exempt，消除 out-of-scope 永久阻塞。 |
 | 2026-07-23 | GitHub Copilot | L5 管理面增量：新增独立二进制 `ontolith-management-server`，提供 `/admin/config`、`/admin/monitoring`、`/admin/data/*` 统一管理接口；`cargo test -p ontolith-server` 10 测通过。 |
 | 2026-07-23 | GitHub Copilot | 运维增量：新增 management server 的 systemd user/system unit、环境模板与安装脚本，补齐管理面部署路径与健康检查文档。 |
+| 2026-07-23 | GitHub Copilot | 管理面权限增量：新增 read/write ACL 分离（`ONTOLITH_MANAGEMENT_READ_KEY` / `ONTOLITH_MANAGEMENT_WRITE_KEY` + `X-Ontolith-Management-Key`），将管理查询与变更权限解耦。 |
 
 ---
 

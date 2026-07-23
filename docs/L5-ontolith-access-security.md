@@ -61,6 +61,12 @@ ontolith-management-server (L5 management plane)
 | POST | `/admin/data/replicate` | cluster:admin | 触发 follower 复制对齐 |
 | POST | `/admin/data/rebalance` | cluster:admin | 触发 slot 重平衡 |
 
+管理面 ACL（可选）：
+
+- `ONTOLITH_MANAGEMENT_READ_KEY`：允许读取管理视图
+- `ONTOLITH_MANAGEMENT_WRITE_KEY`：允许管理变更（`POST /admin/data/*`）
+- 请求头：`X-Ontolith-Management-Key`
+
 ### SPARQL
 
 | 来源 | 参数 |
@@ -119,6 +125,8 @@ X-Ontolith-Tenant: acme
 | `ONTOLITH_MANAGEMENT_BIND` | `127.0.0.1:9091` | 管理服务监听地址 |
 | `ONTOLITH_AUTH_MODE` | `disabled` | `disabled` \| `enforced` |
 | `ONTOLITH_API_KEY` | — | Enforced 时校验 |
+| `ONTOLITH_MANAGEMENT_READ_KEY` | — | 管理面只读 key（可选） |
+| `ONTOLITH_MANAGEMENT_WRITE_KEY` | — | 管理面写操作 key（可选） |
 
 ```bash
 # 内存
@@ -201,6 +209,7 @@ systemctl --user status ontolith-server
 | 2026-07-17 | 1.0.0 | HTTP 基线路由 + Header 鉴权 |
 | 2026-07-17 | 2.0.0 | RocksDB 切换、L3 解析写入、SPARQL Results JSON、/ready、增强 metrics、tenant graph |
 | 2026-07-23 | 2.2.0 | 新增独立 `ontolith-management-server` 管理面（二进制 + 统一配置/监控/数据管理 API） |
+| 2026-07-23 | 2.2.1 | 管理面 ACL 分离：支持 read/write key 双轨控制（`X-Ontolith-Management-Key`） |
 
 ## 8. 审计落盘与权限（v2.1）
 

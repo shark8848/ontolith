@@ -7,7 +7,7 @@ use ontolith_core::error::OntolithError;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
-use ontolith_security::domain::{AuthContext, AuthMode};
+use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode};
 use ontolith_security::infrastructure::FileAuditLog;
 use std::env;
 use std::path::PathBuf;
@@ -21,6 +21,9 @@ const DATA_DIR_ENV: &str = "ONTOLITH_DATA_DIR";
 const AUTH_MODE_ENV: &str = "ONTOLITH_AUTH_MODE";
 const API_KEY_ENV: &str = "ONTOLITH_API_KEY";
 const AUDIT_PATH_ENV: &str = "ONTOLITH_AUDIT_PATH";
+const MGMT_READ_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_READ_KEY";
+const MGMT_WRITE_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_WRITE_KEY";
+const MGMT_KEY_HEADER: &str = "x-ontolith-management-key";
 
 const DEFAULT_MGMT_BIND: &str = "127.0.0.1:9091";
 const DEFAULT_API_BIND: &str = "127.0.0.1:8080";
@@ -29,14 +32,53 @@ pub struct ManagementState {
     app: Arc<AppState>,
     management_bind: String,
     started_at_ms: u64,
+    acl: ManagementAcl,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ManagementAcl {
+    read_key: Option<String>,
+    write_key: Option<String>,
+}
+
+impl ManagementAcl {
+    fn enabled(&self) -> bool {
+        self.read_key.is_some() || self.write_key.is_some()
+    }
+
+    fn allows_read(&self, provided: Option<&str>) -> bool {
+        if !self.enabled() {
+            return true;
+        }
+
+        match provided {
+            Some(value) => {
+                self.read_key.as_deref() == Some(value) || self.write_key.as_deref() == Some(value)
+            }
+            None => false,
+        }
+    }
+
+    fn allows_write(&self, provided: Option<&str>) -> bool {
+        if !self.enabled() {
+            return true;
+        }
+
+        match (&self.write_key, &self.read_key, provided) {
+            (Some(write), _, Some(value)) => write == value,
+            (None, Some(read), Some(value)) => read == value,
+            _ => false,
+        }
+    }
 }
 
 impl ManagementState {
-    fn new(app: Arc<AppState>, management_bind: String) -> Arc<Self> {
+    fn new(app: Arc<AppState>, management_bind: String, acl: ManagementAcl) -> Arc<Self> {
         Arc::new(Self {
             app,
             management_bind,
             started_at_ms: now_ms(),
+            acl,
         })
     }
 
@@ -88,13 +130,59 @@ impl ManagementState {
     ) -> Result<AuthContext, OntolithError> {
         let ctx = self.authenticate(req)?;
         authorize(&self.app.audit, &ctx, resource, action, now_ms())?;
+        self.enforce_acl(req, &ctx, false)?;
         Ok(ctx)
     }
 
-    fn authorize_admin(&self, req: &HttpRequest) -> Result<AuthContext, OntolithError> {
+    fn authorize_admin_view(&self, req: &HttpRequest) -> Result<AuthContext, OntolithError> {
         let ctx = self.authenticate(req)?;
         authorize(&self.app.audit, &ctx, "cluster", "admin", now_ms())?;
+        self.enforce_acl(req, &ctx, false)?;
         Ok(ctx)
+    }
+
+    fn authorize_admin_mutation(&self, req: &HttpRequest) -> Result<AuthContext, OntolithError> {
+        let ctx = self.authenticate(req)?;
+        authorize(&self.app.audit, &ctx, "cluster", "admin", now_ms())?;
+        self.enforce_acl(req, &ctx, true)?;
+        Ok(ctx)
+    }
+
+    fn enforce_acl(
+        &self,
+        req: &HttpRequest,
+        ctx: &AuthContext,
+        needs_write_key: bool,
+    ) -> Result<(), OntolithError> {
+        if !self.acl.enabled() {
+            return Ok(());
+        }
+
+        let provided = req.header(MGMT_KEY_HEADER);
+        let allowed = if needs_write_key {
+            self.acl.allows_write(provided)
+        } else {
+            self.acl.allows_read(provided)
+        };
+
+        if allowed {
+            return Ok(());
+        }
+
+        let detail = if needs_write_key {
+            "forbidden: management write key required"
+        } else {
+            "forbidden: management read key required"
+        };
+        self.app.audit.record(
+            now_ms(),
+            ctx,
+            if needs_write_key { "write" } else { "read" },
+            "management",
+            AuditOutcome::Deny,
+            detail,
+        );
+        Err(OntolithError::Failed(detail.to_owned()))
     }
 
     fn admin_health(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
@@ -113,7 +201,7 @@ impl ManagementState {
     }
 
     fn admin_config(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
-        let _ = self.authorize_admin(req)?;
+        let _ = self.authorize_admin_view(req)?;
         Ok(HttpResponse::json(
             200,
             "OK",
@@ -142,7 +230,7 @@ impl ManagementState {
     }
 
     fn admin_layers(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
-        let _ = self.authorize_admin(req)?;
+        let _ = self.authorize_admin_view(req)?;
         Ok(HttpResponse::json(
             200,
             "OK",
@@ -266,7 +354,7 @@ impl ManagementState {
     }
 
     fn admin_data_replicate(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
-        let _ = self.authorize_admin(req)?;
+        let _ = self.authorize_admin_mutation(req)?;
         let applied = self.app.cluster.replicate_to_followers()?;
         Ok(HttpResponse::json(
             200,
@@ -281,7 +369,7 @@ impl ManagementState {
     }
 
     fn admin_data_rebalance(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
-        let _ = self.authorize_admin(req)?;
+        let _ = self.authorize_admin_mutation(req)?;
         let plans = self.app.cluster.rebalance()?;
         Ok(HttpResponse::json(
             200,
@@ -307,17 +395,20 @@ pub fn dispatch_for_test(state: &Arc<ManagementState>, req: HttpRequest) -> Http
 pub fn run() -> Result<(), String> {
     let management_bind = env::var(MGMT_BIND_ENV).unwrap_or_else(|_| DEFAULT_MGMT_BIND.to_owned());
     let api_bind = env::var(API_BIND_ENV).unwrap_or_else(|_| DEFAULT_API_BIND.to_owned());
+    let acl = load_management_acl_from_env();
 
     let authenticator = load_authenticator();
     let audit = load_audit_log_from_env().map_err(|e| e.message().to_owned())?;
     let app = build_managed_app_state(api_bind, authenticator, audit)?;
-    let state = ManagementState::new(app, management_bind.clone());
+    let state = ManagementState::new(app, management_bind.clone(), acl.clone());
 
     println!(
-        "ontolith-management-server starting: bind={}, runtime_bind={}, backend={}",
+        "ontolith-management-server starting: bind={}, runtime_bind={}, backend={}, acl_read_key={}, acl_write_key={}",
         management_bind,
         state.app.bind_address,
         state.app.backend.as_str(),
+        acl.read_key.is_some(),
+        acl.write_key.is_some(),
     );
 
     let server = HttpServer::new(shared_management_handler(state));
@@ -341,6 +432,19 @@ fn load_authenticator() -> HeaderAuthenticator {
         mode,
         api_key: env::var(API_KEY_ENV).ok(),
         ..HeaderAuthenticator::default()
+    }
+}
+
+fn load_management_acl_from_env() -> ManagementAcl {
+    let read_key = env::var(MGMT_READ_KEY_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let write_key = env::var(MGMT_WRITE_KEY_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    ManagementAcl {
+        read_key,
+        write_key,
     }
 }
 
@@ -470,13 +574,29 @@ mod tests {
         }
     }
 
+    fn req_with_key(method: &str, path: &str, key: &str) -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert("X-Ontolith-Management-Key".to_owned(), key.to_owned());
+        HttpRequest {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            query: HashMap::new(),
+            headers,
+            body: Vec::new(),
+        }
+    }
+
     fn test_state(auth: HeaderAuthenticator) -> Arc<ManagementState> {
+        test_state_with_acl(auth, ManagementAcl::default())
+    }
+
+    fn test_state_with_acl(auth: HeaderAuthenticator, acl: ManagementAcl) -> Arc<ManagementState> {
         let app = AppState::new_memory_with_audit(
             "127.0.0.1:8080".to_owned(),
             auth,
             InMemoryAuditLog::new(),
         );
-        ManagementState::new(app, "127.0.0.1:9091".to_owned())
+        ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl)
     }
 
     #[test]
@@ -516,5 +636,47 @@ mod tests {
         let state = test_state(auth);
         let resp = dispatch_for_test(&state, req("GET", "/admin/config"));
         assert_eq!(resp.status, 401);
+    }
+
+    #[test]
+    fn acl_split_allows_read_key_for_read_only_endpoint() {
+        let acl = ManagementAcl {
+            read_key: Some("read-only".to_owned()),
+            write_key: Some("write-admin".to_owned()),
+        };
+        let state = test_state_with_acl(HeaderAuthenticator::default(), acl);
+        let resp = dispatch_for_test(
+            &state,
+            req_with_key("GET", "/admin/monitoring", "read-only"),
+        );
+        assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn acl_split_blocks_write_with_read_key() {
+        let acl = ManagementAcl {
+            read_key: Some("read-only".to_owned()),
+            write_key: Some("write-admin".to_owned()),
+        };
+        let state = test_state_with_acl(HeaderAuthenticator::default(), acl);
+        let resp = dispatch_for_test(
+            &state,
+            req_with_key("POST", "/admin/data/rebalance", "read-only"),
+        );
+        assert_eq!(resp.status, 403);
+    }
+
+    #[test]
+    fn acl_split_allows_write_with_write_key() {
+        let acl = ManagementAcl {
+            read_key: Some("read-only".to_owned()),
+            write_key: Some("write-admin".to_owned()),
+        };
+        let state = test_state_with_acl(HeaderAuthenticator::default(), acl);
+        let resp = dispatch_for_test(
+            &state,
+            req_with_key("POST", "/admin/data/rebalance", "write-admin"),
+        );
+        assert_eq!(resp.status, 200);
     }
 }
