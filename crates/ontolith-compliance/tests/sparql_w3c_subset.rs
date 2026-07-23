@@ -277,6 +277,17 @@ fn cases() -> Vec<W3cCase> {
             expected: Some(ExpectedOutcome::Ask(true)),
         },
         W3cCase {
+            id: "w3c-ask-negative",
+            source: "W3C SPARQL 1.1 Query tests (derived ASK negative)",
+            feature: "ASK false",
+            class: CaseClass::MustPass,
+            reason: "negative ASK baseline",
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/ask_negative.rq"),
+            expected: Some(ExpectedOutcome::Ask(false)),
+        },
+        W3cCase {
             id: "w3c-construct-basic",
             source: "W3C SPARQL 1.1 Query tests (derived basic CONSTRUCT)",
             feature: "CONSTRUCT",
@@ -330,6 +341,20 @@ fn cases() -> Vec<W3cCase> {
             }),
         },
         W3cCase {
+            id: "w3c-join-fixed-subject",
+            source: "W3C SPARQL 1.1 Query tests (derived bound-object join)",
+            feature: "BGP JOIN",
+            class: CaseClass::MustPass,
+            reason: "bound-object join baseline",
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/join_fixed_subject.rq"),
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 1,
+                vars: &["s", "n"],
+            }),
+        },
+        W3cCase {
             id: "w3c-bind-bound",
             source: "W3C SPARQL 1.1 Query tests (derived bind)",
             feature: "BIND",
@@ -358,6 +383,20 @@ fn cases() -> Vec<W3cCase> {
             }),
         },
         W3cCase {
+            id: "w3c-values-tuple",
+            source: "W3C SPARQL 1.1 Query tests (derived values tuple)",
+            feature: "VALUES tuples",
+            class: CaseClass::MustPass,
+            reason: "multi-variable VALUES baseline",
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/values_tuple.rq"),
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 2,
+                vars: &["s", "o"],
+            }),
+        },
+        W3cCase {
             id: "w3c-distinct-order-limit",
             source: "W3C SPARQL 1.1 Query tests (derived projection modifiers)",
             feature: "DISTINCT ORDER BY LIMIT",
@@ -369,6 +408,20 @@ fn cases() -> Vec<W3cCase> {
             expected: Some(ExpectedOutcome::SelectRows {
                 rows: 2,
                 vars: &["p"],
+            }),
+        },
+        W3cCase {
+            id: "w3c-distinct-order-limit-offset",
+            source: "W3C SPARQL 1.1 Query tests (derived projection modifiers with offset)",
+            feature: "DISTINCT ORDER BY LIMIT OFFSET",
+            class: CaseClass::MustPass,
+            reason: "offset modifier baseline",
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/distinct_order_limit_offset.rq"),
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 1,
+                vars: &["s"],
             }),
         },
         W3cCase {
@@ -411,6 +464,20 @@ fn cases() -> Vec<W3cCase> {
             }),
         },
         W3cCase {
+            id: "w3c-aggregate-count-star",
+            source: "W3C SPARQL 1.1 Query tests (derived aggregate count star)",
+            feature: "Aggregate COUNT(*)",
+            class: CaseClass::MustPass,
+            reason: "COUNT(*) aggregate baseline",
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/aggregate_count_star.rq"),
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 1,
+                vars: &["c"],
+            }),
+        },
+        W3cCase {
             id: "w3c-property-path-sequence",
             source: "W3C SPARQL 1.1 Query tests (property path)",
             feature: "Property path sequence",
@@ -439,6 +506,20 @@ fn cases() -> Vec<W3cCase> {
             }),
         },
         W3cCase {
+            id: "w3c-property-path-plus-bob",
+            source: "W3C SPARQL 1.1 Query tests (property path)",
+            feature: "Property path +",
+            class: CaseClass::MustPass,
+            reason: "transitive closure from intermediate node",
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/property_path_plus_bob.rq"),
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 1,
+                vars: &["o"],
+            }),
+        },
+        W3cCase {
             id: "w3c-property-path-star",
             source: "W3C SPARQL 1.1 Query tests (property path)",
             feature: "Property path *",
@@ -449,6 +530,20 @@ fn cases() -> Vec<W3cCase> {
             query: include_str!("w3c/queries/property_path_star.rq"),
             expected: Some(ExpectedOutcome::SelectRows {
                 rows: 3,
+                vars: &["o"],
+            }),
+        },
+        W3cCase {
+            id: "w3c-property-path-star-bob",
+            source: "W3C SPARQL 1.1 Query tests (property path)",
+            feature: "Property path *",
+            class: CaseClass::MustPass,
+            reason: "zero-or-more closure from intermediate node",
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/property_path_star_bob.rq"),
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 2,
                 vars: &["o"],
             }),
         },

@@ -1,8 +1,8 @@
 # R1 SPARQL Smoke Compliance Profile
 
 文档 ID: COMP-R1-0001  
-版本: 1.6.0  
-日期: 2026-07-22  
+版本: 1.7.0  
+日期: 2026-07-23  
 Crate: [`ontolith-compliance`](../crates/ontolith-compliance)
 
 ---
@@ -57,9 +57,11 @@ Current known gaps:
 Current must-pass increment:
 
 - Aggregate COUNT (no GROUP BY)
+- Aggregate COUNT(*)
 - Subquery (nested SELECT + LIMIT baseline)
 - Property path sequence (iri/iri baseline)
 - Property path `+` / `*` / `|` / `^` minimal set baseline
+- ASK false / fixed-subject join / VALUES tuple / DISTINCT+OFFSET variants
 
 Current unsupported:
 
@@ -80,9 +82,16 @@ Current unsupported:
 - `sparql_r1_smoke`: required (blocking).
 - `sparql_w3c_subset`: required-lite (blocking must-pass regressions).
 - `sparql_w3c_subset_strict`: non-blocking observer (`ONTOLITH_W3C_SUBSET_STRICT=1`) for xfail/skip debt trend.
+- `sparql_w3c_strict_promotion_readiness`: main 分支自动评估最近 3 次 strict observer 是否连续全绿，并在 Job Summary 输出 READY/NOT READY 信号。
+
+Current profile snapshot (v0, 2026-07-23):
+
+- must-pass: 24
+- known-gap: 0
+- unsupported: 1 (SPARQL Update)
 
 ## Next
 
-1. Expand subset from current seed to 20-40 cases with feature-tagged skip/xfail.
-2. Keep required-lite stable for at least 3 CI samples, then evaluate strict promotion.
+1. Keep subset within 20-40 cases while preserving explicit expected assertions per case.
+2. Require 3 consecutive `main` CI green runs (including strict observer pass) before promoting strict to required; readiness 由 CI 自动汇总信号提供。
 3. Move toward manifest-driven import of official W3C test artifacts.

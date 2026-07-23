@@ -5,7 +5,7 @@
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-22（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包）；Git 当前头: `main`（本波次收工提交后刷新）（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
+对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24）；Git 当前头: `main`（本波次收工提交后刷新）（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
 
 ---
 
@@ -42,7 +42,7 @@
 | Phase 0 规划与治理 | 部分完成 | ~60% | 台账 + ADR/RFC 模板 + 依赖登记 + 计划互链；签批仍缺 |
 | Phase 1 核心模型与存储抽象 | 部分完成 | ~70% | L0/L1 文档化；ConsistencyLevel；存储契约固化 |
 | Phase 2 持久化与事务内核 | 部分完成 | ~85% | 内存六索引 + RocksDB 耐久；无真 MVCC / 纯 CF 扫描 |
-| Phase 3 查询引擎 | 部分完成 | ~90% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + COUNT 聚合基线（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径最小集（`/`、`+`、`*`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 17/17）；缺属性路径 `?` / 完整聚合 / Update |
+| Phase 3 查询引擎 | 部分完成 | ~90% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + COUNT 聚合基线（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径最小集（`/`、`+`、`*`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 24/24）+ strict 观测轨；缺属性路径 `?` / 完整聚合 / Update |
 | Phase 4 集群与一致性 MVP | 部分完成 | ~80% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API；无多进程 Raft |
 | Phase 5 接入层与安全基线 | 部分完成 | ~82% | HTTP 全路由 + 文件审计 + cluster 权限 + systemd 打包；无 TLS/OIDC |
 | Phase 6 推理与验证 | 未开始 | ~5% | 仅类型占位 |
@@ -129,7 +129,7 @@
 | P3-02 | 规则优化基线 | 部分完成 | 55% | BGP 重排、Identity 消除、Filter 下推、POS/OSP 选路 | 代价模型/统计 |
 | P3-03 | Explain 输出 | 部分完成 | 85% | logical/physical/algebra + optimize 步骤 | HTTP Explain API |
 | P3-04 | 超时与取消 API | 部分完成 | 75% | timeout_ms + Arc\<AtomicBool\> cancel | 异步抢占/token |
-| P3-05 | MVP 标准符合性子集 | 部分完成 | 84% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 15 烟雾 + W3C 子集运行器（must-pass 17/17，known-gap xfail=0，unsupported skip=1）+ CI required-lite + strict observer + `ci-local.sh` 全链路通过 | 扩展到 20–40 case；稳定后评估 strict required |
+| P3-05 | MVP 标准符合性子集 | 部分完成 | 89% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 15 烟雾 + W3C 子集运行器（must-pass 24/24，known-gap xfail=0，unsupported skip=1）+ CI required-lite + strict observer + strict-promotion-readiness 自动信号 + `ci-local.sh` 全链路通过 | 观察主干连续 3 次 CI 全绿后评估 strict required |
 
 **阶段退出条件：** MVP profile 查询可跑通；Explain/超时/取消可用。
 
@@ -210,7 +210,7 @@
 | [~] SPARQL 查询基线 | 部分完成 | SELECT/ASK/CONSTRUCT 核心；非完整 1.1 |
 | [~] 单区域集群核心 | 部分完成 | 控制面可测+HTTP 演示；无多节点数据面 |
 | [~] 安全与审计基线 | 部分完成 | HTTP 鉴权+审计+JSONL 落盘；无 OIDC |
-| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（required-lite，must-pass 17/17，xfail=0，xpass=0）+ strict observer（non-blocking）；无完整 W3C 套件 |
+| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（required-lite，must-pass 24/24，xfail=0，xpass=0，skip=1）+ strict observer（non-blocking）+ strict readiness 自动评估；无完整 W3C 套件 |
 | [ ] 核心 SLO 基线达标 | 未完成 | 无基准 |
 | [~] 恢复演练通过 | 部分完成 | RocksDB reopen 单测；无演练手册 |
 | [ ] 回滚演练通过 | 未完成 | 无发布链路 |
@@ -266,7 +266,7 @@
 
 | 门禁/治理项 | 状态 | 证据 / 缺口 |
 |-------------|------|-------------|
-| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（must-pass 17/17，known-gap: xfail 0 / xpass 0，unsupported skip 1）+ CI required-lite / strict observer；非完整 W3C 官方 |
+| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（must-pass 24/24，known-gap: xfail 0 / xpass 0，unsupported skip 1）+ CI required-lite / strict observer；非完整 W3C 官方 |
 | [~] 故障注入（选主/复制/恢复） | 部分完成 | `ontolith-cluster` 分区注入/愈合与复制路径单测（14 测） |
 | [ ] 幂等写入验证 | 未开始 | 部分事务单测不足替代 |
 | [ ] 性能回归门禁 | 未开始 | `benchmarks/` 空 |
@@ -295,7 +295,7 @@
 | ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）（7 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
 | ontolith-observability | sink、导出、采样循环、Prometheus 文本（6 测） | `crates/ontolith-observability/src/**` |
 | ontolith-server | metrics、采样配置、HTTP query decode（6 测） | `crates/ontolith-server/src/{api,bootstrap,http}.rs` |
-| ontolith-compliance | R1 烟雾 15 + W3C 子集 profile 1（must-pass 17/17） | `crates/ontolith-compliance/tests/**` |
+| ontolith-compliance | R1 烟雾 15 + W3C 子集 profile 1（must-pass 24/24） | `crates/ontolith-compliance/tests/**` |
 
 ---
 
@@ -328,6 +328,8 @@
 | 2026-07-22 | GitHub Copilot | 底层优先增量：`ontolith-query` 落地属性路径序列（iri/iri）基线，新增 query 测试 1 条（总计 26）；W3C 子集 `w3c-property-path-unsupported` 晋升为 must-pass，统计更新为 must-pass 13/13、known-gap xfail 0、xpass 0、skip 1 |
 | 2026-07-22 | GitHub Copilot | 底层优先增量：`ontolith-query` 完成属性路径高级算子最小集（`+`、`*`、`|`、`^`）并改为 `Path` 通用代数求值，新增 query 测试 4 条（总计 30）；W3C 子集新增 4 条路径 must-pass 用例并全绿，统计更新为 must-pass 17/17、known-gap xfail 0、xpass 0、skip 1 |
 | 2026-07-22 | GitHub Copilot | 收工批次：完成高级属性路径最小集代码与合规/架构/进度文档同步，执行 `cargo test -p ontolith-query` 与 `cargo test -p ontolith-compliance` 全绿，进入提交封板。 |
+| 2026-07-23 | GitHub Copilot | 合规扩容：W3C 子集新增 7 条 must-pass（ASK false、BGP JOIN 变体、VALUES tuple、DISTINCT+OFFSET、COUNT(*)、路径 `+/*` 变体），统计更新为 must-pass 24/24、known-gap xfail 0、xpass 0、skip 1；本地 `cargo test -p ontolith-compliance --test sparql_w3c_subset -- --nocapture` 全绿。 |
+| 2026-07-23 | GitHub Copilot | CI 增量：新增 `sparql w3c strict promotion readiness` 作业（仅 main push），自动回看最近 3 次 strict observer 结果并输出 READY/NOT READY 信号；用于 strict required 晋升判据自动化。 |
 
 ---
 

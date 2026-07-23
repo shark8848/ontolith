@@ -1,0 +1,7 @@
+SELECT ?s ?o WHERE {
+  VALUES (?s ?o) {
+    (<http://ex.org/alice> <http://ex.org/bob>)
+    (<http://ex.org/bob> <http://ex.org/carol>)
+  }
+  ?s <http://ex.org/knows> ?o .
+}

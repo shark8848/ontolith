@@ -1,0 +1,6 @@
+SELECT DISTINCT ?s WHERE {
+  ?s <http://ex.org/knows> ?o .
+}
+ORDER BY ?s
+LIMIT 1
+OFFSET 1
