@@ -1,13 +1,14 @@
 # Ontolith Development Plan
 
 Document ID: PLAN-0001  
-Version: 1.0.0-draft  
+Version: 1.0.1-draft  
 Status: Draft  
-Date: 2026-07-12  
+Date: 2026-07-23  
 Owner: sharky-ai
 
 Progress ledger (execution status): [PROGRESS.md](./PROGRESS.md) (PROG-0001)  
-Layer implementation notes: [L0 core](./L0-ontolith-core-Knowledge-Object-Foundation.md) · [L1 rdf](./L1-ontolith-rdf-Statement-Graph-Dataset.md) · [L2 storage/txn](./L2-ontolith-storage-transaction-kernel.md) · [L3 parser/query](./L3-ontolith-parser-query.md)
+Layer implementation notes: [L0 core](./L0-ontolith-core-Knowledge-Object-Foundation.md) · [L1 rdf](./L1-ontolith-rdf-Statement-Graph-Dataset.md) · [L2 storage/txn](./L2-ontolith-storage-transaction-kernel.md) · [L3 parser/query](./L3-ontolith-parser-query.md) · [L4 cluster](./L4-ontolith-cluster-consistency.md) · [L5 access/security](./L5-ontolith-access-security.md)  
+Dependency governance: [DEPENDENCY_REGISTER](./DEPENDENCY_REGISTER.md) · [ADR-0001 RocksDB](../adr/0001-rocksdb-storage-backend.md) · [ADR-0002 Cluster MVP](../adr/0002-cluster-mvp-in-process.md)
 
 ---
 
@@ -38,6 +39,7 @@ Included:
 - End-to-end technical delivery from R1 to R4.
 - Runtime architecture implementation and engineering process.
 - Security, observability, release, and dependency governance.
+- Management platform (management plane) for unified config, monitoring, and data-management operations.
 - Third-party component control for Oxigraph, RocksDB, and core Rust ecosystem crates.
 
 Excluded:
@@ -153,11 +155,13 @@ Goals:
 - Implement gateway and service access boundaries.
 - Implement authn/authz, tenant isolation, and audit logging.
 - Implement observability baseline (metrics, traces, logs).
+- Implement management platform baseline (dedicated management service, control-plane ACL, runtime probe).
 
 Deliverables:
 - Security baseline in runtime path.
 - Tenant-safe request handling baseline.
 - Unified telemetry baseline.
+- Management platform API baseline (config, monitoring, data management).
 
 Dependencies:
 - Depends on Phases 3 and 4.
@@ -188,6 +192,7 @@ Deliverables:
 - Operational readiness baseline.
 - DR drill runbooks and evidence.
 - Release and rollback playbooks.
+- Management platform runbook and smoke/SLO gate baseline.
 
 Dependencies:
 - Depends on Phases 5 and 6.
@@ -239,11 +244,13 @@ Dependencies:
 ### WBS-07 API, Security, and Integrations
 - API gateway boundaries.
 - Authn/authz, tenant isolation, audit trail.
+- Management platform API (config, monitoring, data management) with read/write ACL.
 - Plugin host and extension lifecycle.
 
 ### WBS-08 Platform Engineering
 - CI/CD, quality gates, dependency audit, release process.
 - Observability stack and operations runbooks.
+- Management platform smoke gate and probe/SLO threshold governance.
 
 ---
 
@@ -255,11 +262,13 @@ Scope:
 - SPARQL query baseline.
 - Single-region cluster core.
 - Security and audit baseline.
+- Management platform minimum loop (config, monitoring, data management + ACL + probe).
 
 Exit criteria:
 - Standards conformance gate passes for MVP scope.
 - Core SLO baseline achieved.
 - Recovery drill and rollback drill both pass.
+- Management platform smoke gate passes with stable control-plane endpoint evidence.
 
 ### R2 (Rust)
 Scope:
@@ -296,6 +305,7 @@ Exit criteria:
 ### 7.1 Functional
 - RDF/SPARQL conformance tests for supported profile must pass.
 - API contracts and error semantics must be deterministic.
+- Management endpoints (`/admin/health`, `/admin/config`, `/admin/monitoring`) must be deterministic and verifiable.
 
 ### 7.2 Consistency and Reliability
 - Fault-injection tests must validate election, replication, and recovery behavior.
@@ -304,6 +314,7 @@ Exit criteria:
 ### 7.3 Performance and Capacity
 - Latency, throughput, RTO, and RPO must meet release targets.
 - Performance regression threshold breaches must block release candidates.
+- Management probe metrics (success ratio and latency) must have tracked baselines and thresholds.
 
 ### 7.4 Security and Compliance
 - Authz policy tests and tenant isolation tests must pass.
@@ -370,3 +381,5 @@ Mandatory artifacts per phase:
 - Confirm owners for each stream.
 - Approve Phase 0 deliverables and due dates.
 - Start Phase 1 implementation with weekly architecture and risk review.
+- Define R1 SLOs and alert thresholds for the management platform.
+- Make management platform smoke validation mandatory in local and CI gates.

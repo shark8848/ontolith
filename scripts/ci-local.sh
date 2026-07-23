@@ -37,4 +37,23 @@ if cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"ontolith-
   fi
 fi
 
+echo "==> management server smoke"
+cargo build -p ontolith-server --bin ontolith-management-server
+ONTOLITH_MANAGEMENT_BIND=127.0.0.1:19091 \
+ONTOLITH_BIND=127.0.0.1:18080 \
+./target/debug/ontolith-management-server >/tmp/ontolith-management-smoke.log 2>&1 &
+mgmt_pid=$!
+trap 'kill "$mgmt_pid" >/dev/null 2>&1 || true' EXIT
+
+timeout 20s bash -c 'until curl -fsS "http://127.0.0.1:19091/admin/health" >/dev/null 2>&1; do :; done' || {
+  echo "management smoke timeout; server log:"
+  tail -n 80 /tmp/ontolith-management-smoke.log || true
+  exit 1
+}
+curl -fsS "http://127.0.0.1:19091/admin/monitoring" | grep -q '"runtime_probe"'
+
+kill "$mgmt_pid" >/dev/null 2>&1 || true
+wait "$mgmt_pid" 2>/dev/null || true
+trap - EXIT
+
 echo "==> OK: local CI gates passed"

@@ -1,11 +1,11 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.8  
+版本: 0.1.9  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；新增独立管理服务器 `ontolith-management-server`，统一配置/监控/数据管理）；Git 当前头: `main`（本波次收工提交后刷新）（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
+对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke 门禁）；Git 当前头: `main`（本波次收工提交后刷新）（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
 
 ---
 
@@ -44,9 +44,9 @@
 | Phase 2 持久化与事务内核 | 部分完成 | ~85% | 内存六索引 + RocksDB 耐久；无真 MVCC / 纯 CF 扫描 |
 | Phase 3 查询引擎 | 部分完成 | ~90% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + COUNT 聚合基线（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径最小集（`/`、`+`、`*`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 24/24）+ strict 观测轨；缺属性路径 `?` / 完整聚合 / Update |
 | Phase 4 集群与一致性 MVP | 部分完成 | ~80% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API；无多进程 Raft |
-| Phase 5 接入层与安全基线 | 部分完成 | ~86% | HTTP 全路由 + 文件审计 + cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）；无 TLS/OIDC |
+| Phase 5 接入层与安全基线 | 部分完成 | ~88% | HTTP 全路由 + 文件审计 + cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
 | Phase 6 推理与验证 | 未开始 | ~5% | 仅类型占位 |
-| Phase 7 企业运维与发布 | 部分完成 | ~24% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server） ；无发布/回滚 |
+| Phase 7 企业运维与发布 | 部分完成 | ~26% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke 门禁；无发布/回滚 |
 | Phase 8 AI-Native 扩展 | 未开始 | 0% | — |
 | **分层内核 L0–L3** | **部分完成** | **~88–90%** | 语义+存储+查询主路径可用，COUNT/子查询/属性路径最小集已纳入回归保护 |
 | **相对 R1 退出标准** | **进行中** | **~70–73%** | 内核+HTTP+集群+CI/烟雾合规 + W3C 子集 required-lite；多节点数据面/W3C 全量/SLO 仍缺 |
@@ -61,17 +61,17 @@
 | L2 storage/txn | ~85% | 内存+RocksDB |
 | L3 parser/query | ~90% | 完整核心，非仅 MVP；COUNT 聚合+子查询+属性路径最小集（`/`、`+`、`*`、`|`、`^`）已落地；W3C 子集 required-lite + strict 观测双轨 |
 | L4 cluster | ~80% | +session/partition/rebalance/commit + HTTP /cluster；14 测 |
-| L5 server/security/obs | ~86% | 双后端、文件审计、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API |
+| L5 server/security/obs | ~88% | 双后端、文件审计、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
 | L6 reasoner | ~5% | 占位 |
-| L7 平台工程 | ~24% | CI workflow + ci-local + compliance crate + systemd 安装脚本（runtime + management） |
+| L7 平台工程 | ~26% | CI workflow + ci-local + compliance crate + systemd 安装脚本（runtime + management）+ 管理面 smoke 校验 |
 | L8 AI-Native | 0% | — |
 
 ### 当前焦点
 
 | 优先级 | 焦点 | 负责人 | 目标日期 |
 |--------|------|--------|----------|
-| P0 | 管理服务器接入与运维化（service/ACL/文档） | TBD | 进行中 |
-| P1 | 性能基线（benchmarks/SLO） | TBD | TBD |
+| P0 | 管理平台纳入整体计划与门禁固化（Plan/Progress/CI） | TBD | 进行中 |
+| P1 | 管理平台 SLO 与性能基线（benchmarks/SLO） | TBD | TBD |
 | P2 | TLS 或 OIDC 最小安全加固 | TBD | TBD |
 | P3 | 多进程 Raft ADR / openraft | TBD | TBD |
 
@@ -153,11 +153,11 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P5-01 | 网关与服务接入边界 | 部分完成 | 90% | 全路由 + memory/rocksdb 工厂 + SPARQL Results JSON + 独立 `ontolith-management-server` 管理面 | TLS；gRPC |
-| P5-02 | 鉴权 / 授权 | 部分完成 | 60% | Header/API-Key + Permission + `cluster:admin` | OIDC/JWT |
+| P5-01 | 网关与服务接入边界 | 部分完成 | 92% | 全路由 + memory/rocksdb 工厂 + SPARQL Results JSON + 独立 `ontolith-management-server` 管理面 + 健康探测 | TLS；gRPC |
+| P5-02 | 鉴权 / 授权 | 部分完成 | 68% | Header/API-Key + Permission + `cluster:admin` + 管理面 read/write ACL | OIDC/JWT |
 | P5-03 | 租户隔离 | 部分完成 | 55% | 审计租户过滤 + `tenant_graph` 写入命名图 | 强制分库/行级 |
 | P5-04 | 审计日志 | 部分完成 | 80% | 内存 + `FileAuditLog` JSONL（`ONTOLITH_AUDIT_PATH`） | 哈希链/不可篡改 |
-| P5-05 | 指标 / 追踪 / 日志基线 | 部分完成 | 78% | 延迟/状态码/错误计数 + access log + 管理面监控聚合视图（`/admin/monitoring`） | Tracing 全链路 |
+| P5-05 | 指标 / 追踪 / 日志基线 | 部分完成 | 82% | 延迟/状态码/错误计数 + access log + 管理面监控聚合视图（`/admin/monitoring`）+ runtime probe | Tracing 全链路 |
 
 **阶段退出条件：** 安全基线挂在真实请求路径；统一遥测可用。
 
@@ -181,7 +181,7 @@
 |----|--------|------|--------|------|----------|
 | P7-01 | 在线重平衡与灾备演练 | 未开始 | 0% | — | 演练手册骨架 |
 | P7-02 | 性能回归门禁与 SLO 看板 | 未开始 | 0% | `benchmarks/` 空 | 基线基准用例 |
-| P7-03 | 发布流水线与回滚验证 | 部分完成 | 38% | [.github/workflows/ci.yml](../.github/workflows/ci.yml) + `scripts/ci-local.sh` + [L5-systemd-service.md](./L5-systemd-service.md) + runtime/management install scripts | 发布/回滚手册 |
+| P7-03 | 发布流水线与回滚验证 | 部分完成 | 42% | [.github/workflows/ci.yml](../.github/workflows/ci.yml) + `scripts/ci-local.sh` + [L5-systemd-service.md](./L5-systemd-service.md) + runtime/management install scripts + 管理面 smoke | 发布/回滚手册 |
 | P7-04 | 运维手册与证据包 | 未开始 | 0% | — | 按阶段产出 |
 
 **阶段退出条件：** CI 门禁、演练证据、发布/回滚手册齐备。
@@ -257,8 +257,8 @@
 | WBS-04 | 查询与优化 | 部分完成 | ~88% | 完整核心代数+优化+绑定 + COUNT 聚合基线 + 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`|`、`^`）+ W3C 子集门禁；缺属性路径 `?` / 完整聚合 |
 | WBS-05 | 推理与 SHACL | 未开始 | ~5% | 全部实现 |
 | WBS-06 | 分布式运行时 | 部分完成 | ~75% | 控制面增强+HTTP；无多进程数据复制 |
-| WBS-07 | API、安全与集成 | 部分完成 | ~82% | 双后端网关+文件审计+Results JSON+ingest+部署脚本+独立管理面 API；无 TLS/OIDC |
-| WBS-08 | 平台工程 | 部分完成 | ~25% | CI workflow + compliance crate + ci-local + systemd 运维文档；无发布/SLO |
+| WBS-07 | API、安全与集成 | 部分完成 | ~85% | 双后端网关+文件审计+Results JSON+ingest+部署脚本+独立管理面 API + ACL/probe；无 TLS/OIDC |
+| WBS-08 | 平台工程 | 部分完成 | ~28% | CI workflow + compliance crate + ci-local + systemd 运维文档 + 管理面 smoke；无发布/SLO |
 
 ---
 
@@ -271,6 +271,7 @@
 | [ ] 幂等写入验证 | 未开始 | 部分事务单测不足替代 |
 | [ ] 性能回归门禁 | 未开始 | `benchmarks/` 空 |
 | [~] 鉴权与租户隔离测试 | 部分完成 | `ontolith-security` 7 测（enforced/tenant/user/audit）+ server tenant_graph 路径 |
+| [~] 管理平台控制面回归门禁 | 部分完成 | `ontolith-server` 管理面单测（ACL/probe）+ CI/local smoke；待补写 SLO 阈值门禁 |
 | [ ] 许可证与漏洞审计 CI | 未开始 | — |
 | [x] `cargo fmt` / `clippy -D warnings` CI | 已完成 | GitHub Actions + `scripts/ci-local.sh` |
 | [x] 全量测试 CI | 已完成 | workspace + rocksdb-smoke job + 本地 `./scripts/ci-local.sh`（2026-07-22 通过） |
@@ -294,7 +295,7 @@
 | ontolith-cluster | 选主、分区、复制、commit、rebalance、session sticky（14 测） | `crates/ontolith-cluster/src/infrastructure/mod.rs` |
 | ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）（7 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
 | ontolith-observability | sink、导出、采样循环、Prometheus 文本（6 测） | `crates/ontolith-observability/src/**` |
-| ontolith-server | metrics、采样配置、HTTP query decode + 管理面 API（10 测） | `crates/ontolith-server/src/{api,bootstrap,http,management}.rs` |
+| ontolith-server | metrics、采样配置、HTTP query decode + 管理面 API/ACL/probe（15 测） | `crates/ontolith-server/src/{api,bootstrap,http,management}.rs` |
 | ontolith-compliance | R1 烟雾 15 + W3C 子集 profile 1（must-pass 24/24） | `crates/ontolith-compliance/tests/**` |
 
 ---
@@ -335,6 +336,8 @@
 | 2026-07-23 | GitHub Copilot | 运维增量：新增 management server 的 systemd user/system unit、环境模板与安装脚本，补齐管理面部署路径与健康检查文档。 |
 | 2026-07-23 | GitHub Copilot | 管理面权限增量：新增 read/write ACL 分离（`ONTOLITH_MANAGEMENT_READ_KEY` / `ONTOLITH_MANAGEMENT_WRITE_KEY` + `X-Ontolith-Management-Key`），将管理查询与变更权限解耦。 |
 | 2026-07-23 | GitHub Copilot | 管理面监控增量：新增 runtime probe（探测 `ONTOLITH_BIND` TCP 连通性与延迟），并在 `/admin/health`、`/admin/monitoring` 输出 `runtime_probe`。 |
+| 2026-07-23 | GitHub Copilot | 规划对齐增量：将管理平台正式纳入中英文 PLAN 与 PROGRESS 的 Phase/WBS/R1 叙述，并补充管理面后续优先级队列（SLO、TLS/OIDC、多进程集群）。 |
+| 2026-07-23 | GitHub Copilot | 门禁增量：`scripts/ci-local.sh` 与 CI `check` 作业新增管理面 smoke（启动 `ontolith-management-server` 并校验 `/admin/health` 与 `runtime_probe`）。 |
 
 ---
 
@@ -348,8 +351,13 @@
 - [x] 新增通用 `adr/0000-template.md` / `rfc/0000-template.md`
 - [x] 剩余实现按模块拆分为可审阅提交序列（L0/L1 → L5 + 治理文档）
 - [x] 新增独立管理服务器（统一配置/监控/数据管理）并完成基础测试
+- [x] 管理面 ACL 分离（read/write key）
+- [x] 管理面 runtime probe（health/monitoring）
+- [x] 管理面纳入规划与台账主线（PLAN + PROGRESS）
 - [ ] 确认 Stream A/B/C/D 负责人并回填 §2 焦点表
 - [ ] 将本地提交序列推送并发起 PR（附分批审阅说明）
+- [ ] 管理面 SLO 基线（probe 成功率/延迟阈值）与告警阈值文档化
+- [ ] 管理面安全加固（TLS 或 OIDC 方案最小化落地）
 
 ### R1 关键路径（按依赖序）
 
