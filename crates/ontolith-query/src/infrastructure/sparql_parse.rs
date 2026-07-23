@@ -1374,14 +1374,11 @@ fn apply_subject_hint(algebra: &mut Algebra, node: ontolith_core::domain::NodeId
         | Algebra::OrderBy { input, .. }
         | Algebra::Slice { input, .. }
         | Algebra::Aggregate { input, .. } => apply_subject_hint(input, node),
-        Algebra::Path { subject, .. } => {
-            if subject.is_variable() {
-                *subject = TermPattern::Node(node);
-                true
-            } else {
-                false
-            }
+        Algebra::Path { subject, .. } if subject.is_variable() => {
+            *subject = TermPattern::Node(node);
+            true
         }
+        Algebra::Path { .. } => false,
         _ => false,
     }
 }
