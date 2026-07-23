@@ -381,5 +381,6 @@ Mandatory artifacts per phase:
 - Confirm owners for each stream.
 - Approve Phase 0 deliverables and due dates.
 - Start Phase 1 implementation with weekly architecture and risk review.
-- Define R1 SLOs and alert thresholds for the management platform.
-- Make management platform smoke validation mandatory in local and CI gates.
+- R1 management-platform SLO baseline is now defined and documented (`docs/L5-management-platform-slo.md`); next step is windowed SLO and alert-threshold hardening.
+- Management-platform smoke validation is now mandatory in local and CI gates, with `runtime_probe` reachability + latency-threshold checks.
+- Minimum management-plane hardening path is captured in ADR-0003 (TLS-first / OIDC-ready); next step is phased implementation on the R2 track.
