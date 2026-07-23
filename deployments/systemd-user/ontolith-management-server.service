@@ -1,0 +1,22 @@
+[Unit]
+Description=Ontolith management server (L5 control plane, user service)
+Documentation=file:///home/ontolith/docs/L5-ontolith-access-security.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ontolith
+EnvironmentFile=-%h/.config/ontolith/ontolith-management.env
+Environment=RUST_BACKTRACE=1
+ExecStart=/home/ontolith/target/release/ontolith-management-server
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ontolith-management-server
+
+[Install]
+WantedBy=default.target

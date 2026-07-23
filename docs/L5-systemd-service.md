@@ -1,7 +1,7 @@
 # Ontolith Server 后台 / systemd 部署
 
 文档 ID: OPS-L5-0001  
-版本: 1.0.0  
+版本: 1.1.0  
 日期: 2026-07-17
 
 ---
@@ -34,6 +34,10 @@ curl -s http://127.0.0.1:8090/cluster/status
 ```bash
 cargo build -p ontolith-server --release
 ./scripts/install-ontolith-user-service.sh
+
+# 管理服务（统一管理面）
+cargo build -p ontolith-server --release --bin ontolith-management-server
+./scripts/install-ontolith-management-user-service.sh
 ```
 
 ### 常用命令
@@ -44,6 +48,10 @@ systemctl --user restart ontolith-server
 systemctl --user stop ontolith-server
 systemctl --user disable ontolith-server   # 取消自启
 journalctl --user -u ontolith-server -f   # 日志
+
+systemctl --user status ontolith-management-server
+systemctl --user restart ontolith-management-server
+journalctl --user -u ontolith-management-server -f
 ```
 
 ### 改端口 / 存储 / 鉴权
@@ -79,6 +87,10 @@ sudo loginctl enable-linger "$USER"
 ```bash
 cargo build -p ontolith-server --release
 ./scripts/install-ontolith-system-service.sh
+
+# 管理服务（统一管理面）
+cargo build -p ontolith-server --release --bin ontolith-management-server
+./scripts/install-ontolith-management-system-service.sh
 ```
 
 - unit: `/etc/systemd/system/ontolith-server.service`
@@ -89,6 +101,9 @@ cargo build -p ontolith-server --release
 ```bash
 sudo systemctl status ontolith-server
 sudo journalctl -u ontolith-server -f
+
+sudo systemctl status ontolith-management-server
+sudo journalctl -u ontolith-management-server -f
 ```
 
 > 当前环境无交互 sudo 密码时，请在本机终端自行执行上述脚本。
@@ -100,11 +115,17 @@ sudo journalctl -u ontolith-server -f
 | 路径 | 用途 |
 |------|------|
 | `deployments/systemd-user/ontolith-server.service` | user unit 模板 |
+| `deployments/systemd-user/ontolith-management-server.service` | management user unit 模板 |
 | `deployments/ontolith-server.service` | system unit 模板 |
+| `deployments/ontolith-management-server.service` | management system unit 模板 |
 | `deployments/ontolith.user.env` | user 环境模板 |
+| `deployments/ontolith-management.user.env` | management user 环境模板 |
 | `deployments/ontolith.env` | system 环境模板 |
+| `deployments/ontolith-management.env` | management system 环境模板 |
 | `scripts/install-ontolith-user-service.sh` | 安装 user 服务 |
 | `scripts/install-ontolith-system-service.sh` | 安装 system 服务 |
+| `scripts/install-ontolith-management-user-service.sh` | 安装 management user 服务 |
+| `scripts/install-ontolith-management-system-service.sh` | 安装 management system 服务 |
 
 ---
 
@@ -116,3 +137,13 @@ sudo journalctl -u ontolith-server -f
 | 服务反复 restart | `journalctl --user -u ontolith-server -n 50` |
 | 更新代码后仍旧行为 | 先 `cargo build -p ontolith-server --release` 再 `systemctl --user restart` |
 | 登出后服务停 | `sudo loginctl enable-linger $USER` 或改 system unit |
+
+---
+
+## 五、管理面健康检查
+
+```bash
+curl -s http://127.0.0.1:9091/admin/health
+curl -s http://127.0.0.1:9091/admin/config
+curl -s http://127.0.0.1:9091/admin/monitoring
+```

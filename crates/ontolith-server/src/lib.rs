@@ -6,6 +6,7 @@ pub mod api;
 pub mod app;
 pub mod bootstrap;
 pub mod http;
+pub mod management;
 pub mod runtime;
 
 pub const CRATE_ID: &str = "ontolith-server";

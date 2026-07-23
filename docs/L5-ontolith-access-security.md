@@ -1,9 +1,9 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.1.0  
-状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON)  
-日期: 2026-07-17  
+版本: 2.2.0  
+状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON + management server)  
+日期: 2026-07-23  
 对应 crate:
 
 - `crates/ontolith-server`
@@ -23,6 +23,12 @@ ontolith-server (L5 gateway)
    ├── parser ingest (L3)
    ├── query pipeline (L3)
    └── storage: memory | rocksdb (L2)
+
+ontolith-management-server (L5 management plane)
+   ├── config view: binds/auth/backend/audit path
+   ├── monitoring view: request, latency, cluster status
+   ├── data management: stats/audit/replicate/rebalance
+   └── shared authn/authz + shared AppState
 ```
 
 ---
@@ -41,6 +47,19 @@ ontolith-server (L5 gateway)
 | GET | `/cluster` `/cluster/status` `/cluster/membership` `/cluster/shards` `/cluster/route` `/cluster/failover` | health:read | L4 控制面只读 |
 | POST | `/cluster/heartbeat` `/tick` `/replicate` `/rebalance` `/partition` `/heal` | cluster:admin | L4 控制面变更 |
 | OPTIONS | * | — | CORS |
+
+### 管理面 API（`ontolith-management-server`）
+
+| Method | Path | 权限 | 说明 |
+|--------|------|------|------|
+| GET | `/admin/health` | health:read | 管理服务健康与启动时间 |
+| GET | `/admin/config` | cluster:admin | 统一配置视图（bind/backend/auth/audit） |
+| GET | `/admin/layers` | cluster:admin | L0–L8 层级映射与职责 |
+| GET | `/admin/monitoring` | metrics:read | 请求/延迟/状态码/集群摘要 |
+| GET | `/admin/data/stats` | health:read | triples/quads/pending_txns/audit 总量 |
+| GET | `/admin/data/audit` | metrics:read | 审计事件检索（`?limit=`） |
+| POST | `/admin/data/replicate` | cluster:admin | 触发 follower 复制对齐 |
+| POST | `/admin/data/rebalance` | cluster:admin | 触发 slot 重平衡 |
 
 ### SPARQL
 
@@ -97,6 +116,7 @@ X-Ontolith-Tenant: acme
 | `ONTOLITH_STORAGE` | `memory` | `memory` \| `rocksdb` / `durable` |
 | `ONTOLITH_DATA_DIR` | `./data/ontolith` | RocksDB 路径 |
 | `ONTOLITH_BIND` | `127.0.0.1:8080` | 监听地址 |
+| `ONTOLITH_MANAGEMENT_BIND` | `127.0.0.1:9091` | 管理服务监听地址 |
 | `ONTOLITH_AUTH_MODE` | `disabled` | `disabled` \| `enforced` |
 | `ONTOLITH_API_KEY` | — | Enforced 时校验 |
 
@@ -106,6 +126,9 @@ cargo run -p ontolith-server
 
 # RocksDB 耐久
 ONTOLITH_STORAGE=rocksdb ONTOLITH_DATA_DIR=./data/ontolith cargo run -p ontolith-server
+
+# 管理服务（统一管理面）
+cargo run -p ontolith-server --bin ontolith-management-server
 ```
 
 实现：`AppState` 持有 `Arc<dyn StorageEngine>` + `Arc<dyn DictionaryCodec>` + 通用 `EngineTripleRepository`。
@@ -177,6 +200,7 @@ systemctl --user status ontolith-server
 |------|------|------|
 | 2026-07-17 | 1.0.0 | HTTP 基线路由 + Header 鉴权 |
 | 2026-07-17 | 2.0.0 | RocksDB 切换、L3 解析写入、SPARQL Results JSON、/ready、增强 metrics、tenant graph |
+| 2026-07-23 | 2.2.0 | 新增独立 `ontolith-management-server` 管理面（二进制 + 统一配置/监控/数据管理 API） |
 
 ## 8. 审计落盘与权限（v2.1）
 

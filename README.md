@@ -39,6 +39,34 @@ cargo run -p ontolith-server
 The current `ontolith-server` binary executes bootstrap/runtime sampling and exits.
 It does not yet stay as a long-running HTTP listener by default.
 
+### Management Server (Unified Control Plane)
+
+Run a dedicated management server for platform-wide configuration, monitoring, and
+data-management operations:
+
+```bash
+cargo run -p ontolith-server --bin ontolith-management-server
+```
+
+Default bind:
+
+- Management API: `127.0.0.1:9091` (`ONTOLITH_MANAGEMENT_BIND`)
+- Runtime bind metadata: `127.0.0.1:8080` (`ONTOLITH_BIND`, reported in admin views)
+
+Key admin endpoints:
+
+- `GET /admin/health`
+- `GET /admin/config`
+- `GET /admin/layers`
+- `GET /admin/monitoring`
+- `GET /admin/data/stats`
+- `GET /admin/data/audit?limit=20`
+- `POST /admin/data/replicate`
+- `POST /admin/data/rebalance`
+
+When `ONTOLITH_AUTH_MODE=enforced`, include `X-API-Key`, `X-Ontolith-Tenant`, and
+`X-Ontolith-User` headers.
+
 ---
 
 ## What You Get
@@ -138,6 +166,12 @@ cargo build -p ontolith-server --release
 # system-level service
 cargo build -p ontolith-server --release
 ./scripts/install-ontolith-system-service.sh
+
+# management server (user/system service)
+cargo build -p ontolith-server --release --bin ontolith-management-server
+./scripts/install-ontolith-management-user-service.sh
+# or
+./scripts/install-ontolith-management-system-service.sh
 ```
 
 Before enabling service units, verify your selected runtime entrypoint is a long-running listener.
