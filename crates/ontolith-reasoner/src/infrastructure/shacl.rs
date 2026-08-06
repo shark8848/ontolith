@@ -1130,11 +1130,8 @@ fn check_values(
                 .iter()
                 .find(|s| s.id == *source_shape.unwrap_or(""))
                 .map(|s| {
-                    let mut paths: Vec<String> = s
-                        .property_shapes
-                        .iter()
-                        .map(|ps| ps.path.clone())
-                        .collect();
+                    let mut paths: Vec<String> =
+                        s.property_shapes.iter().map(|ps| ps.path.clone()).collect();
                     paths.extend(s.ignored_properties.iter().cloned());
                     paths
                 })
@@ -1179,9 +1176,7 @@ fn qualified_value_context<'a>(
     source_shape: Option<&str>,
     ps: Option<&'a PropertyShape>,
 ) -> Option<(String, bool, Vec<&'a str>)> {
-    let shape = shapes
-        .iter()
-        .find(|s| s.id == source_shape.unwrap_or(""))?;
+    let shape = shapes.iter().find(|s| s.id == source_shape.unwrap_or(""))?;
     let ps = ps?;
     let shape_key = ps.constraints.iter().find_map(|c| match c {
         ConstraintComponent::QualifiedValueShape { shape } => Some(shape.clone()),
@@ -1910,11 +1905,8 @@ mod tests {
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 2);
         assert!(
-            report
-                .results
-                .iter()
-                .all(|r| r.component
-                    == "http://www.w3.org/ns/shacl#QualifiedMinCountConstraintComponent")
+            report.results.iter().all(|r| r.component
+                == "http://www.w3.org/ns/shacl#QualifiedMinCountConstraintComponent")
         );
         let foci: Vec<_> = report
             .results
@@ -1985,9 +1977,18 @@ mod tests {
             .iter()
             .map(|r| r.component.as_str())
             .collect();
-        assert!(components.contains(&"http://www.w3.org/ns/shacl#QualifiedMinCountConstraintComponent"));
-        assert!(components.contains(&"http://www.w3.org/ns/shacl#QualifiedMaxCountConstraintComponent"));
-        assert!(report.results.iter().all(|r| r.focus_node == "http://ex.org/t1"));
+        assert!(
+            components.contains(&"http://www.w3.org/ns/shacl#QualifiedMinCountConstraintComponent")
+        );
+        assert!(
+            components.contains(&"http://www.w3.org/ns/shacl#QualifiedMaxCountConstraintComponent")
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| r.focus_node == "http://ex.org/t1")
+        );
     }
 
     #[test]
@@ -2086,8 +2087,22 @@ mod tests {
                 .iter()
                 .all(|r| r.component == "http://www.w3.org/ns/shacl#EqualsConstraintComponent")
         );
-        assert_eq!(report.results.iter().filter(|r| r.focus_node == "http://ex.org/p2").count(), 2);
-        assert_eq!(report.results.iter().filter(|r| r.focus_node == "http://ex.org/p3").count(), 1);
+        assert_eq!(
+            report
+                .results
+                .iter()
+                .filter(|r| r.focus_node == "http://ex.org/p2")
+                .count(),
+            2
+        );
+        assert_eq!(
+            report
+                .results
+                .iter()
+                .filter(|r| r.focus_node == "http://ex.org/p3")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2109,10 +2124,7 @@ mod tests {
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].focus_node, "http://ex.org/s2");
-        assert_eq!(
-            report.results[0].value.as_deref(),
-            Some("http://ex.org/c2")
-        );
+        assert_eq!(report.results[0].value.as_deref(), Some("http://ex.org/c2"));
         assert_eq!(
             report.results[0].component,
             "http://www.w3.org/ns/shacl#DisjointConstraintComponent"

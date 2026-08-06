@@ -359,31 +359,49 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
         if t.predicate != rdf_type {
             continue;
         }
-        let Some(restr) = node_term_from_term(&t.object) else { continue };
-        let Some(p) = on_property.iter().find(|(r, _)| *r == restr).map(|(_, p)| p.clone()) else { continue };
-        let Some(c) = some_values.iter().find(|(r, _)| *r == restr).map(|(_, c)| c.clone()) else { continue };
+        let Some(restr) = node_term_from_term(&t.object) else {
+            continue;
+        };
+        let Some(p) = on_property
+            .iter()
+            .find(|(r, _)| *r == restr)
+            .map(|(_, p)| p.clone())
+        else {
+            continue;
+        };
+        let Some(c) = some_values
+            .iter()
+            .find(|(r, _)| *r == restr)
+            .map(|(_, c)| c.clone())
+        else {
+            continue;
+        };
         for u in closure {
             if u.predicate == p
                 && u.subject == t.subject
                 && let Some(y) = subject_node(&u.object)
             {
-                frontier.push(Triple::new(
-                    y,
-                    rdf_type.clone(),
-                    Term::Iri(c.clone()),
-                ));
+                frontier.push(Triple::new(y, rdf_type.clone(), Term::Iri(c.clone())));
             }
         }
     }
 
     // cls-svf2: x p y ∧ y rdf:type c ∧ restr onProperty p ∧ restr someValuesFrom c → x rdf:type restr.
     for (restr, p) in &on_property {
-        let Some(c) = some_values.iter().find(|(r, _)| r == restr).map(|(_, c)| c.clone()) else { continue };
+        let Some(c) = some_values
+            .iter()
+            .find(|(r, _)| r == restr)
+            .map(|(_, c)| c.clone())
+        else {
+            continue;
+        };
         for t in closure {
             if &t.predicate != p {
                 continue;
             }
-            let Some(y) = subject_node(&t.object) else { continue };
+            let Some(y) = subject_node(&t.object) else {
+                continue;
+            };
             let typed = closure.iter().any(|s| {
                 s.predicate == rdf_type && s.subject == y && s.object == Term::Iri(c.clone())
             });
@@ -398,19 +416,29 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
         if t.predicate != rdf_type {
             continue;
         }
-        let Some(restr) = node_term_from_term(&t.object) else { continue };
-        let Some(p) = on_property.iter().find(|(r, _)| *r == restr).map(|(_, p)| p.clone()) else { continue };
-        let Some(c) = all_values.iter().find(|(r, _)| *r == restr).map(|(_, c)| c.clone()) else { continue };
+        let Some(restr) = node_term_from_term(&t.object) else {
+            continue;
+        };
+        let Some(p) = on_property
+            .iter()
+            .find(|(r, _)| *r == restr)
+            .map(|(_, p)| p.clone())
+        else {
+            continue;
+        };
+        let Some(c) = all_values
+            .iter()
+            .find(|(r, _)| *r == restr)
+            .map(|(_, c)| c.clone())
+        else {
+            continue;
+        };
         for u in closure {
             if u.predicate == p
                 && u.subject == t.subject
                 && let Some(y) = subject_node(&u.object)
             {
-                frontier.push(Triple::new(
-                    y,
-                    rdf_type.clone(),
-                    Term::Iri(c.clone()),
-                ));
+                frontier.push(Triple::new(y, rdf_type.clone(), Term::Iri(c.clone())));
             }
         }
     }
@@ -425,7 +453,9 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
                 break;
             }
             seen.push(cur.clone());
-            let Some(cur_node) = subject_node(&cur) else { break };
+            let Some(cur_node) = subject_node(&cur) else {
+                break;
+            };
             let first = closure
                 .iter()
                 .find(|t| t.subject == cur_node && t.predicate.as_str() == RDF_FIRST)
@@ -474,7 +504,9 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
         if t.predicate != rdf_type {
             continue;
         }
-        let Some(restr) = node_term_from_term(&t.object) else { continue };
+        let Some(restr) = node_term_from_term(&t.object) else {
+            continue;
+        };
         let Some(members) = intersection_lists
             .iter()
             .find(|(r, _)| *r == restr)
@@ -492,19 +524,14 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
         let candidates: Vec<NodeId> = closure
             .iter()
             .filter(|t| {
-                t.predicate == rdf_type
-                    && members
-                        .iter()
-                        .any(|m| t.object == Term::Iri(m.clone()))
+                t.predicate == rdf_type && members.iter().any(|m| t.object == Term::Iri(m.clone()))
             })
             .map(|t| t.subject)
             .collect();
         for x in candidates {
             let all = members.iter().all(|m| {
                 closure.iter().any(|t| {
-                    t.subject == x
-                        && t.predicate == rdf_type
-                        && t.object == Term::Iri(m.clone())
+                    t.subject == x && t.predicate == rdf_type && t.object == Term::Iri(m.clone())
                 })
             });
             if all {
@@ -740,7 +767,12 @@ mod tests {
         let owl = "http://www.w3.org/2002/07/owl#";
         let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         let input = vec![
-            t("urn:knows", rdf_type, &format!("{owl}SymmetricProperty"), &dict),
+            t(
+                "urn:knows",
+                rdf_type,
+                &format!("{owl}SymmetricProperty"),
+                &dict,
+            ),
             t("urn:alice", "urn:knows", "urn:bob", &dict),
         ];
         let reasoner = ForwardChainReasoner::new();
@@ -837,10 +869,30 @@ mod tests {
         let rdf_nil = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
         let input = vec![
             tb("_:r", &format!("{owl}intersectionOf"), "_:l1", &dict),
-            t("_:l1", "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "urn:A", &dict),
-            tb("_:l1", "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest", "_:l2", &dict),
-            t("_:l2", "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "urn:B", &dict),
-            t("_:l2", "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest", rdf_nil, &dict),
+            t(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
+                "urn:A",
+                &dict,
+            ),
+            tb(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+                "_:l2",
+                &dict,
+            ),
+            t(
+                "_:l2",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
+                "urn:B",
+                &dict,
+            ),
+            t(
+                "_:l2",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+                rdf_nil,
+                &dict,
+            ),
             tb("urn:alice", rdf_type, "_:r", &dict),
             t("urn:bob", rdf_type, "urn:A", &dict),
             t("urn:bob", rdf_type, "urn:B", &dict),
@@ -877,10 +929,30 @@ mod tests {
         let rdf_nil = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
         let input = vec![
             tb("_:u", &format!("{owl}unionOf"), "_:l1", &dict),
-            t("_:l1", "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "urn:A", &dict),
-            tb("_:l1", "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest", "_:l2", &dict),
-            t("_:l2", "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "urn:B", &dict),
-            t("_:l2", "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest", rdf_nil, &dict),
+            t(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
+                "urn:A",
+                &dict,
+            ),
+            tb(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+                "_:l2",
+                &dict,
+            ),
+            t(
+                "_:l2",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
+                "urn:B",
+                &dict,
+            ),
+            t(
+                "_:l2",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+                rdf_nil,
+                &dict,
+            ),
             t("urn:carol", rdf_type, "urn:A", &dict),
         ];
         let reasoner = ForwardChainReasoner::new();
