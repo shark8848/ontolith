@@ -49,6 +49,16 @@ pub enum Rule {
     SomeValuesFromTyping,
     /// x rdf:type (p all C) ∧ x p y → y rdf:type C (cls-avf).
     AllValuesFrom,
+    /// x rdf:type (C1 ∩ … ∩ Cn) → x rdf:type Ci for every list member (cls-int1).
+    IntersectionOf,
+    /// x rdf:type Ci for all members of (C1 ∩ … ∩ Cn) → x rdf:type (C1 ∩ … ∩ Cn) (cls-int2).
+    IntersectionOfTyping,
+    /// x rdf:type Ci ∧ Ci member of (C1 ∪ … ∪ Cn) → x rdf:type (C1 ∪ … ∪ Cn) (cls-uni).
+    UnionOf,
+    /// x owl:sameAs y → y owl:sameAs x (eq-sym).
+    SameAsSymmetric,
+    /// x owl:sameAs y ∧ y owl:sameAs z → x owl:sameAs z (eq-trans).
+    SameAsTransitive,
 }
 
 impl Rule {
@@ -67,6 +77,11 @@ impl Rule {
             Self::SomeValuesFrom => "cls-svf1",
             Self::SomeValuesFromTyping => "cls-svf2",
             Self::AllValuesFrom => "cls-avf",
+            Self::IntersectionOf => "cls-int1",
+            Self::IntersectionOfTyping => "cls-int2",
+            Self::UnionOf => "cls-uni",
+            Self::SameAsSymmetric => "eq-sym",
+            Self::SameAsTransitive => "eq-trans",
         }
     }
 }

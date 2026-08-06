@@ -18,6 +18,8 @@ use std::time::Instant;
 pub use shacl::ShaclEngine;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 const RDFS_NS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 const OWL_NS: &str = "http://www.w3.org/2002/07/owl#";
 
@@ -93,6 +95,11 @@ impl Reasoner for ForwardChainReasoner {
             Rule::SomeValuesFrom,
             Rule::SomeValuesFromTyping,
             Rule::AllValuesFrom,
+            Rule::IntersectionOf,
+            Rule::IntersectionOfTyping,
+            Rule::UnionOf,
+            Rule::SameAsSymmetric,
+            Rule::SameAsTransitive,
         ]
     }
 
@@ -407,6 +414,146 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
             }
         }
     }
+
+    // Members of an RDF list starting at `start`.
+    let list_members = |start: &Term| -> Vec<Iri> {
+        let mut out = Vec::new();
+        let mut cur = start.clone();
+        let mut seen: Vec<Term> = Vec::new();
+        loop {
+            if seen.contains(&cur) {
+                break;
+            }
+            seen.push(cur.clone());
+            let Some(cur_node) = subject_node(&cur) else { break };
+            let first = closure
+                .iter()
+                .find(|t| t.subject == cur_node && t.predicate.as_str() == RDF_FIRST)
+                .and_then(|t| iri_of(&t.object));
+            let rest = closure
+                .iter()
+                .find(|t| t.subject == cur_node && t.predicate.as_str() == RDF_REST)
+                .map(|t| t.object.clone());
+            match (first, rest) {
+                (Some(f), Some(r)) => {
+                    out.push(f);
+                    cur = r;
+                }
+                (Some(f), None) => {
+                    out.push(f);
+                    break;
+                }
+                _ => break,
+            }
+        }
+        out
+    };
+
+    // List-valued class expressions: (restriction node, list members).
+    let intersection_lists: Vec<(Term, Vec<Iri>)> = closure
+        .iter()
+        .filter(|t| t.predicate == owl("intersectionOf"))
+        .filter_map(|t| {
+            let restr = node_term(t.subject)?;
+            let members = list_members(&t.object);
+            (!members.is_empty()).then_some((restr, members))
+        })
+        .collect();
+    let union_lists: Vec<(Term, Vec<Iri>)> = closure
+        .iter()
+        .filter(|t| t.predicate == owl("unionOf"))
+        .filter_map(|t| {
+            let restr = node_term(t.subject)?;
+            let members = list_members(&t.object);
+            (!members.is_empty()).then_some((restr, members))
+        })
+        .collect();
+
+    // cls-int1: x rdf:type (C1 ∩ … ∩ Cn) → x rdf:type Ci for every member.
+    for t in closure {
+        if t.predicate != rdf_type {
+            continue;
+        }
+        let Some(restr) = node_term_from_term(&t.object) else { continue };
+        let Some(members) = intersection_lists
+            .iter()
+            .find(|(r, _)| *r == restr)
+            .map(|(_, m)| m.clone())
+        else {
+            continue;
+        };
+        for c in members {
+            frontier.push(Triple::new(t.subject, rdf_type.clone(), Term::Iri(c)));
+        }
+    }
+
+    // cls-int2: x rdf:type Ci for all members → x rdf:type (C1 ∩ … ∩ Cn).
+    for (restr, members) in &intersection_lists {
+        let candidates: Vec<NodeId> = closure
+            .iter()
+            .filter(|t| {
+                t.predicate == rdf_type
+                    && members
+                        .iter()
+                        .any(|m| t.object == Term::Iri(m.clone()))
+            })
+            .map(|t| t.subject)
+            .collect();
+        for x in candidates {
+            let all = members.iter().all(|m| {
+                closure.iter().any(|t| {
+                    t.subject == x
+                        && t.predicate == rdf_type
+                        && t.object == Term::Iri(m.clone())
+                })
+            });
+            if all {
+                frontier.push(Triple::new(x, rdf_type.clone(), restr.clone()));
+            }
+        }
+    }
+
+    // cls-uni: x rdf:type Ci ∧ Ci member of (C1 ∪ … ∪ Cn) → x rdf:type (C1 ∪ … ∪ Cn).
+    for t in closure {
+        if t.predicate != rdf_type {
+            continue;
+        }
+        for (restr, members) in &union_lists {
+            if members.iter().any(|m| t.object == Term::Iri(m.clone())) {
+                frontier.push(Triple::new(t.subject, rdf_type.clone(), restr.clone()));
+            }
+        }
+    }
+
+    // owl:sameAs equivalence closure.
+    let same_as: Vec<(Iri, Iri)> = closure
+        .iter()
+        .filter_map(|t| {
+            if t.predicate != owl("sameAs") {
+                return None;
+            }
+            let (s, o) = (node_iri(t.subject)?, iri_of(&t.object)?);
+            Some((s, o))
+        })
+        .collect();
+    // eq-sym
+    for (a, b) in &same_as {
+        frontier.push(Triple::new(
+            dict.encode_node(b.as_str()),
+            owl("sameAs"),
+            Term::Iri(a.clone()),
+        ));
+    }
+    // eq-trans
+    for (a, b) in &same_as {
+        for (_, c) in same_as.iter().filter(|(x, _)| x == b) {
+            frontier.push(Triple::new(
+                dict.encode_node(a.as_str()),
+                owl("sameAs"),
+                Term::Iri(c.clone()),
+            ));
+        }
+    }
 }
 
 fn absorb_new(closure: &mut Vec<Triple>, frontier: Vec<Triple>) -> usize {
@@ -675,10 +822,103 @@ mod tests {
             .collect();
         for expected in [
             "rdfs5", "rdfs6", "rdfs7", "rdfs8", "rdfs9", "prp-inv1", "prp-inv2", "prp-symp",
-            "prp-trp", "cax-sco", "cls-svf1", "cls-svf2", "cls-avf",
+            "prp-trp", "cax-sco", "cls-svf1", "cls-svf2", "cls-avf", "cls-int1", "cls-int2",
+            "cls-uni", "eq-sym", "eq-trans",
         ] {
             assert!(names.contains(&expected), "missing rule {expected}");
         }
+    }
+
+    #[test]
+    fn intersection_of_types_members_both_directions() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let rdf_nil = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+        let input = vec![
+            tb("_:r", &format!("{owl}intersectionOf"), "_:l1", &dict),
+            t("_:l1", "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "urn:A", &dict),
+            tb("_:l1", "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest", "_:l2", &dict),
+            t("_:l2", "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "urn:B", &dict),
+            t("_:l2", "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest", rdf_nil, &dict),
+            tb("urn:alice", rdf_type, "_:r", &dict),
+            t("urn:bob", rdf_type, "urn:A", &dict),
+            t("urn:bob", rdf_type, "urn:B", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        let alice_a = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:alice")
+                && tr.predicate.as_str() == rdf_type
+                && tr.object == Term::Iri(Iri::new("urn:A"))
+        });
+        let alice_b = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:alice")
+                && tr.predicate.as_str() == rdf_type
+                && tr.object == Term::Iri(Iri::new("urn:B"))
+        });
+        let bob_restr = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:bob")
+                && tr.predicate.as_str() == rdf_type
+                && tr.object == Term::BlankNode(dict.encode_node("_:r"))
+        });
+        assert!(alice_a, "expected alice type A (cls-int1)");
+        assert!(alice_b, "expected alice type B (cls-int1)");
+        assert!(bob_restr, "expected bob type intersection (cls-int2)");
+    }
+
+    #[test]
+    fn union_of_types_restriction() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let rdf_nil = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+        let input = vec![
+            tb("_:u", &format!("{owl}unionOf"), "_:l1", &dict),
+            t("_:l1", "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "urn:A", &dict),
+            tb("_:l1", "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest", "_:l2", &dict),
+            t("_:l2", "http://www.w3.org/1999/02/22-rdf-syntax-ns#first", "urn:B", &dict),
+            t("_:l2", "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest", rdf_nil, &dict),
+            t("urn:carol", rdf_type, "urn:A", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:carol")
+                && tr.predicate.as_str() == rdf_type
+                && tr.object == Term::BlankNode(dict.encode_node("_:u"))
+        }));
+    }
+
+    #[test]
+    fn same_as_equivalence_closure() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let same_as = format!("{owl}sameAs");
+        let input = vec![
+            t("urn:a", &same_as, "urn:b", &dict),
+            t("urn:b", &same_as, "urn:c", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        let a_c = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:a")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:c"))
+        });
+        let b_a = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:b")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:a"))
+        });
+        assert!(a_c, "expected a sameAs c (eq-trans)");
+        assert!(b_a, "expected b sameAs a (eq-sym)");
     }
 
     #[test]
