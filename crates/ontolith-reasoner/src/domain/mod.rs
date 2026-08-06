@@ -23,11 +23,11 @@ impl InferenceMode {
 /// RDFS/OWL RL rule identifiers supported by the forward-chaining engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Rule {
-    /// rdfs:subClassOf is transitive (RDFS 5 / OWL RL prp-trp).
+    /// rdfs:subClassOf is transitive (RDFS 5).
     SubClassOfTransitive,
     /// rdfs:subPropertyOf is transitive (RDFS 6).
     SubPropertyOfTransitive,
-    /// p rdfs:subPropertyOf q ∧ x p y → x q y (RDFS 9 / prp-spo1).
+    /// p rdfs:subPropertyOf q ∧ x p y → x q y (RDFS 7 / prp-spo1).
     SubPropertyOf,
     /// p rdfs:domain C ∧ x p y → x rdf:type C (RDFS 7 / prp-dom).
     Domain,
@@ -35,6 +35,14 @@ pub enum Rule {
     Range,
     /// p owl:inverseOf q ∧ x p y → y q x (prp-inv1).
     InverseOf,
+    /// x rdf:type C ∧ C rdfs:subClassOf D → x rdf:type D (cax-sco).
+    SubClassOf,
+    /// p rdf:type owl:SymmetricProperty ∧ x p y → y p x (prp-symp).
+    SymmetricProperty,
+    /// p rdf:type owl:TransitiveProperty ∧ x p y ∧ y p z → x p z (prp-trp).
+    TransitiveProperty,
+    /// p owl:inverseOf q ∧ x q y → y p x (prp-inv2).
+    InverseOfReverse,
 }
 
 impl Rule {
@@ -46,6 +54,10 @@ impl Rule {
             Self::Domain => "rdfs7",
             Self::Range => "rdfs8",
             Self::InverseOf => "prp-inv1",
+            Self::SubClassOf => "cax-sco",
+            Self::SymmetricProperty => "prp-symp",
+            Self::TransitiveProperty => "prp-trp",
+            Self::InverseOfReverse => "prp-inv2",
         }
     }
 }

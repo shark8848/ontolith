@@ -1,8 +1,8 @@
 //! Forward-chaining RDFS/OWL RL materializer (L6).
 //!
-//! Fixpoint iteration over a minimal rule set (rdfs5/6/7/8/9, prp-inv1)
-//! with per-iteration dedup. Guards: `max_iterations` bounds the loop and
-//! `InferenceMode::Off` short-circuits.
+//! Fixpoint iteration over the supported rule set (rdfs5/6/7/8/9, prp-inv1/2,
+//! prp-symp, prp-trp, cax-sco) with per-iteration dedup. Guards:
+//! `max_iterations` bounds the loop and `InferenceMode::Off` short-circuits.
 
 mod shacl;
 
@@ -76,6 +76,10 @@ impl Reasoner for ForwardChainReasoner {
             Rule::Domain,
             Rule::Range,
             Rule::InverseOf,
+            Rule::SubClassOf,
+            Rule::SymmetricProperty,
+            Rule::TransitiveProperty,
+            Rule::InverseOfReverse,
         ]
     }
 
@@ -166,6 +170,72 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
         }
     }
 
+    // prp-inv2: inverse property reverse application.
+    for (p, q) in &inverse {
+        for t in closure {
+            if &t.predicate == q
+                && let Some(o) = iri_of(&t.object)
+                && let Some(s) = node_iri(t.subject)
+            {
+                frontier.push(Triple::new(
+                    dict.encode_node(o.as_str()),
+                    p.clone(),
+                    Term::Iri(s),
+                ));
+            }
+        }
+    }
+
+    // prp-symp: symmetric property application.
+    let symmetric: Vec<Iri> = closure
+        .iter()
+        .filter_map(|t| {
+            (t.predicate == rdf_type && t.object == Term::Iri(owl("SymmetricProperty")))
+                .then(|| node_iri(t.subject))
+                .flatten()
+        })
+        .collect();
+    for p in &symmetric {
+        for t in closure {
+            if &t.predicate == p
+                && let Some(s) = node_iri(t.subject)
+                && let Some(o) = iri_of(&t.object)
+            {
+                frontier.push(Triple::new(
+                    dict.encode_node(o.as_str()),
+                    p.clone(),
+                    Term::Iri(s),
+                ));
+            }
+        }
+    }
+
+    // prp-trp: transitive property application.
+    let transitive: Vec<Iri> = closure
+        .iter()
+        .filter_map(|t| {
+            (t.predicate == rdf_type && t.object == Term::Iri(owl("TransitiveProperty")))
+                .then(|| node_iri(t.subject))
+                .flatten()
+        })
+        .collect();
+    for p in &transitive {
+        for a in closure {
+            if &a.predicate == p
+                && let Some(ao) = iri_of(&a.object)
+            {
+                for b in closure {
+                    if &b.predicate == p
+                        && node_iri(b.subject).as_ref() == Some(&ao)
+                        && let Some(bo) = iri_of(&b.object)
+                    {
+                        frontier.push(Triple::new(a.subject, p.clone(), Term::Iri(bo)));
+                    }
+                }
+            }
+        }
+    }
+
     // rdfs7/rdfs8: domain and range typing.
     for t in closure {
         let domain_class = closure.iter().find_map(|r| {
@@ -189,6 +259,23 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
                 rdf_type.clone(),
                 Term::Iri(class),
             ));
+        }
+    }
+
+    // cax-sco: subclass application on rdf:type.
+    for t in closure {
+        if t.predicate == rdf_type
+            && let Some(class) = iri_of(&t.object)
+        {
+            for (c, d) in &subclass {
+                if c == &class {
+                    frontier.push(Triple::new(
+                        t.subject,
+                        rdf_type.clone(),
+                        Term::Iri(d.clone()),
+                    ));
+                }
+            }
         }
     }
 }
@@ -335,5 +422,124 @@ mod tests {
             .expect("materialize");
         assert_eq!(outcome.triples, input);
         assert_eq!(outcome.report.inferred_triples, 0);
+    }
+
+    #[test]
+    fn subclass_application_infers_types() {
+        let dict = InMemoryDictionary::new();
+        let rdfs = "http://www.w3.org/2000/01/rdf-schema#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t(
+                "urn:Person",
+                &format!("{rdfs}subClassOf"),
+                "urn:Agent",
+                &dict,
+            ),
+            t("urn:alice", rdf_type, "urn:Person", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:alice")
+                && tr.predicate.as_str() == rdf_type
+                && tr.object == Term::Iri(Iri::new("urn:Agent"))
+        }));
+    }
+
+    #[test]
+    fn symmetric_property_infers_reverse() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("urn:knows", rdf_type, &format!("{owl}SymmetricProperty"), &dict),
+            t("urn:alice", "urn:knows", "urn:bob", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:bob")
+                && tr.predicate.as_str() == "urn:knows"
+                && tr.object == Term::Iri(Iri::new("urn:alice"))
+        }));
+    }
+
+    #[test]
+    fn transitive_property_infers_chain() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t(
+                "urn:ancestorOf",
+                rdf_type,
+                &format!("{owl}TransitiveProperty"),
+                &dict,
+            ),
+            t("urn:alice", "urn:ancestorOf", "urn:bob", &dict),
+            t("urn:bob", "urn:ancestorOf", "urn:carol", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:alice")
+                && tr.predicate.as_str() == "urn:ancestorOf"
+                && tr.object == Term::Iri(Iri::new("urn:carol"))
+        }));
+    }
+
+    #[test]
+    fn inverse_reverse_direction() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let input = vec![
+            t(
+                "urn:knows",
+                &format!("{owl}inverseOf"),
+                "urn:knownBy",
+                &dict,
+            ),
+            t("urn:alice", "urn:knows", "urn:bob", &dict),
+            t("urn:carol", "urn:knownBy", "urn:dave", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        let known_by = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:bob")
+                && tr.predicate.as_str() == "urn:knownBy"
+                && tr.object == Term::Iri(Iri::new("urn:alice"))
+        });
+        let knows = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:dave")
+                && tr.predicate.as_str() == "urn:knows"
+                && tr.object == Term::Iri(Iri::new("urn:carol"))
+        });
+        assert!(known_by, "expected bob knownBy alice (prp-inv1)");
+        assert!(knows, "expected dave knows carol (prp-inv2)");
+    }
+
+    #[test]
+    fn supported_rules_covers_extended_set() {
+        let reasoner = ForwardChainReasoner::new();
+        let names: Vec<&str> = reasoner
+            .supported_rules()
+            .iter()
+            .map(|r| r.as_str())
+            .collect();
+        for expected in [
+            "rdfs5", "rdfs6", "rdfs7", "rdfs8", "rdfs9", "prp-inv1", "prp-inv2", "prp-symp",
+            "prp-trp", "cax-sco",
+        ] {
+            assert!(names.contains(&expected), "missing rule {expected}");
+        }
     }
 }
