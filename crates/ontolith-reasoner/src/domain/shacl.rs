@@ -73,6 +73,20 @@ pub enum ConstraintComponent {
     HasValue(Term),
     /// `sh:node S` — every value node conforms to the referenced shape.
     Node(String),
+    /// `sh:and (S1 … Sn)` — every value node conforms to all listed shapes.
+    And(Vec<String>),
+    /// `sh:or (S1 … Sn)` — every value node conforms to at least one listed shape.
+    Or(Vec<String>),
+    /// `sh:not S` — no value node conforms to the referenced shape.
+    Not(String),
+    /// `sh:qualifiedValueShape S` — value nodes must conform to S (property shapes only).
+    QualifiedValueShape { shape: String },
+    /// `sh:qualifiedMinCount n` — at least n value nodes conform to `sh:qualifiedValueShape`.
+    QualifiedMinCount(usize),
+    /// `sh:qualifiedMaxCount n` — at most n value nodes conform to `sh:qualifiedValueShape`.
+    QualifiedMaxCount(usize),
+    /// `sh:qualifiedValueShapesDisjoint true` — values also matching sibling qualified shapes are excluded from counting.
+    QualifiedValueShapesDisjoint,
     /// `sh:closed true` — only predicates listed via `sh:property` are allowed.
     Closed,
 }
@@ -91,6 +105,13 @@ impl ConstraintComponent {
             Self::In(_) => shacl("InConstraintComponent"),
             Self::HasValue(_) => shacl("HasValueConstraintComponent"),
             Self::Node(_) => shacl("NodeConstraintComponent"),
+            Self::And(_) => shacl("AndConstraintComponent"),
+            Self::Or(_) => shacl("OrConstraintComponent"),
+            Self::Not(_) => shacl("NotConstraintComponent"),
+            Self::QualifiedValueShape { .. } => shacl("QualifiedValueShapeConstraintComponent"),
+            Self::QualifiedMinCount(_) => shacl("QualifiedMinCountConstraintComponent"),
+            Self::QualifiedMaxCount(_) => shacl("QualifiedMaxCountConstraintComponent"),
+            Self::QualifiedValueShapesDisjoint => shacl("QualifiedValueShapeConstraintComponent"),
             Self::Closed => shacl("ClosedConstraintComponent"),
         }
     }
@@ -127,6 +148,8 @@ pub struct Shape {
     pub targets: Vec<Target>,
     pub constraints: Vec<ConstraintComponent>,
     pub property_shapes: Vec<PropertyShape>,
+    /// `sh:ignoredProperties` — extra predicates allowed by `sh:closed`.
+    pub ignored_properties: Vec<String>,
     pub severity: Severity,
     pub message: Option<String>,
 }

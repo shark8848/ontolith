@@ -5,9 +5,11 @@
 //! `sh:targetObjectsOf` + implicit class target), constraints (`sh:class`,
 //! `sh:datatype`, `sh:nodeKind`, `sh:minCount`/`sh:maxCount`,
 //! `sh:minLength`/`sh:maxLength`, `sh:pattern`, `sh:in`, `sh:hasValue`,
-//! `sh:node`, `sh:closed`), severities and messages. `sh:pattern` uses a
-//! small self-contained regex subset (literals, `.`, `[...]`, `\d\w\s\D\W\S`,
-//! `*+?`, full-string match; no groups/alternation).
+//! `sh:node`, `sh:and`/`sh:or`/`sh:not`, `sh:qualifiedValueShape` with
+//! `sh:qualifiedMinCount`/`sh:qualifiedMaxCount`/`sh:qualifiedValueShapesDisjoint`,
+//! `sh:closed` with `sh:ignoredProperties`), severities and messages.
+//! `sh:pattern` uses a small self-contained regex subset (literals, `.`,
+//! `[...]`, `\d\w\s\D\W\S`, `*+?`, full-string match; no groups/alternation).
 
 use crate::application::ShaclValidator;
 use crate::domain::{
@@ -172,7 +174,31 @@ fn parse_property_shape(
         .find(|(p, _)| p == &shacl("path"))
         .and_then(|(_, o)| term_iri(o))
         .unwrap_or_default();
-    let (constraints, severity, message) = parse_shape_body(dict, map, triples);
+    let (mut constraints, severity, message) = parse_shape_body(dict, map, triples);
+    // Property-shape only parameters (must not appear on node shapes).
+    for (p, o) in triples {
+        match p.as_str() {
+            x if x == shacl("qualifiedValueShape") => {
+                constraints.push(ConstraintComponent::QualifiedValueShape {
+                    shape: term_key(dict, o),
+                });
+            }
+            x if x == shacl("qualifiedMinCount") => {
+                if let Some(n) = literal_usize(o) {
+                    constraints.push(ConstraintComponent::QualifiedMinCount(n));
+                }
+            }
+            x if x == shacl("qualifiedMaxCount") => {
+                if let Some(n) = literal_usize(o) {
+                    constraints.push(ConstraintComponent::QualifiedMaxCount(n));
+                }
+            }
+            x if x == shacl("qualifiedValueShapesDisjoint") && literal_bool(o) == Some(true) => {
+                constraints.push(ConstraintComponent::QualifiedValueShapesDisjoint);
+            }
+            _ => {}
+        }
+    }
     PropertyShape {
         path,
         constraints,
@@ -245,6 +271,27 @@ fn parse_shape_body(
             x if x == shacl("node") => {
                 constraints.push(ConstraintComponent::Node(term_key(dict, o)));
             }
+            x if x == shacl("and") => {
+                let shapes_list: Vec<String> = collect_list(dict, map, o)
+                    .into_iter()
+                    .map(|t| term_key(dict, &t))
+                    .collect();
+                if !shapes_list.is_empty() {
+                    constraints.push(ConstraintComponent::And(shapes_list));
+                }
+            }
+            x if x == shacl("or") => {
+                let shapes_list: Vec<String> = collect_list(dict, map, o)
+                    .into_iter()
+                    .map(|t| term_key(dict, &t))
+                    .collect();
+                if !shapes_list.is_empty() {
+                    constraints.push(ConstraintComponent::Or(shapes_list));
+                }
+            }
+            x if x == shacl("not") => {
+                constraints.push(ConstraintComponent::Not(term_key(dict, o)));
+            }
             x if x == shacl("closed") => {
                 if literal_bool(o) == Some(true) {
                     constraints.push(ConstraintComponent::Closed);
@@ -275,6 +322,7 @@ fn parse_shapes(dict: &dyn DictionaryCodec, shapes: &[Triple]) -> Vec<Shape> {
         }
         let mut targets = Vec::new();
         let mut property_shapes = Vec::new();
+        let mut ignored_properties = Vec::new();
         let (constraints, severity, message) = parse_shape_body(dict, &map, triples);
         for (p, o) in triples {
             match p.as_str() {
@@ -298,6 +346,12 @@ fn parse_shapes(dict: &dyn DictionaryCodec, shapes: &[Triple]) -> Vec<Shape> {
                     let key = term_key(dict, o);
                     property_shapes.push(parse_property_shape(dict, &map, &key));
                 }
+                x if x == shacl("ignoredProperties") => {
+                    ignored_properties = collect_list(dict, &map, o)
+                        .into_iter()
+                        .filter_map(|t| term_iri(&t))
+                        .collect();
+                }
                 _ => {}
             }
         }
@@ -306,6 +360,7 @@ fn parse_shapes(dict: &dyn DictionaryCodec, shapes: &[Triple]) -> Vec<Shape> {
             targets,
             constraints,
             property_shapes,
+            ignored_properties,
             severity,
             message,
         });
@@ -394,6 +449,21 @@ fn default_message(component: &str, detail: &str) -> String {
         c if c == shacl("InConstraintComponent") => "value not in allowed list".to_owned(),
         c if c == shacl("HasValueConstraintComponent") => "required value not present".to_owned(),
         c if c == shacl("NodeConstraintComponent") => "node does not conform".to_owned(),
+        c if c == shacl("AndConstraintComponent") => {
+            "value does not conform to all shapes in sh:and".to_owned()
+        }
+        c if c == shacl("OrConstraintComponent") => {
+            "value does not conform to any shape in sh:or".to_owned()
+        }
+        c if c == shacl("NotConstraintComponent") => {
+            "value conforms to the shape in sh:not".to_owned()
+        }
+        c if c == shacl("QualifiedMinCountConstraintComponent") => {
+            format!("fewer than {detail} values conform to the qualified value shape")
+        }
+        c if c == shacl("QualifiedMaxCountConstraintComponent") => {
+            format!("more than {detail} values conform to the qualified value shape")
+        }
         c if c == shacl("ClosedConstraintComponent") => {
             "property not allowed by closed shape".to_owned()
         }
@@ -438,9 +508,11 @@ fn check_values(
     values: &[(String, Term)],
     constraint: &ConstraintComponent,
     source_shape: Option<&str>,
+    ps: Option<&PropertyShape>,
     severity: Severity,
     message: Option<&str>,
     results: &mut Vec<ValidationResult>,
+    depth: usize,
 ) {
     match constraint {
         ConstraintComponent::Class(class) => {
@@ -607,7 +679,128 @@ fn check_values(
         }
         ConstraintComponent::Node(shape_key) => {
             for (vkey, _) in values {
-                evaluate_shape(dict, data, shapes, shape_key, vkey, results, 0);
+                evaluate_shape(dict, data, shapes, shape_key, vkey, results, depth + 1);
+            }
+        }
+        ConstraintComponent::And(shape_keys) => {
+            for (vkey, _) in values {
+                let conforms = shape_keys
+                    .iter()
+                    .all(|k| conforms_to(dict, data, shapes, k, vkey, depth));
+                if !conforms {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("AndConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::Or(shape_keys) => {
+            for (vkey, _) in values {
+                let conforms = shape_keys
+                    .iter()
+                    .any(|k| conforms_to(dict, data, shapes, k, vkey, depth));
+                if !conforms {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("OrConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::Not(shape_key) => {
+            for (vkey, _) in values {
+                if conforms_to(dict, data, shapes, shape_key, vkey, depth) {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("NotConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::QualifiedValueShape { .. }
+        | ConstraintComponent::QualifiedValueShapesDisjoint => {}
+        ConstraintComponent::QualifiedMinCount(n) => {
+            if let Some((shape_key, disjoint, siblings)) =
+                qualified_value_context(shapes, source_shape, ps)
+            {
+                let count = values
+                    .iter()
+                    .filter(|(vkey, _)| {
+                        let mut matches = conforms_to(dict, data, shapes, &shape_key, vkey, depth);
+                        if matches && disjoint {
+                            matches = !siblings
+                                .iter()
+                                .any(|s| conforms_to(dict, data, shapes, s, vkey, depth));
+                        }
+                        matches
+                    })
+                    .count();
+                if count < *n {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        None,
+                        source_shape,
+                        &shacl("QualifiedMinCountConstraintComponent"),
+                        &n.to_string(),
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::QualifiedMaxCount(n) => {
+            if let Some((shape_key, disjoint, siblings)) =
+                qualified_value_context(shapes, source_shape, ps)
+            {
+                let count = values
+                    .iter()
+                    .filter(|(vkey, _)| {
+                        let mut matches = conforms_to(dict, data, shapes, &shape_key, vkey, depth);
+                        if matches && disjoint {
+                            matches = !siblings
+                                .iter()
+                                .any(|s| conforms_to(dict, data, shapes, s, vkey, depth));
+                        }
+                        matches
+                    })
+                    .count();
+                if count > *n {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        None,
+                        source_shape,
+                        &shacl("QualifiedMaxCountConstraintComponent"),
+                        &n.to_string(),
+                        severity,
+                        message,
+                    );
+                }
             }
         }
         ConstraintComponent::MinCount(n) => {
@@ -641,19 +834,22 @@ fn check_values(
             }
         }
         ConstraintComponent::Closed => {
-            let allowed: Vec<&str> = shapes
+            let allowed: Vec<String> = shapes
                 .iter()
                 .find(|s| s.id == *source_shape.unwrap_or(""))
                 .map(|s| {
-                    s.property_shapes
+                    let mut paths: Vec<String> = s
+                        .property_shapes
                         .iter()
-                        .map(|ps| ps.path.as_str())
-                        .collect()
+                        .map(|ps| ps.path.clone())
+                        .collect();
+                    paths.extend(s.ignored_properties.iter().cloned());
+                    paths
                 })
                 .unwrap_or_default();
             for t in data {
                 if subject_key(dict, t.subject) == focus
-                    && !allowed.contains(&t.predicate.as_str())
+                    && !allowed.iter().any(|p| p == t.predicate.as_str())
                     && t.predicate.as_str() != RDF_TYPE
                 {
                     push_result(
@@ -684,6 +880,56 @@ fn kind_name(kind: &NodeKind) -> &'static str {
     }
 }
 
+/// Look up the `sh:qualifiedValueShape` parameter of the current property shape.
+/// Returns `(shape_key, sh:qualifiedValueShapesDisjoint, sibling_qualified_shapes)`.
+fn qualified_value_context<'a>(
+    shapes: &'a [Shape],
+    source_shape: Option<&str>,
+    ps: Option<&'a PropertyShape>,
+) -> Option<(String, bool, Vec<&'a str>)> {
+    let shape = shapes
+        .iter()
+        .find(|s| s.id == source_shape.unwrap_or(""))?;
+    let ps = ps?;
+    let shape_key = ps.constraints.iter().find_map(|c| match c {
+        ConstraintComponent::QualifiedValueShape { shape } => Some(shape.clone()),
+        _ => None,
+    })?;
+    let disjoint = ps
+        .constraints
+        .iter()
+        .any(|c| matches!(c, ConstraintComponent::QualifiedValueShapesDisjoint));
+    let siblings: Vec<&str> = shape
+        .property_shapes
+        .iter()
+        .filter(|other| !std::ptr::eq(*other, ps))
+        .filter_map(|other| {
+            other.constraints.iter().find_map(|c| match c {
+                ConstraintComponent::QualifiedValueShape { shape } => Some(shape.as_str()),
+                _ => None,
+            })
+        })
+        .collect();
+    Some((shape_key, disjoint, siblings))
+}
+
+/// True if evaluating `shape_key` with focus node `focus` produces no `sh:Violation` results.
+fn conforms_to(
+    dict: &dyn DictionaryCodec,
+    data: &[Triple],
+    shapes: &[Shape],
+    shape_key: &str,
+    focus: &str,
+    depth: usize,
+) -> bool {
+    if depth > 32 {
+        return true;
+    }
+    let mut local = Vec::new();
+    evaluate_shape(dict, data, shapes, shape_key, focus, &mut local, depth + 1);
+    local.iter().all(|r| r.severity != Severity::Violation)
+}
+
 fn evaluate_shape(
     dict: &dyn DictionaryCodec,
     data: &[Triple],
@@ -711,9 +957,11 @@ fn evaluate_shape(
             &focus_values,
             c,
             Some(&shape.id),
+            None,
             shape.severity,
             shape.message.as_deref(),
             results,
+            depth,
         );
     }
     // Property shapes apply to values of the path.
@@ -733,9 +981,11 @@ fn evaluate_shape(
                 &values,
                 c,
                 Some(&shape.id),
+                Some(ps),
                 ps.severity,
                 ps.message.as_deref(),
                 results,
+                depth,
             );
         }
     }
@@ -1214,5 +1464,236 @@ mod tests {
         assert!(report.conforms);
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn and_constraint_fails_when_one_shape_fails() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:AdultShape a sh:NodeShape ; sh:class ex:Adult .
+                ex:NamedShape a sh:NodeShape ;
+                    sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+                ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+                    sh:and ( ex:AdultShape ex:NamedShape ) ."
+            ),
+            &format!(
+                "{SH}
+                ex:alice a ex:Person, ex:Adult ; ex:name \"Alice\" .
+                ex:bob a ex:Person, ex:Adult .
+                ex:carol a ex:Person ; ex:name \"Carol\" ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| r.component == "http://www.w3.org/ns/shacl#AndConstraintComponent")
+        );
+        let foci: Vec<_> = report
+            .results
+            .iter()
+            .map(|r| r.focus_node.as_str())
+            .collect();
+        assert!(foci.contains(&"http://ex.org/bob"));
+        assert!(foci.contains(&"http://ex.org/carol"));
+    }
+
+    #[test]
+    fn or_constraint_passes_when_any_shape_matches() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:HasEmailShape a sh:NodeShape ;
+                    sh:property [ sh:path ex:email ; sh:minCount 1 ] .
+                ex:HasPhoneShape a sh:NodeShape ;
+                    sh:property [ sh:path ex:phone ; sh:minCount 1 ] .
+                ex:ContactShape a sh:NodeShape ; sh:targetClass ex:Contact ;
+                    sh:or ( ex:HasEmailShape ex:HasPhoneShape ) ."
+            ),
+            &format!(
+                "{SH}
+                ex:c1 a ex:Contact ; ex:email \"a@x.org\" .
+                ex:c2 a ex:Contact ; ex:phone \"+86\" .
+                ex:c3 a ex:Contact ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/c3");
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#OrConstraintComponent"
+        );
+    }
+
+    #[test]
+    fn not_constraint_violates_when_shape_matches() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:BannedStatusShape a sh:NodeShape ; sh:hasValue \"banned\" .
+                ex:ItemShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:status ; sh:not ex:BannedStatusShape ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:status \"active\" .
+                ex:i2 a ex:Item ; ex:status \"banned\" ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/i2");
+        assert_eq!(
+            report.results[0].path.as_deref(),
+            Some("http://ex.org/status")
+        );
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#NotConstraintComponent"
+        );
+    }
+
+    #[test]
+    fn qualified_min_count_enforces_min_matches() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TeamShape a sh:NodeShape ; sh:targetClass ex:Team ;
+                    sh:property [ sh:path ex:member ;
+                                  sh:qualifiedValueShape [ sh:class ex:Engineer ] ;
+                                  sh:qualifiedMinCount 2 ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:t1 a ex:Team ; ex:member ex:e1, ex:e2 .
+                ex:e1 a ex:Engineer . ex:e2 a ex:Engineer .
+                ex:t2 a ex:Team ; ex:member ex:e3 .
+                ex:e3 a ex:Engineer .
+                ex:t3 a ex:Team ; ex:member ex:e4, ex:e5 .
+                ex:e4 a ex:Engineer . ex:e5 a ex:Manager ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| r.component
+                    == "http://www.w3.org/ns/shacl#QualifiedMinCountConstraintComponent")
+        );
+        let foci: Vec<_> = report
+            .results
+            .iter()
+            .map(|r| r.focus_node.as_str())
+            .collect();
+        assert!(foci.contains(&"http://ex.org/t2"));
+        assert!(foci.contains(&"http://ex.org/t3"));
+    }
+
+    #[test]
+    fn qualified_max_count_enforces_max_matches() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TeamShape a sh:NodeShape ; sh:targetClass ex:Team ;
+                    sh:property [ sh:path ex:member ;
+                                  sh:qualifiedValueShape [ sh:class ex:Engineer ] ;
+                                  sh:qualifiedMaxCount 1 ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:t1 a ex:Team ; ex:member ex:e1 . ex:e1 a ex:Engineer .
+                ex:t2 a ex:Team ; ex:member ex:e1, ex:e2 .
+                ex:e1 a ex:Engineer . ex:e2 a ex:Engineer ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/t2");
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#QualifiedMaxCountConstraintComponent"
+        );
+    }
+
+    #[test]
+    fn qualified_value_shapes_disjoint_excludes_sibling_matches() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TeamShape a sh:NodeShape ; sh:targetClass ex:Team ;
+                    sh:property [ sh:path ex:member ;
+                                  sh:qualifiedValueShape [ sh:class ex:Engineer ] ;
+                                  sh:qualifiedValueShapesDisjoint true ;
+                                  sh:qualifiedMinCount 1 ] ;
+                    sh:property [ sh:path ex:member ;
+                                  sh:qualifiedValueShape [ sh:class ex:Lead ] ;
+                                  sh:qualifiedMaxCount 0 ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:t1 a ex:Team ; ex:member ex:l1 .
+                ex:l1 a ex:Lead, ex:Engineer ."
+            ),
+        );
+        // l1 matches both sibling qualified shapes. It is excluded from the
+        // disjoint engineer count (0 < qualifiedMinCount 1) and still counts
+        // against the lead max (1 > qualifiedMaxCount 0).
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        let components: Vec<_> = report
+            .results
+            .iter()
+            .map(|r| r.component.as_str())
+            .collect();
+        assert!(components.contains(&"http://www.w3.org/ns/shacl#QualifiedMinCountConstraintComponent"));
+        assert!(components.contains(&"http://www.w3.org/ns/shacl#QualifiedMaxCountConstraintComponent"));
+        assert!(report.results.iter().all(|r| r.focus_node == "http://ex.org/t1"));
+    }
+
+    #[test]
+    fn closed_shape_allows_ignored_properties() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:StrictShape a sh:NodeShape ; sh:targetClass ex:Strict ;
+                    sh:closed true ; sh:ignoredProperties ( ex:comment ) ;
+                    sh:property [ sh:path ex:name ; sh:minCount 1 ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:s1 a ex:Strict ; ex:name \"ok\" ; ex:comment \"note\" .
+                ex:s2 a ex:Strict ; ex:name \"x\" ; ex:extra 1 ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(
+            report.results[0].path.as_deref(),
+            Some("http://ex.org/extra")
+        );
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#ClosedConstraintComponent"
+        );
     }
 }

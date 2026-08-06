@@ -45,7 +45,7 @@
 | Phase 3 查询引擎 | 部分完成 | ~96% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）+ SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+ 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 30/30）+ strict 观测轨 + **完整 W3C 套件 manifest 基线（492 条，127 PASS/365 FAIL）** |
 | Phase 4 集群与一致性 MVP | 部分完成 | ~82% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API + 数据面同步接口（快照迁移入队/回执）；无多进程 Raft |
 | Phase 5 接入层与安全基线 | 部分完成 | ~90% | HTTP 全路由 + 文件审计（含哈希链）+ cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
-| Phase 6 推理与验证 | 部分完成 | ~35% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1 最小集）可用；**SHACL 基线校验引擎落地（目标/约束子集 + 验证报告，reasoner 4→13 测）** |
+| Phase 6 推理与验证 | 部分完成 | ~38% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1 最小集）可用；**SHACL 基线校验引擎落地（目标/约束子集/逻辑形状 + 验证报告，reasoner 4→20 测）** |
 | Phase 7 企业运维与发布 | 部分完成 | ~33% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业）+ license 审计 CI 作业；无发布/回滚 |
 | Phase 8 AI-Native 扩展 | 未开始 | 0% | — |
 | **分层内核 L0–L3** | **部分完成** | **~92–96%** | 语义+存储+查询主路径可用，完整聚合/Update/子查询/属性路径最小集（含 `?`）已纳入回归保护 |
@@ -62,7 +62,7 @@
 | L3 parser/query | ~96% | 完整核心，非仅 MVP；完整聚合 + SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+子查询（含聚合）+属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ RDF 序列化导出；W3C 子集 required-lite（30/30）+ strict 观测双轨 + 完整 W3C 套件 manifest 基线 |
 | L4 cluster | ~82% | +session/partition/rebalance/commit + HTTP /cluster + 数据面同步（快照迁移/回执）；17 测 |
 | L5 server/security/obs | ~90% | 双后端、文件审计（哈希链）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
-| L6 reasoner | ~35% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1）+ SHACL 基线校验（目标四选 + 隐式类目标；class/datatype/nodeKind/min-max count/length/pattern/in/hasValue/node/closed；severity/message；ValidationReport）；13 测 |
+| L6 reasoner | ~38% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1）+ SHACL 基线校验（目标四选 + 隐式类目标；class/datatype/nodeKind/min-max count/length/pattern/in/hasValue/node/and/or/not/qualifiedValueShape(+min/max count、disjoint)/closed(+ignoredProperties)；severity/message；ValidationReport）；20 测 |
 | L7 平台工程 | ~33% | CI workflow + ci-local + compliance crate + systemd 安装脚本 + 管理面 smoke + 窗口化 SLO 校验 + 存储微基准 + license 审计作业 |
 | L8 AI-Native | 0% | — |
 
@@ -167,7 +167,7 @@
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
 | P6-01 | OWL 2 RL 核心规则 | 部分完成 | 25% | `ForwardChainReasoner`：rdfs5/6/7/8/9 + prp-inv1 最小集、迭代闭包、`InferenceMode` 开关、4 测 | 扩展规则集（prp-spo2/prp-symp 等） |
-| P6-02 | SHACL 基线验证 | 部分完成 | 45% | `ShaclEngine`（[infrastructure/shacl.rs](../crates/ontolith-reasoner/src/infrastructure/shacl.rs)）：形状解析（节点/属性形状、`sh:property` 嵌套、RDF 列表 `sh:in`）、目标选择（targetClass/targetNode/targetSubjectsOf/targetObjectsOf + sh:class 隐式目标）、约束子集（class/datatype/nodeKind/minCount/maxCount/minLength/maxLength/pattern/in/hasValue/node/closed）、severity/message、`ValidationReport`（conforms 仅 Violation 判定不合规）；`sh:pattern` 内置小正则子集（全串匹配，无分组/交替）；9 测 | 更多约束组件（`sh:qualifiedValueShape`、`sh:and/or/not` 逻辑形状、`sh:ignoredProperties`、`sh:languageIn`）与 W3C SHACL 套件接入 |
+| P6-02 | SHACL 基线验证 | 部分完成 | 60% | `ShaclEngine`（[infrastructure/shacl.rs](../crates/ontolith-reasoner/src/infrastructure/shacl.rs)）：形状解析（节点/属性形状、`sh:property` 嵌套、RDF 列表 `sh:in`/`sh:and`/`sh:or`/`sh:ignoredProperties`）、目标选择（targetClass/targetNode/targetSubjectsOf/targetObjectsOf + sh:class 隐式目标）、约束子集（class/datatype/nodeKind/minCount/maxCount/minLength/maxLength/pattern/in/hasValue/node/and/or/not/closed）、属性形状参数（qualifiedValueShape + qualifiedMinCount/qualifiedMaxCount/qualifiedValueShapesDisjoint、ignoredProperties 并入 closed 白名单）、severity/message、`ValidationReport`（conforms 仅 Violation 判定不合规）；`sh:pattern` 内置小正则子集（全串匹配，无分组/交替）；16 测（reasoner 共 20） | 其余约束组件（`sh:languageIn` 等）与 W3C SHACL 套件接入 |
 | P6-03 | 可配置推理模式与保护 | 部分完成 | 30% | `InferenceMode` + `max_iterations` 迭代上限 | 超时护栏 |
 
 **阶段退出条件：** RL 核心 + SHACL 基线 + 性能护栏可配置。
@@ -222,7 +222,7 @@
 |--------|------|
 | [ ] 代价优化 | 未开始 |
 | [ ] OWL 2 RL 核心 | 未开始 |
-| [~] SHACL 基线 | 部分完成（`ShaclEngine` 约束子集 + ValidationReport 已落地；W3C SHACL 套件未接） |
+| [~] SHACL 基线 | 部分完成（`ShaclEngine` 约束子集 + 逻辑形状 + qualified 计数 + ValidationReport 已落地；W3C SHACL 套件未接） |
 | [ ] Explain/优化稳定性门禁 | 未开始 |
 | [ ] 推理正确性与性能护栏 | 未开始 |
 
@@ -254,7 +254,7 @@
 | WBS-02 | 解析与导入 | 部分完成 | ~85% | N-T/N-Q/Turtle/TriG/流式 + 序列化导出（N-T/N-Q）；JSON-LD 未做 |
 | WBS-03 | 存储与事务 | 部分完成 | ~85% | RocksDB 已接；真 MVCC / 纯 CF 扫描仍缺 |
 | WBS-04 | 查询与优化 | 部分完成 | ~95% | 完整核心代数+优化+绑定 + 完整聚合（GROUP BY/HAVING）+ SPARQL Update 基线 + 子查询（含聚合）+ 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（30/30）；缺高级 Update 形态 |
-| WBS-05 | 推理与 SHACL | 部分完成 | ~12% | 前向链推理最小集可用；SHACL 未开始 |
+| WBS-05 | 推理与 SHACL | 部分完成 | ~18% | 前向链推理最小集可用；SHACL 基线校验（约束子集 + 逻辑形状 and/or/not + qualifiedValueShape 计数 + closed/ignoredProperties）落地 |
 | WBS-06 | 分布式运行时 | 部分完成 | ~78% | 控制面增强+HTTP + 数据面同步接口；无多进程数据复制 |
 | WBS-07 | API、安全与集成 | 部分完成 | ~87% | 双后端网关+文件审计（哈希链）+Results JSON+ingest+部署脚本+独立管理面 API + ACL/probe；无 TLS/OIDC |
 | WBS-08 | 平台工程 | 部分完成 | ~35% | CI workflow + compliance crate + ci-local + systemd 运维文档 + 管理面 smoke + 窗口化 SLO 检查 + 存储微基准 + license 审计；无发布回滚 |
@@ -295,7 +295,7 @@
 | ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）+ 哈希链验证/篡改检测（9 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
 | ontolith-observability | sink、导出、采样循环、Prometheus 文本（6 测） | `crates/ontolith-observability/src/**` |
 | ontolith-server | metrics、采样配置、HTTP query decode + 管理面 API/ACL/probe（15 测） | `crates/ontolith-server/src/{api,bootstrap,http,management}.rs` |
-| ontolith-reasoner | 前向链推理（rdfs5/6/7/8/9 + prp-inv1、`InferenceMode` 开关）+ SHACL 基线校验（目标选择/约束子集/报告，13 测） | `crates/ontolith-reasoner/src/infrastructure/{mod,shacl}.rs` |
+| ontolith-reasoner | 前向链推理（rdfs5/6/7/8/9 + prp-inv1、`InferenceMode` 开关）+ SHACL 基线校验（目标选择/约束子集/逻辑形状/qualified 计数/报告，20 测） | `crates/ontolith-reasoner/src/infrastructure/{mod,shacl}.rs` |
 | ontolith-compliance | R1 烟雾 17 + W3C 子集 profile 1（must-pass 30/30，skip=0）+ 完整 W3C 套件 manifest runner（`w3c11_suite`，492 条基线 profile 锁定） | `crates/ontolith-compliance/tests/**` |
 
 ---
@@ -356,6 +356,7 @@
 | 2026-08-06 | Codex | L3：完整 W3C 套件接入——vendored 官方 `w3c/rdf-tests` sparql11（941 文件/28 feature，QueryEvaluation/UpdateEvaluation/PositiveSyntax/NegativeSyntax 四类）；manifest 驱动 runner `w3c11_suite.rs`（自有 Turtle 解析官方 manifest、SRX/SRJ/TSV/CSV + Turtle 图 + ASK 结果比对、超时/panic 护栏）；`w3c11_profile.tsv` 锁定 492 条基线（127 PASS / 365 FAIL，按 reason-code 分类），普通模式 drift 防回归、`ONTOLITH_W3C11_LEARN=1` 重生成；顺带修复 Turtle 数字字面量词法 bug（`.` 不再当分隔符，完整 INTEGER/DECIMAL/DOUBLE 文法 + `.5` 前导点），parser 16→17 测。 |
 | 2026-08-06 | Codex | L4：多进程 Raft 设计定稿（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md) 转 Accepted）：openraft 共识引擎 behind 现有 cluster traits；树内 axum/reqwest HTTP RPC（`/internal/raft/*` + 共享 secret）；RocksDB 独立 `raft` CF 存日志/硬状态/快照；写入经多数派提交后落 L2；保留 `InMemoryClusterRuntime` 作测试 harness；DEPENDENCY_REGISTER 与 L4 文档同步。 |
 | 2026-08-06 | Codex | L6：SHACL 基线校验引擎——`ShaclEngine`（`ShaclValidator` trait behind）：形状解析（节点/属性形状、`sh:property` 嵌套、RDF 列表 `sh:in`）；目标选择（targetClass/targetNode/targetSubjectsOf/targetObjectsOf + `sh:class` 隐式类目标）；约束子集（class/datatype/nodeKind/minCount/maxCount/minLength/maxLength/pattern/in/hasValue/node/closed）；severity/message；`ValidationReport`（conforms 仅 Violation 判不合规）；`sh:pattern` 内置小正则子集；reasoner 4→13 测，全量测试待本波提交前验证。 |
+| 2026-08-07 | Codex | L6：SHACL 约束组件扩展——逻辑形状 `sh:and`/`sh:or`/`sh:not`（节点/属性形状通用，`conforms_to` 本地收集判定、depth 递归护栏）；属性形状参数 `sh:qualifiedValueShape` + `sh:qualifiedMinCount`/`sh:qualifiedMaxCount`/`sh:qualifiedValueShapesDisjoint`（同 path 多属性形状按引用取参、sibling 互斥计数）；`sh:closed` 合并 `sh:ignoredProperties` 白名单；reasoner 13→20 测（SHACL 9→16），全量测试 223 通过（server 21 测需沙箱外运行，沙箱内端口绑定被拒）。 |
 
 ---
 
