@@ -251,7 +251,11 @@ impl ManagementState {
                     .file_path()
                     .map(|p| json_string(&p))
                     .unwrap_or_else(|| "null".to_owned()),
-                if self.tls_enabled { "\"on\"" } else { "\"off\"" },
+                if self.tls_enabled {
+                    "\"on\""
+                } else {
+                    "\"off\""
+                },
                 self.started_at_ms,
             ),
         ))
@@ -478,10 +482,10 @@ fn load_tls_config_from_env() -> Result<Option<TlsServerConfig>, String> {
     match (cert_path, key_path) {
         (None, None) => Ok(None),
         (Some(cert), Some(key)) => {
-            let cert_pem = std::fs::read(&cert)
-                .map_err(|e| format!("read TLS cert file {cert}: {e}"))?;
-            let key_pem = std::fs::read(&key)
-                .map_err(|e| format!("read TLS key file {key}: {e}"))?;
+            let cert_pem =
+                std::fs::read(&cert).map_err(|e| format!("read TLS cert file {cert}: {e}"))?;
+            let key_pem =
+                std::fs::read(&key).map_err(|e| format!("read TLS key file {key}: {e}"))?;
             TlsServerConfig::from_pem(&cert_pem, &key_pem).map(Some)
         }
         _ => Err(format!(

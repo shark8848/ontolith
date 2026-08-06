@@ -237,7 +237,7 @@ sudo -v# Ontolith 开发计划
 
 ### WBS-05 推理与 SHACL
 - OWL 2 RL 核心规则。
-- SHACL 基线约束与报告。
+- SHACL 基线约束与报告。✅（2026-08-06：`ShaclEngine` 约束子集 + ValidationReport）
 
 ### WBS-06 分布式运行时
 - 元数据服务与共识。
@@ -276,7 +276,7 @@ sudo -v# Ontolith 开发计划
 范围：
 - 代价优化。
 - OWL 2 RL 核心。
-- SHACL 基线。
+- SHACL 基线。✅（约束子集已落地，W3C SHACL 套件未接）
 
 退出标准：
 - Explain 质量与优化稳定性门禁通过。

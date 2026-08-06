@@ -11,3 +11,4 @@ ontolith-storage = { path = "../ontolith-storage", default-features = false }
 
 [dev-dependencies]
 ontolith-transaction = { path = "../ontolith-transaction" }
+ontolith-parser = { path = "../ontolith-parser" }

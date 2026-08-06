@@ -1,5 +1,9 @@
 use ontolith_query::domain::QueryPlanId;
 
+mod shacl;
+
+pub use shacl::*;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RuleId(pub String);
 

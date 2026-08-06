@@ -37,8 +37,10 @@ type ManifestGraph = Vec<(NodeId, Vec<(Iri, Term)>)>;
 type ResultRows = (Vec<String>, Vec<BTreeMap<String, NormTerm>>);
 type ResultTable = (Vec<String>, Vec<BTreeMap<String, NormTerm>>, Option<bool>);
 
-const QUERY_EVAL: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#QueryEvaluationTest";
-const UPDATE_EVAL: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#UpdateEvaluationTest";
+const QUERY_EVAL: &str =
+    "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#QueryEvaluationTest";
+const UPDATE_EVAL: &str =
+    "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#UpdateEvaluationTest";
 const POS_SYNTAX_TYPES: &[&str] = &[
     "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#PositiveSyntaxTest",
     "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#PositiveSyntaxTest11",
@@ -152,10 +154,7 @@ fn find_manifests(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn parse_manifest(
-    path: &Path,
-    dict: &InMemoryDictionary,
-) -> Result<ManifestGraph, String> {
+fn parse_manifest(path: &Path, dict: &InMemoryDictionary) -> Result<ManifestGraph, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("read manifest {}: {e}", path.display()))?;
     let parsed = BasicRdfParser::new()
@@ -209,10 +208,7 @@ fn term_literal_str(term: &Term) -> Option<String> {
     }
 }
 
-fn collect_list(
-    subject: NodeId,
-    map: &BTreeMap<NodeId, Vec<(Iri, Term)>>,
-) -> Vec<Term> {
+fn collect_list(subject: NodeId, map: &BTreeMap<NodeId, Vec<(Iri, Term)>>) -> Vec<Term> {
     let mut out = Vec::new();
     let mut current = Some(subject);
     while let Some(node) = current {
@@ -320,7 +316,9 @@ fn collect_entries(suite_root: &Path) -> Vec<TestEntry> {
             let Some(kind) = classify_kind(triples) else {
                 continue;
             };
-            out.push(build_entry(&feature, subject, &map_ref, &dict, kind, &base_dir));
+            out.push(build_entry(
+                &feature, subject, &map_ref, &dict, kind, &base_dir,
+            ));
         }
     }
     out
@@ -469,7 +467,11 @@ enum NormDt {
 enum NormTerm {
     Iri(String),
     Blank(String),
-    Literal { lex: String, dt: NormDt, lang: Option<String> },
+    Literal {
+        lex: String,
+        dt: NormDt,
+        lang: Option<String>,
+    },
 }
 
 fn norm_literal(lex: &str, datatype: Option<&str>, lang: Option<&str>) -> NormTerm {
@@ -540,7 +542,8 @@ fn norm_from_engine(value: &BoundValue, dict: Option<&InMemoryDictionary>) -> No
                 lang: None,
             },
         },
-        BoundValue::Node(id) | BoundValue::Blank(id) => match dict.and_then(|d| d.decode_node(*id)) {
+        BoundValue::Node(id) | BoundValue::Blank(id) => match dict.and_then(|d| d.decode_node(*id))
+        {
             Some(s) if s.starts_with("_:") => NormTerm::Blank(s),
             Some(s) => NormTerm::Iri(s),
             None => NormTerm::Blank(format!("n{}", id.get())),
@@ -569,9 +572,7 @@ fn srx_attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
         .map(|a| String::from_utf8_lossy(&a.value).into_owned())
 }
 
-fn parse_srx(
-    text: &str,
-) -> Result<ResultTable, String> {
+fn parse_srx(text: &str) -> Result<ResultTable, String> {
     use quick_xml::events::Event;
 
     let mut reader = quick_xml::Reader::from_str(text);
@@ -699,9 +700,7 @@ fn parse_tsv_cell(cell: &str) -> Result<NormTerm, String> {
     Ok(norm_literal(cell, None, None))
 }
 
-fn parse_tsv(
-    text: &str,
-) -> Result<ResultRows, String> {
+fn parse_tsv(text: &str) -> Result<ResultRows, String> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let header = lines.next().ok_or("empty tsv")?;
     let vars: Vec<String> = header
@@ -730,9 +729,7 @@ fn parse_tsv(
     Ok((vars, rows))
 }
 
-fn parse_csv(
-    text: &str,
-) -> Result<ResultRows, String> {
+fn parse_csv(text: &str) -> Result<ResultRows, String> {
     let mut table: Vec<Vec<String>> = Vec::new();
     let mut current: Vec<String> = Vec::new();
     let mut field = String::new();
@@ -772,7 +769,9 @@ fn parse_csv(
         current.push(field);
         table.push(current);
     }
-    let mut rows_iter = table.into_iter().filter(|r| !r.iter().all(|c| c.trim().is_empty()));
+    let mut rows_iter = table
+        .into_iter()
+        .filter(|r| !r.iter().all(|c| c.trim().is_empty()));
     let header = rows_iter.next().ok_or("empty csv")?;
     let vars: Vec<String> = header
         .iter()
@@ -793,9 +792,7 @@ fn parse_csv(
     Ok((vars, rows))
 }
 
-fn parse_srj(
-    text: &str,
-) -> Result<ResultTable, String> {
+fn parse_srj(text: &str) -> Result<ResultTable, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let vars: Vec<String> = value["head"]["vars"]
         .as_array()
@@ -838,7 +835,8 @@ fn parse_srj(
 // ---------------------------------------------------------------------------
 
 fn node_label(id: NodeId, dict: &InMemoryDictionary) -> String {
-    dict.decode_node(id).unwrap_or_else(|| format!("_:n{}", id.get()))
+    dict.decode_node(id)
+        .unwrap_or_else(|| format!("_:n{}", id.get()))
 }
 
 fn term_label(term: &Term, dict: &InMemoryDictionary) -> String {
@@ -876,8 +874,11 @@ fn parse_graph_file(path: &Path) -> Result<(Vec<Triple>, InMemoryDictionary), St
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let dict = InMemoryDictionary::new();
     let parsed = match path.extension().and_then(|e| e.to_str()) {
-        Some("nt") => parse_ntriples(&text, &dict).map_err(|e| format!("parse {}: {e:?}", path.display()))?,
-        _ => parse_turtle_doc(&text, &dict).map_err(|e| format!("parse {}: {e:?}", path.display()))?,
+        Some("nt") => {
+            parse_ntriples(&text, &dict).map_err(|e| format!("parse {}: {e:?}", path.display()))?
+        }
+        _ => parse_turtle_doc(&text, &dict)
+            .map_err(|e| format!("parse {}: {e:?}", path.display()))?,
     };
     Ok((parsed.dataset.default_graph, dict))
 }
@@ -915,22 +916,21 @@ fn load_data(files: &[PathBuf]) -> Result<Loaded, String> {
     engine
         .commit_transaction(txn)
         .map_err(|e| format!("commit: {e:?}"))?;
-    Ok(Loaded {
-        engine,
-        repo,
-        dict,
-    })
+    Ok(Loaded { engine, repo, dict })
 }
 
-fn execute_query(loaded: &Loaded, text: &str) -> Result<ontolith_query::domain::QueryResult, String> {
+fn execute_query(
+    loaded: &Loaded,
+    text: &str,
+) -> Result<ontolith_query::domain::QueryResult, String> {
     let pipeline = update_pipeline(
         loaded.repo.clone(),
         loaded.engine.clone(),
         Some(loaded.dict.clone()),
     );
     let request = QueryRequest::new(text).with_timeout(EXEC_TIMEOUT_MS);
-    let result = catch_unwind(AssertUnwindSafe(|| pipeline.execute(&request)))
-        .map_err(panic_payload)?;
+    let result =
+        catch_unwind(AssertUnwindSafe(|| pipeline.execute(&request))).map_err(panic_payload)?;
     result.map_err(|e| e.message().to_owned())
 }
 
@@ -1024,10 +1024,7 @@ fn compare_graph(
     Ok(())
 }
 
-fn compare_update_graph(
-    loaded: &Loaded,
-    expected_path: &Path,
-) -> Result<(), String> {
+fn compare_update_graph(loaded: &Loaded, expected_path: &Path) -> Result<(), String> {
     let actual_triples = loaded.repo.all_in_txn(None);
     let actual_set = graph_set(&actual_triples, &loaded.dict);
     let (expected_triples, expected_dict) = parse_graph_file(expected_path)?;
@@ -1089,10 +1086,8 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
             if !entry.graph_data_files.is_empty() {
                 return fail(FailReason::NamedGraph);
             }
-            let loaded = load_data(&entry.data_files)
-                .map_err(FailReason::DataFormat)?;
-            let actual = execute_query(&loaded, &text)
-                .map_err(|e| classify_query_error(&e))?;
+            let loaded = load_data(&entry.data_files).map_err(FailReason::DataFormat)?;
+            let actual = execute_query(&loaded, &text).map_err(|e| classify_query_error(&e))?;
             if actual.timed_out {
                 return fail(FailReason::Timeout);
             }
@@ -1112,17 +1107,19 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
                             parse_srj(&expected_text).map_err(FailReason::ResultFormat)?
                         }
                         "tsv" => {
-                            let (v, r) = parse_tsv(&expected_text).map_err(FailReason::ResultFormat)?;
+                            let (v, r) =
+                                parse_tsv(&expected_text).map_err(FailReason::ResultFormat)?;
                             (v, r, None)
                         }
                         "csv" => {
-                            let (v, r) = parse_csv(&expected_text).map_err(FailReason::ResultFormat)?;
+                            let (v, r) =
+                                parse_csv(&expected_text).map_err(FailReason::ResultFormat)?;
                             (v, r, None)
                         }
                         _ => {
                             return fail(FailReason::ResultFormat(format!(
                                 "unsupported result extension: {ext}"
-                            )))
+                            )));
                         }
                     };
                     if let Some(expected_bool) = boolean {
@@ -1142,8 +1139,7 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
                 return fail(FailReason::NamedGraph);
             }
             let loaded = load_data(&entry.data_files).map_err(FailReason::DataFormat)?;
-            let actual = execute_query(&loaded, &text)
-                .map_err(|e| classify_query_error(&e))?;
+            let actual = execute_query(&loaded, &text).map_err(|e| classify_query_error(&e))?;
             if actual.timed_out {
                 return fail(FailReason::Timeout);
             }
@@ -1194,9 +1190,7 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
-fn load_profile(
-    path: &Path,
-) -> BTreeMap<(String, String), (bool, String)> {
+fn load_profile(path: &Path) -> BTreeMap<(String, String), (bool, String)> {
     let mut out = BTreeMap::new();
     let Ok(text) = std::fs::read_to_string(path) else {
         return out;
@@ -1215,10 +1209,7 @@ fn load_profile(
     out
 }
 
-fn write_profile(
-    path: &Path,
-    outcomes: &BTreeMap<(String, String), TestOutcome>,
-) {
+fn write_profile(path: &Path, outcomes: &BTreeMap<(String, String), TestOutcome>) {
     let mut lines = Vec::new();
     for ((feature, name), outcome) in outcomes {
         let outcome_str = if outcome.pass { "PASS" } else { "FAIL" };
@@ -1260,11 +1251,7 @@ fn w3c11_manifest_suite() {
             entry.feature,
             entry.name,
             if outcome.pass { "PASS" } else { "FAIL" },
-            outcome
-                .reason
-                .as_ref()
-                .map(|r| r.code())
-                .unwrap_or("")
+            outcome.reason.as_ref().map(|r| r.code()).unwrap_or("")
         );
         outcomes.insert((entry.feature.clone(), entry.name.clone()), outcome);
     }
@@ -1324,7 +1311,8 @@ fn w3c11_manifest_suite() {
     for (key, expected, actual, reason) in &drift {
         eprintln!(
             "[w3c11] drift {}/{}: expected {} got {} ({})",
-            key.0, key.1,
+            key.0,
+            key.1,
             if *expected { "PASS" } else { "FAIL" },
             if *actual { "PASS" } else { "FAIL" },
             reason

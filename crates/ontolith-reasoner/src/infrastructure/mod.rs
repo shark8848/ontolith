@@ -4,6 +4,8 @@
 //! with per-iteration dedup. Guards: `max_iterations` bounds the loop and
 //! `InferenceMode::Off` short-circuits.
 
+mod shacl;
+
 use crate::application::Reasoner;
 use crate::domain::{MaterializeOutcome, ReasoningReport, ReasoningTask, Rule};
 use ontolith_core::domain::{Iri, NodeId};
@@ -11,6 +13,8 @@ use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
 use ontolith_storage::application::DictionaryCodec;
 use std::time::Instant;
+
+pub use shacl::ShaclEngine;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_NS: &str = "http://www.w3.org/2000/01/rdf-schema#";

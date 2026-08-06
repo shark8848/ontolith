@@ -239,8 +239,7 @@ ex:dbl ex:p 1.0E2, 2E-1, 1.5e3 .
 "#;
         let out = parse_turtle_doc(input, &dict).expect("turtle numeric literals");
         assert!(out.dataset.triple_count() >= 8);
-        let dec_subject = dict
-            .encode_node("http://ex.org/dec");
+        let dec_subject = dict.encode_node("http://ex.org/dec");
         let decimals: Vec<_> = out
             .dataset
             .default_graph

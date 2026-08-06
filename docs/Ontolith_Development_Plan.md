@@ -237,7 +237,7 @@ Dependencies:
 
 ### WBS-05 Reasoning and SHACL
 - OWL 2 RL core rules.
-- SHACL baseline constraints and reports.
+- SHACL baseline constraints and reports. ✅ (2026-08-06: `ShaclEngine` constraint subset + ValidationReport)
 
 ### WBS-06 Distributed Runtime
 - Metadata service and consensus.
@@ -276,7 +276,7 @@ Exit criteria:
 Scope:
 - Cost-based optimization.
 - OWL 2 RL core.
-- SHACL baseline.
+- SHACL baseline. ✅ (constraint subset landed; W3C SHACL suite not yet wired)
 
 Exit criteria:
 - Explain plan quality and optimization stability gates pass.

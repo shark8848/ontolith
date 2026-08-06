@@ -36,10 +36,11 @@ impl TlsServerConfig {
     }
 }
 
-fn load_pem_certs(cert_pem: &[u8]) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+fn load_pem_certs(
+    cert_pem: &[u8],
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
     let mut reader = std::io::BufReader::new(cert_pem);
-    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader)
-        .collect();
+    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
     let certs = certs.map_err(|e| format!("read TLS certificate: {e}"))?;
     if certs.is_empty() {
         return Err("TLS certificate PEM contains no certificates".to_owned());
@@ -241,10 +242,7 @@ fn handle_connection(
     handle_connection_io(&mut stream, handler)
 }
 
-fn handle_connection_io<S: Read + Write>(
-    stream: &mut S,
-    handler: Handler,
-) -> std::io::Result<()> {
+fn handle_connection_io<S: Read + Write>(stream: &mut S, handler: Handler) -> std::io::Result<()> {
     let req = match read_request(stream) {
         Ok(r) => r,
         Err(err) => {
@@ -416,23 +414,18 @@ mod tests {
         };
 
         let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(cert.cert.der().clone())
-            .expect("add root cert");
+        roots.add(cert.cert.der().clone()).expect("add root cert");
         let client_config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
         let server_name =
             rustls::pki_types::ServerName::try_from("localhost").expect("server name");
-        let mut client =
-            rustls::ClientConnection::new(Arc::new(client_config), server_name)
-                .expect("client connection");
+        let mut client = rustls::ClientConnection::new(Arc::new(client_config), server_name)
+            .expect("client connection");
         let mut stream = TcpStream::connect(addr).expect("connect to tls server");
         let mut tls_stream = rustls::Stream::new(&mut client, &mut stream);
         tls_stream
-            .write_all(
-                b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            )
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .expect("write request");
         let mut buf = Vec::new();
         tls_stream.read_to_end(&mut buf).expect("read response");

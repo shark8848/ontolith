@@ -358,7 +358,11 @@ impl<'a> Lexer<'a> {
             return Ok(Tok::Eof);
         };
         match c {
-            '.' if self.input[self.pos + 1..].chars().next().is_some_and(|n| n.is_ascii_digit()) => {
+            '.' if self.input[self.pos + 1..]
+                .chars()
+                .next()
+                .is_some_and(|n| n.is_ascii_digit()) =>
+            {
                 // Leading-dot decimal (e.g. `.5`): scan as a numeric word.
                 self.lex_word(line, col)
             }
@@ -645,9 +649,7 @@ fn is_number(s: &str) -> bool {
             exp_digits += 1;
         }
         // DOUBLE requires a mantissa digit and an exponent digit.
-        return exp_digits > 0
-            && i == chars.len()
-            && (digits_before > 0 || digits_after_dot > 0);
+        return exp_digits > 0 && i == chars.len() && (digits_before > 0 || digits_after_dot > 0);
     }
     if i != chars.len() {
         return false;

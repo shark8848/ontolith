@@ -391,6 +391,7 @@ name = "ontolith-reasoner"
 version = "0.1.0"
 dependencies = [
  "ontolith-core",
+ "ontolith-parser",
  "ontolith-query",
  "ontolith-rdf",
  "ontolith-storage",
