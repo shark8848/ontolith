@@ -90,6 +90,9 @@ impl Reasoner for ForwardChainReasoner {
             Rule::SymmetricProperty,
             Rule::TransitiveProperty,
             Rule::InverseOfReverse,
+            Rule::SomeValuesFrom,
+            Rule::SomeValuesFromTyping,
+            Rule::AllValuesFrom,
         ]
     }
 
@@ -113,6 +116,28 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
     let rdfs = |name: &str| -> Iri { Iri::new(format!("{RDFS_NS}{name}")) };
     let owl = |name: &str| -> Iri { Iri::new(format!("{OWL_NS}{name}")) };
     let rdf_type = Iri::new(RDF_TYPE);
+    let node_term = |id: NodeId| -> Option<Term> {
+        let value = dict.decode_node(id)?;
+        if value.starts_with("_:") {
+            Some(Term::BlankNode(id))
+        } else {
+            Some(Term::Iri(Iri::parse(value).ok()?))
+        }
+    };
+    let subject_node = |term: &Term| -> Option<NodeId> {
+        match term {
+            Term::Iri(iri) => Some(dict.encode_node(iri.as_str())),
+            Term::BlankNode(id) => Some(*id),
+            Term::Literal(_) => None,
+        }
+    };
+    let node_term_from_term = |term: &Term| -> Option<Term> {
+        match term {
+            Term::Iri(iri) => Some(Term::Iri(iri.clone())),
+            Term::BlankNode(id) => Some(Term::BlankNode(*id)),
+            Term::Literal(_) => None,
+        }
+    };
 
     // Index rule statements by IRI-level pairs.
     let subclass: Vec<(Iri, Iri)> = closure
@@ -288,6 +313,100 @@ fn apply_rules(dict: &dyn DictionaryCodec, closure: &[Triple], frontier: &mut Ve
             }
         }
     }
+
+    // Restriction axioms indexed by restriction node: (restriction, property) and
+    // (restriction, value class). Restriction subjects may be blank nodes.
+    let on_property: Vec<(Term, Iri)> = closure
+        .iter()
+        .filter_map(|t| {
+            if t.predicate != owl("onProperty") {
+                return None;
+            }
+            let (restr, p) = (node_term(t.subject)?, iri_of(&t.object)?);
+            Some((restr, p))
+        })
+        .collect();
+    let some_values: Vec<(Term, Iri)> = closure
+        .iter()
+        .filter_map(|t| {
+            if t.predicate != owl("someValuesFrom") {
+                return None;
+            }
+            let (restr, c) = (node_term(t.subject)?, iri_of(&t.object)?);
+            Some((restr, c))
+        })
+        .collect();
+    let all_values: Vec<(Term, Iri)> = closure
+        .iter()
+        .filter_map(|t| {
+            if t.predicate != owl("allValuesFrom") {
+                return None;
+            }
+            let (restr, c) = (node_term(t.subject)?, iri_of(&t.object)?);
+            Some((restr, c))
+        })
+        .collect();
+
+    // cls-svf1: x rdf:type restr ∧ restr onProperty p ∧ restr someValuesFrom c ∧ x p y → y rdf:type c.
+    for t in closure {
+        if t.predicate != rdf_type {
+            continue;
+        }
+        let Some(restr) = node_term_from_term(&t.object) else { continue };
+        let Some(p) = on_property.iter().find(|(r, _)| *r == restr).map(|(_, p)| p.clone()) else { continue };
+        let Some(c) = some_values.iter().find(|(r, _)| *r == restr).map(|(_, c)| c.clone()) else { continue };
+        for u in closure {
+            if u.predicate == p
+                && u.subject == t.subject
+                && let Some(y) = subject_node(&u.object)
+            {
+                frontier.push(Triple::new(
+                    y,
+                    rdf_type.clone(),
+                    Term::Iri(c.clone()),
+                ));
+            }
+        }
+    }
+
+    // cls-svf2: x p y ∧ y rdf:type c ∧ restr onProperty p ∧ restr someValuesFrom c → x rdf:type restr.
+    for (restr, p) in &on_property {
+        let Some(c) = some_values.iter().find(|(r, _)| r == restr).map(|(_, c)| c.clone()) else { continue };
+        for t in closure {
+            if &t.predicate != p {
+                continue;
+            }
+            let Some(y) = subject_node(&t.object) else { continue };
+            let typed = closure.iter().any(|s| {
+                s.predicate == rdf_type && s.subject == y && s.object == Term::Iri(c.clone())
+            });
+            if typed {
+                frontier.push(Triple::new(t.subject, rdf_type.clone(), restr.clone()));
+            }
+        }
+    }
+
+    // cls-avf: x rdf:type restr ∧ restr onProperty p ∧ restr allValuesFrom c ∧ x p y → y rdf:type c.
+    for t in closure {
+        if t.predicate != rdf_type {
+            continue;
+        }
+        let Some(restr) = node_term_from_term(&t.object) else { continue };
+        let Some(p) = on_property.iter().find(|(r, _)| *r == restr).map(|(_, p)| p.clone()) else { continue };
+        let Some(c) = all_values.iter().find(|(r, _)| *r == restr).map(|(_, c)| c.clone()) else { continue };
+        for u in closure {
+            if u.predicate == p
+                && u.subject == t.subject
+                && let Some(y) = subject_node(&u.object)
+            {
+                frontier.push(Triple::new(
+                    y,
+                    rdf_type.clone(),
+                    Term::Iri(c.clone()),
+                ));
+            }
+        }
+    }
 }
 
 fn absorb_new(closure: &mut Vec<Triple>, frontier: Vec<Triple>) -> usize {
@@ -321,6 +440,14 @@ mod tests {
 
     fn t(s: &str, p: &str, o: &str, dict: &InMemoryDictionary) -> Triple {
         Triple::new(dict.encode_node(s), Iri::new(p), Term::Iri(Iri::new(o)))
+    }
+
+    fn tb(s: &str, p: &str, bnode: &str, dict: &InMemoryDictionary) -> Triple {
+        Triple::new(
+            dict.encode_node(s),
+            Iri::new(p),
+            Term::BlankNode(dict.encode_node(bnode)),
+        )
     }
 
     #[test]
@@ -548,10 +675,76 @@ mod tests {
             .collect();
         for expected in [
             "rdfs5", "rdfs6", "rdfs7", "rdfs8", "rdfs9", "prp-inv1", "prp-inv2", "prp-symp",
-            "prp-trp", "cax-sco",
+            "prp-trp", "cax-sco", "cls-svf1", "cls-svf2", "cls-avf",
         ] {
             assert!(names.contains(&expected), "missing rule {expected}");
         }
+    }
+
+    #[test]
+    fn some_values_from_restriction_types_values() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("_:r", &format!("{owl}onProperty"), "urn:knows", &dict),
+            t("_:r", &format!("{owl}someValuesFrom"), "urn:Person", &dict),
+            tb("urn:alice", rdf_type, "_:r", &dict),
+            t("urn:alice", "urn:knows", "urn:bob", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:bob")
+                && tr.predicate.as_str() == rdf_type
+                && tr.object == Term::Iri(Iri::new("urn:Person"))
+        }));
+    }
+
+    #[test]
+    fn some_values_from_backward_typing() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("_:r", &format!("{owl}onProperty"), "urn:knows", &dict),
+            t("_:r", &format!("{owl}someValuesFrom"), "urn:Person", &dict),
+            t("urn:alice", "urn:knows", "urn:bob", &dict),
+            t("urn:bob", rdf_type, "urn:Person", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:alice")
+                && tr.predicate.as_str() == rdf_type
+                && tr.object == Term::BlankNode(dict.encode_node("_:r"))
+        }));
+    }
+
+    #[test]
+    fn all_values_from_restriction_types_values() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("_:r", &format!("{owl}onProperty"), "urn:knows", &dict),
+            t("_:r", &format!("{owl}allValuesFrom"), "urn:Person", &dict),
+            tb("urn:alice", rdf_type, "_:r", &dict),
+            t("urn:alice", "urn:knows", "urn:bob", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:bob")
+                && tr.predicate.as_str() == rdf_type
+                && tr.object == Term::Iri(Iri::new("urn:Person"))
+        }));
     }
 
     #[test]

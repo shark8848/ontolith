@@ -43,6 +43,12 @@ pub enum Rule {
     TransitiveProperty,
     /// p owl:inverseOf q ∧ x q y → y p x (prp-inv2).
     InverseOfReverse,
+    /// x rdf:type (p some C) ∧ x p y → y rdf:type C (cls-svf1).
+    SomeValuesFrom,
+    /// x p y ∧ y rdf:type C ∧ (p some C) exists → x rdf:type (p some C) (cls-svf2).
+    SomeValuesFromTyping,
+    /// x rdf:type (p all C) ∧ x p y → y rdf:type C (cls-avf).
+    AllValuesFrom,
 }
 
 impl Rule {
@@ -58,6 +64,9 @@ impl Rule {
             Self::SymmetricProperty => "prp-symp",
             Self::TransitiveProperty => "prp-trp",
             Self::InverseOfReverse => "prp-inv2",
+            Self::SomeValuesFrom => "cls-svf1",
+            Self::SomeValuesFromTyping => "cls-svf2",
+            Self::AllValuesFrom => "cls-avf",
         }
     }
 }
