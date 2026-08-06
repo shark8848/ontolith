@@ -249,3 +249,33 @@ jobs:
         run: cargo test -p ontolith-storage --features rocksdb-backend -- --nocapture
       - name: server rocksdb backend test
         run: cargo test -p ontolith-server --features rocksdb-backend rocksdb_backend -- --nocapture
+
+  bench:
+    name: storage bench smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+      - name: storage micro-benchmarks
+        run: cargo bench -p ontolith-storage --bench storage_bench
+
+  license-audit:
+    name: license audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+      - name: Install cargo-license
+        run: cargo install cargo-license --locked
+      - name: Enumerate third-party licenses
+        run: cargo license

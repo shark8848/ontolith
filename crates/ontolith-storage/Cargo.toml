@@ -15,3 +15,7 @@ rocksdb = { version = "0.22.0", optional = true, default-features = true }
 
 [dev-dependencies]
 tempfile = "3.14.0"
+
+[[bench]]
+name = "storage_bench"
+harness = false

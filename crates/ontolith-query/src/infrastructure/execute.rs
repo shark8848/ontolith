@@ -432,6 +432,18 @@ fn eval_path_from_value(
             }
             Ok(out)
         }
+        PathExpression::ZeroOrOne(inner) => {
+            let mut out = vec![start.clone()];
+            let mut seen = HashSet::new();
+            seen.insert(path_value_key(start));
+            for value in eval_path_from_value(inner, start, ctx)? {
+                let key = path_value_key(&value);
+                if seen.insert(key) {
+                    out.push(value);
+                }
+            }
+            Ok(out)
+        }
     }
 }
 

@@ -1,11 +1,11 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.13  
+版本: 0.1.14  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁 + 窗口化 SLO 门禁；安全加固 ADR-0003 已起草）；Git 当前头: `main` @ `cd098db`（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）
+对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁 + 窗口化 SLO 门禁；安全加固 ADR-0003 已起草）；Git 当前头: `main` @ `cd098db`（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）；2026-08-06 增量：L0 序列化 Part II、L3 属性路径 `?`（W3C must-pass 25/25）+ RDF 序列化导出、L2 命名图六置换、L4 数据面同步、L5 审计哈希链、L6 前向链推理、L7 存储微基准与 CI bench/license 作业；全量测试 183 通过
 
 ---
 
@@ -40,30 +40,30 @@
 |------|------|--------|------|
 | 仓库与 crate 骨架 | 部分完成 | ~95% | 14 crate（+compliance）；Git 已有基线提交 |
 | Phase 0 规划与治理 | 部分完成 | ~60% | 台账 + ADR/RFC 模板 + 依赖登记 + 计划互链；签批仍缺 |
-| Phase 1 核心模型与存储抽象 | 部分完成 | ~70% | L0/L1 文档化；ConsistencyLevel；存储契约固化 |
+| Phase 1 核心模型与存储抽象 | 部分完成 | ~75% | L0/L1 文档化；ConsistencyLevel；存储契约固化；序列化 Part II（KO 二进制编解码） |
 | Phase 2 持久化与事务内核 | 部分完成 | ~85% | 内存六索引 + RocksDB 耐久；无真 MVCC / 纯 CF 扫描 |
-| Phase 3 查询引擎 | 部分完成 | ~90% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + COUNT 聚合基线（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径最小集（`/`、`+`、`*`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 24/24）+ strict 观测轨；缺属性路径 `?` / 完整聚合 / Update |
-| Phase 4 集群与一致性 MVP | 部分完成 | ~80% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API；无多进程 Raft |
-| Phase 5 接入层与安全基线 | 部分完成 | ~88% | HTTP 全路由 + 文件审计 + cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
-| Phase 6 推理与验证 | 未开始 | ~5% | 仅类型占位 |
-| Phase 7 企业运维与发布 | 部分完成 | ~30% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁；无发布/回滚 |
+| Phase 3 查询引擎 | 部分完成 | ~92% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + COUNT 聚合基线（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 25/25）+ strict 观测轨；缺完整聚合 / Update |
+| Phase 4 集群与一致性 MVP | 部分完成 | ~82% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API + 数据面同步接口（快照迁移入队/回执）；无多进程 Raft |
+| Phase 5 接入层与安全基线 | 部分完成 | ~90% | HTTP 全路由 + 文件审计（含哈希链）+ cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
+| Phase 6 推理与验证 | 部分完成 | ~15% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1 最小集）可用；SHACL 未开始 |
+| Phase 7 企业运维与发布 | 部分完成 | ~33% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业）+ license 审计 CI 作业；无发布/回滚 |
 | Phase 8 AI-Native 扩展 | 未开始 | 0% | — |
-| **分层内核 L0–L3** | **部分完成** | **~88–90%** | 语义+存储+查询主路径可用，COUNT/子查询/属性路径最小集已纳入回归保护 |
-| **相对 R1 退出标准** | **进行中** | **~70–73%** | 内核+HTTP+集群+CI/烟雾合规 + W3C 子集 required-lite；多节点数据面/W3C 全量/SLO 仍缺 |
+| **分层内核 L0–L3** | **部分完成** | **~90–92%** | 语义+存储+查询主路径可用，COUNT/子查询/属性路径最小集（含 `?`）已纳入回归保护 |
+| **相对 R1 退出标准** | **进行中** | **~72–75%** | 内核+HTTP+集群+CI/烟雾合规 + W3C 子集 required-lite（25/25）；多节点数据面/W3C 全量/SLO 仍缺 |
 | **相对 R1–R4 全计划** | **进行中** | **~12–15%** | — |
 
 ### 架构分层完成度（实现视图）
 
 | 层 | 完成度 | 状态 |
 |----|--------|------|
-| L0 core | ~85% | KO/Canonical/Error/ConsistencyLevel |
+| L0 core | ~90% | KO/Canonical/Error/ConsistencyLevel/序列化 Part II（20 测） |
 | L1 rdf | ~80% | Triple/Quad/Dataset |
 | L2 storage/txn | ~85% | 内存+RocksDB |
-| L3 parser/query | ~90% | 完整核心，非仅 MVP；COUNT 聚合+子查询+属性路径最小集（`/`、`+`、`*`、`|`、`^`）已落地；W3C 子集 required-lite + strict 观测双轨 |
-| L4 cluster | ~80% | +session/partition/rebalance/commit + HTTP /cluster；14 测 |
-| L5 server/security/obs | ~88% | 双后端、文件审计、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
-| L6 reasoner | ~5% | 占位 |
-| L7 平台工程 | ~30% | CI workflow + ci-local + compliance crate + systemd 安装脚本（runtime + management）+ 管理面 smoke + 窗口化 SLO 校验 |
+| L3 parser/query | ~92% | 完整核心，非仅 MVP；COUNT 聚合+子查询+属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）已落地 + RDF 序列化导出；W3C 子集 required-lite（25/25）+ strict 观测双轨 |
+| L4 cluster | ~82% | +session/partition/rebalance/commit + HTTP /cluster + 数据面同步（快照迁移/回执）；17 测 |
+| L5 server/security/obs | ~90% | 双后端、文件审计（哈希链）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
+| L6 reasoner | ~15% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1）；4 测 |
+| L7 平台工程 | ~33% | CI workflow + ci-local + compliance crate + systemd 安装脚本 + 管理面 smoke + 窗口化 SLO 校验 + 存储微基准 + license 审计作业 |
 | L8 AI-Native | 0% | — |
 
 ### 当前焦点
@@ -96,7 +96,7 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P1-01 | Knowledge Object 领域模型 | 部分完成 | 70% | L0 KO + L1 Statement/Graph/Dataset；见 IMPL-L0/L1 文档 | Part II 序列化；Ontology 载荷联动 reasoner |
+| P1-01 | Knowledge Object 领域模型 | 部分完成 | 80% | L0 KO + L1 Statement/Graph/Dataset + 序列化 Part II（`KoCodec` 全容器往返）；见 IMPL-L0 文档 | Ontology 载荷联动 reasoner |
 | P1-02 | Node 标识与字典管理器 | 部分完成 | 75% | 内存字典 + RocksDB 持久字典 | 并发字典契约文档 |
 | P1-03 | 存储抽象接口 | 部分完成 | 90% | stats/matching/snapshot_with/delete 精确 API | 版本冻结说明 |
 | P1-04 | 确定性标识与规范化编码规则 | 部分完成 | 90% | 六置换物理键 + triple/quad set key | 独立编码 RFC；磁盘布局 |
@@ -124,11 +124,11 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P3-01 | SPARQL 解析到执行主链路 | 部分完成 | 91% | SELECT/ASK/CONSTRUCT + JOIN/OPT/UNION/FILTER/BIND/VALUES + COUNT 聚合（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径最小集（`/`、`+`、`*`、`|`、`^`） | 属性路径 `?` / 完整聚合 |
+| P3-01 | SPARQL 解析到执行主链路 | 部分完成 | 93% | SELECT/ASK/CONSTRUCT + JOIN/OPT/UNION/FILTER/BIND/VALUES + COUNT 聚合（无 GROUP BY）+ 子查询基线（嵌套 SELECT + LIMIT）+ 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`） + RDF 序列化导出 | 完整聚合 / Update |
 | P3-02 | 规则优化基线 | 部分完成 | 55% | BGP 重排、Identity 消除、Filter 下推、POS/OSP 选路 | 代价模型/统计 |
 | P3-03 | Explain 输出 | 部分完成 | 85% | logical/physical/algebra + optimize 步骤 | HTTP Explain API |
 | P3-04 | 超时与取消 API | 部分完成 | 75% | timeout_ms + Arc\<AtomicBool\> cancel | 异步抢占/token |
-| P3-05 | MVP 标准符合性子集 | 部分完成 | 90% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 15 烟雾 + W3C 子集运行器（must-pass 24/24，known-gap xfail=0，unsupported skip=1，其中 Update 为 strict skip-exempt）+ CI required-lite + strict observer + strict-promotion-readiness 自动信号 + `ci-local.sh` 全链路通过 | 观察主干连续 3 次 CI 全绿后评估 strict required |
+| P3-05 | MVP 标准符合性子集 | 部分完成 | 92% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 15 烟雾 + W3C 子集运行器（must-pass 25/25，known-gap xfail=0，unsupported skip=1，其中 Update 为 strict skip-exempt）+ CI required-lite + strict observer + strict-promotion-readiness 自动信号 + `ci-local.sh` 全链路通过 | 观察主干连续 3 次 CI 全绿后评估 strict required |
 
 **阶段退出条件：** MVP profile 查询可跑通；Explain/超时/取消可用。
 
@@ -155,7 +155,7 @@
 | P5-01 | 网关与服务接入边界 | 部分完成 | 92% | 全路由 + memory/rocksdb 工厂 + SPARQL Results JSON + 独立 `ontolith-management-server` 管理面 + 健康探测 | TLS；gRPC |
 | P5-02 | 鉴权 / 授权 | 部分完成 | 68% | Header/API-Key + Permission + `cluster:admin` + 管理面 read/write ACL | OIDC/JWT |
 | P5-03 | 租户隔离 | 部分完成 | 55% | 审计租户过滤 + `tenant_graph` 写入命名图 | 强制分库/行级 |
-| P5-04 | 审计日志 | 部分完成 | 80% | 内存 + `FileAuditLog` JSONL（`ONTOLITH_AUDIT_PATH`） | 哈希链/不可篡改 |
+| P5-04 | 审计日志 | 部分完成 | 90% | 内存 + `FileAuditLog` JSONL（`ONTOLITH_AUDIT_PATH`）+ 哈希链（`prev`/`hash` + `verify_chain`） | 加密级哈希升级（可选） |
 | P5-05 | 指标 / 追踪 / 日志基线 | 部分完成 | 82% | 延迟/状态码/错误计数 + access log + 管理面监控聚合视图（`/admin/monitoring`）+ runtime probe | Tracing 全链路 |
 
 **阶段退出条件：** 安全基线挂在真实请求路径；统一遥测可用。
@@ -166,9 +166,9 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P6-01 | OWL 2 RL 核心规则 | 未开始 | 5% | 类型占位 | 规则引擎骨架 |
+| P6-01 | OWL 2 RL 核心规则 | 部分完成 | 25% | `ForwardChainReasoner`：rdfs5/6/7/8/9 + prp-inv1 最小集、迭代闭包、`InferenceMode` 开关、4 测 | 扩展规则集（prp-spo2/prp-symp 等） |
 | P6-02 | SHACL 基线验证 | 未开始 | 0% | — | 约束子集定义 |
-| P6-03 | 可配置推理模式与保护 | 未开始 | 10% | `InferenceMode` | 超时/迭代上限护栏 |
+| P6-03 | 可配置推理模式与保护 | 部分完成 | 30% | `InferenceMode` + `max_iterations` 迭代上限 | 超时护栏 |
 
 **阶段退出条件：** RL 核心 + SHACL 基线 + 性能护栏可配置。
 
@@ -179,8 +179,8 @@
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
 | P7-01 | 在线重平衡与灾备演练 | 未开始 | 0% | — | 演练手册骨架 |
-| P7-02 | 性能回归门禁与 SLO 看板 | 未开始 | 0% | `benchmarks/` 空 | 基线基准用例 |
-| P7-03 | 发布流水线与回滚验证 | 部分完成 | 45% | [.github/workflows/ci.yml](../.github/workflows/ci.yml) + `scripts/ci-local.sh` + [L5-systemd-service.md](./L5-systemd-service.md) + runtime/management install scripts + 管理面 smoke + probe latency 阈值门禁 | 发布/回滚手册 |
+| P7-02 | 性能回归门禁与 SLO 看板 | 部分完成 | 25% | `crates/ontolith-storage/benches/storage_bench.rs` + `benchmarks/README.md` + CI `bench` 作业（冒烟基准） | 阈值断言/趋势记录 |
+| P7-03 | 发布流水线与回滚验证 | 部分完成 | 48% | [.github/workflows/ci.yml](../.github/workflows/ci.yml) + `scripts/ci-local.sh` + [L5-systemd-service.md](./L5-systemd-service.md) + runtime/management install scripts + 管理面 smoke + probe latency 阈值门禁 + license 审计 CI 作业 | 发布/回滚手册 |
 | P7-04 | 运维手册与证据包 | 未开始 | 0% | — | 按阶段产出 |
 
 **阶段退出条件：** CI 门禁、演练证据、发布/回滚手册齐备。
@@ -209,7 +209,7 @@
 | [~] SPARQL 查询基线 | 部分完成 | SELECT/ASK/CONSTRUCT 核心；非完整 1.1 |
 | [~] 单区域集群核心 | 部分完成 | 控制面可测+HTTP 演示；无多节点数据面 |
 | [~] 安全与审计基线 | 部分完成 | HTTP 鉴权+审计+JSONL 落盘；无 OIDC |
-| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（required-lite，must-pass 24/24，xfail=0，xpass=0，skip=1，Update 为 strict skip-exempt）+ strict observer（non-blocking）+ strict readiness 自动评估；无完整 W3C 套件 |
+| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（required-lite，must-pass 25/25，xfail=0，xpass=0，skip=1，Update 为 strict skip-exempt）+ strict observer（non-blocking）+ strict readiness 自动评估；无完整 W3C 套件 |
 | [ ] 核心 SLO 基线达标 | 未完成 | 无基准 |
 | [~] 恢复演练通过 | 部分完成 | RocksDB reopen 单测；无演练手册 |
 | [ ] 回滚演练通过 | 未完成 | 无发布链路 |
@@ -250,14 +250,14 @@
 
 | WBS | 名称 | 状态 | 完成度 | 主要缺口 |
 |-----|------|------|--------|----------|
-| WBS-01 | 核心运行时与知识模型 | 部分完成 | ~70% | L0+L1；Part II 序列化仍缺 |
-| WBS-02 | 解析与导入 | 部分完成 | ~80% | N-T/N-Q/Turtle/TriG/流式；JSON-LD 未做 |
+| WBS-01 | 核心运行时与知识模型 | 部分完成 | ~78% | L0+L1 + 序列化 Part II（`KoCodec`）；Statement KO 挂载仍简 |
+| WBS-02 | 解析与导入 | 部分完成 | ~85% | N-T/N-Q/Turtle/TriG/流式 + 序列化导出（N-T/N-Q）；JSON-LD 未做 |
 | WBS-03 | 存储与事务 | 部分完成 | ~85% | RocksDB 已接；真 MVCC / 纯 CF 扫描仍缺 |
-| WBS-04 | 查询与优化 | 部分完成 | ~88% | 完整核心代数+优化+绑定 + COUNT 聚合基线 + 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`|`、`^`）+ W3C 子集门禁；缺属性路径 `?` / 完整聚合 |
-| WBS-05 | 推理与 SHACL | 未开始 | ~5% | 全部实现 |
-| WBS-06 | 分布式运行时 | 部分完成 | ~75% | 控制面增强+HTTP；无多进程数据复制 |
-| WBS-07 | API、安全与集成 | 部分完成 | ~85% | 双后端网关+文件审计+Results JSON+ingest+部署脚本+独立管理面 API + ACL/probe；无 TLS/OIDC |
-| WBS-08 | 平台工程 | 部分完成 | ~31% | CI workflow + compliance crate + ci-local + systemd 运维文档 + 管理面 smoke + 窗口化 SLO 检查脚本；无发布回滚 |
+| WBS-04 | 查询与优化 | 部分完成 | ~90% | 完整核心代数+优化+绑定 + COUNT 聚合基线 + 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁；缺完整聚合 |
+| WBS-05 | 推理与 SHACL | 部分完成 | ~12% | 前向链推理最小集可用；SHACL 未开始 |
+| WBS-06 | 分布式运行时 | 部分完成 | ~78% | 控制面增强+HTTP + 数据面同步接口；无多进程数据复制 |
+| WBS-07 | API、安全与集成 | 部分完成 | ~87% | 双后端网关+文件审计（哈希链）+Results JSON+ingest+部署脚本+独立管理面 API + ACL/probe；无 TLS/OIDC |
+| WBS-08 | 平台工程 | 部分完成 | ~35% | CI workflow + compliance crate + ci-local + systemd 运维文档 + 管理面 smoke + 窗口化 SLO 检查 + 存储微基准 + license 审计；无发布回滚 |
 
 ---
 
@@ -265,13 +265,13 @@
 
 | 门禁/治理项 | 状态 | 证据 / 缺口 |
 |-------------|------|-------------|
-| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（must-pass 24/24，known-gap: xfail 0 / xpass 0，unsupported skip 1，Update 为 strict skip-exempt）+ CI required-lite / strict observer；非完整 W3C 官方 |
+| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（must-pass 25/25，known-gap: xfail 0 / xpass 0，unsupported skip 1，Update 为 strict skip-exempt）+ CI required-lite / strict observer；非完整 W3C 官方 |
 | [~] 故障注入（选主/复制/恢复） | 部分完成 | `ontolith-cluster` 分区注入/愈合与复制路径单测（14 测） |
 | [ ] 幂等写入验证 | 未开始 | 部分事务单测不足替代 |
-| [ ] 性能回归门禁 | 未开始 | `benchmarks/` 空 |
-| [~] 鉴权与租户隔离测试 | 部分完成 | `ontolith-security` 7 测（enforced/tenant/user/audit）+ server tenant_graph 路径 |
+| [~] 性能回归门禁 | 部分完成 | `storage_bench` 微基准（字典/写入提交/索引匹配）+ CI `bench` 冒烟作业；阈值断言未接 |
+| [~] 鉴权与租户隔离测试 | 部分完成 | `ontolith-security` 9 测（enforced/tenant/user/audit/哈希链）+ server tenant_graph 路径 |
 | [~] 管理平台控制面回归门禁 | 部分完成 | `ontolith-server` 管理面单测（ACL/probe）+ CI/local smoke + latency 阈值门禁 + 短窗口 SLO 统计（success%/p95） |
-| [ ] 许可证与漏洞审计 CI | 未开始 | — |
+| [~] 许可证与漏洞审计 CI | 部分完成 | CI `license-audit` 作业（`cargo-license` 枚举）；漏洞审计未接 |
 | [x] `cargo fmt` / `clippy -D warnings` CI | 已完成 | GitHub Actions + `scripts/ci-local.sh` |
 | [x] 全量测试 CI | 已完成 | workspace + rocksdb-smoke job + 本地 `./scripts/ci-local.sh`（2026-07-22 通过） |
 | [ ] Miri/sanitizer（敏感模块） | 未开始 | — |
@@ -285,17 +285,18 @@
 
 | Crate | 测试覆盖概要 | 路径 |
 |-------|--------------|------|
-| ontolith-core | KO 生命周期、资源规范化、canonical 一致性（12 测） | `crates/ontolith-core/src/domain/mod.rs` |
+| ontolith-core | KO 生命周期、资源规范化、canonical 一致性、序列化 Part II 往返/损坏拒绝（20 测） | `crates/ontolith-core/src/domain/mod.rs` |
 | ontolith-rdf | term/triple/quad/dataset/canonical（11 测） | `crates/ontolith-rdf/src/domain/mod.rs` |
-| ontolith-storage | 内存六索引 + RocksDB 耐久（reopen/abort/delete）+ codec（25 测） | `crates/ontolith-storage/src/infrastructure/**` |
+| ontolith-storage | 内存六索引 + 命名图六置换 + RocksDB 耐久（reopen/abort/delete）+ codec + 命名图匹配（30 测） | `crates/ontolith-storage/src/infrastructure/**` |
 | ontolith-transaction | begin/commit/abort、超时清理、active 上限、metrics（7 测） | `crates/ontolith-transaction/src/infrastructure/mod.rs` |
-| ontolith-query | SELECT/ASK/CONSTRUCT、JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES、COUNT 聚合（无 GROUP BY）、子查询基线（嵌套 SELECT + LIMIT）、属性路径最小集（`/`、`+`、`*`、`|`、`^`）、Explain/timeout（30 测） | `crates/ontolith-query/src/infrastructure/**` |
-| ontolith-parser | N-Triples/N-Quads/Turtle/TriG、流式事件、错误定位、Unsupported 格式（11 测） | `crates/ontolith-parser/src/infrastructure/**` |
-| ontolith-cluster | 选主、分区、复制、commit、rebalance、session sticky（14 测） | `crates/ontolith-cluster/src/infrastructure/mod.rs` |
-| ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）（7 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
+| ontolith-query | SELECT/ASK/CONSTRUCT、JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES、COUNT 聚合（无 GROUP BY）、子查询基线（嵌套 SELECT + LIMIT）、属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）、Explain/timeout（32 测） | `crates/ontolith-query/src/infrastructure/**` |
+| ontolith-parser | N-Triples/N-Quads/Turtle/TriG、流式事件、错误定位、Unsupported 格式、RDF 序列化导出（16 测） | `crates/ontolith-parser/src/infrastructure/**` |
+| ontolith-cluster | 选主、分区、复制、commit、rebalance、session sticky、数据面同步（17 测） | `crates/ontolith-cluster/src/infrastructure/mod.rs` |
+| ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）+ 哈希链验证/篡改检测（9 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
 | ontolith-observability | sink、导出、采样循环、Prometheus 文本（6 测） | `crates/ontolith-observability/src/**` |
 | ontolith-server | metrics、采样配置、HTTP query decode + 管理面 API/ACL/probe（15 测） | `crates/ontolith-server/src/{api,bootstrap,http,management}.rs` |
-| ontolith-compliance | R1 烟雾 15 + W3C 子集 profile 1（must-pass 24/24） | `crates/ontolith-compliance/tests/**` |
+| ontolith-reasoner | 前向链推理：rdfs5/6/7/8/9 + prp-inv1、`InferenceMode` 开关（4 测） | `crates/ontolith-reasoner/src/infrastructure/mod.rs` |
+| ontolith-compliance | R1 烟雾 15 + W3C 子集 profile 1（must-pass 25/25） | `crates/ontolith-compliance/tests/**` |
 
 ---
 
@@ -342,6 +343,11 @@
 | 2026-07-23 | GitHub Copilot | SLO 增量：新增 `scripts/check-management-slo-window.sh` 窗口检查脚本（success%/p95），并接入 local/CI 管理面 smoke；补充 management env 模板阈值参数。 |
 | 2026-07-23 | GitHub Copilot | 收工快照：提交 `14ac4a7`、`cd098db` 已推送至 `origin/main`；本地 `scripts/ci-local.sh`（含 management windowed SLO）通过，工作区与远端同步。 |
 | 2026-08-06 | Codex | 文档审计：依据 PLAN/PROGRESS/ADR 中的“进行中 / 草案 / 未完成”描述整理未完成项待办清单（§8），覆盖规划签批、架构定稿、ADR-0003 落地、天/周 SLO 与性能基线、R1 退出标准剩余项。 |
+| 2026-08-06 | Codex | L0：序列化 Part II（`domain/serialization.rs`：确定性二进制 `KoCodec`，KO 容器全量往返、损坏拒绝），core 20 测。 |
+| 2026-08-06 | Codex | L3：RDF 序列化导出（N-Triples/N-Quads 写出），parser 16 测；属性路径 `?`（zero-or-one，修饰符紧贴 IRI 消歧），query 32 测，W3C 子集 must-pass 24→25。 |
+| 2026-08-06 | Codex | L2：命名图六置换（`GraphIndex` 位置索引 + `matching_in_named_graphs`），并接入 `StorageEngine::quads_matching_in_graph`（RocksDB 覆盖），storage 30 测。 |
+| 2026-08-06 | Codex | L4：数据面同步（`DataPlaneSync`：快照迁移入队/`drain_syncs`/`SyncReceipt`），cluster 17 测；L5：审计哈希链（FNV-1a 64，`verify_chain` 全链校验），security 9 测。 |
+| 2026-08-06 | Codex | L6：前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1，`max_iterations` 护栏），reasoner 4 测；L7：存储微基准（`storage_bench` + `benchmarks/README.md`）+ CI `bench` / `license-audit` 作业。全量测试 183 通过。 |
 
 ---
 
@@ -388,13 +394,13 @@
 
 - [ ] 天/周窗口 SLO 自动化（systemd timer 或 Prometheus 规则）
 - [ ] 告警策略（连续失败次数 / 延迟异常突增）
-- [ ] `benchmarks/` 性能基线用例（P7-02，当前为空）
+- [x] `benchmarks/` 性能基线用例（P7-02）：`storage_bench` 微基准 + `benchmarks/README.md` + CI `bench` 作业
 - [ ] 核心 SLO 基线达标（R1 检查项，`docs/PROGRESS.md:213`）
 
 **R1 退出标准剩余项**
 
 - [ ] 多节点数据面（多进程 Raft / openraft，先补 ADR）
-- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 24/24）
+- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 25/25）
 - [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
 - [ ] 发布流水线与回滚演练通过（`docs/PROGRESS.md:215`）
 - [ ] R1 退出标准全表勾选（`docs/PROGRESS.md:375`）

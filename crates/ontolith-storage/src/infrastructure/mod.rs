@@ -1081,6 +1081,46 @@ mod tests {
     }
 
     #[test]
+    fn storage_matches_named_graph_quads_by_bound_positions() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let txn = TxnId::new(11);
+        let graph = Iri::new("urn:graph:main");
+        for (s, p, o) in [
+            (1u64, "urn:p", "urn:o1"),
+            (1u64, "urn:q", "urn:o2"),
+            (2u64, "urn:p", "urn:o3"),
+        ] {
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![WriteOperation::PutQuad(Quad::in_named_graph(
+                        Triple::new(NodeId::new(s), Iri::new(p), Term::Iri(Iri::new(o))),
+                        graph.clone(),
+                    ))],
+                })
+                .expect("stage");
+        }
+        engine.commit_transaction(txn).expect("commit");
+
+        let all = engine.quads_matching_in_graph(&graph, None, None, None, None);
+        assert_eq!(all.len(), 3);
+        let by_subject =
+            engine.quads_matching_in_graph(&graph, Some(NodeId::new(1)), None, None, None);
+        assert_eq!(by_subject.len(), 2);
+        let exact = engine.quads_matching_in_graph(
+            &graph,
+            Some(NodeId::new(2)),
+            Some(&Iri::new("urn:p")),
+            Some(&Term::Iri(Iri::new("urn:o3"))),
+            None,
+        );
+        assert_eq!(exact.len(), 1);
+        let other =
+            engine.quads_matching_in_graph(&Iri::new("urn:graph:other"), None, None, None, None);
+        assert!(other.is_empty());
+    }
+
+    #[test]
     fn transactional_write_service_commits_storage_and_transaction() {
         let tx_manager = InMemoryTransactionManager::new();
         let storage = InMemoryStorageEngine::new();

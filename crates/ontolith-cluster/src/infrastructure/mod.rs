@@ -6,16 +6,17 @@
 //! (ADR-0002).
 
 use crate::application::{
-    ClusterRuntime, ElectionService, FailoverController, FaultInjector, MetadataService,
-    RebalanceService, Replicator, ShardRouter,
+    ClusterRuntime, DataPlaneSync, ElectionService, FailoverController, FaultInjector,
+    MetadataService, RebalanceService, Replicator, ShardRouter,
 };
 use crate::domain::{
     ClusterEpoch, ClusterNode, ClusterNodeId, ClusterStatus, FailoverEvent, LogEntry, LogPayload,
     Membership, NetworkPartition, NodeRole, NodeStatus, ReadRoute, RebalancePlan, ReplicaSet,
-    SessionId, ShardAssignment, ShardId, ShardMap, SlotRange, WriteRoute,
+    SessionId, ShardAssignment, ShardId, ShardMap, SlotRange, SyncReceipt, WriteRoute,
 };
 use ontolith_core::domain::ConsistencyLevel;
 use ontolith_core::error::OntolithError;
+use ontolith_storage::domain::SnapshotRef;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -59,7 +60,19 @@ struct ClusterState {
     partition: NetworkPartition,
     failover_events: Vec<FailoverEvent>,
     rebalance_history: Vec<RebalancePlan>,
+    pending_syncs: Vec<PendingSync>,
+    sync_history: Vec<SyncReceipt>,
     now_tick: u64,
+}
+
+/// Queued snapshot transfer awaiting completion.
+#[derive(Debug, Clone)]
+struct PendingSync {
+    source: ClusterNodeId,
+    target: ClusterNodeId,
+    shard_id: ShardId,
+    slots: SlotRange,
+    snapshot: SnapshotRef,
 }
 
 impl ClusterState {
@@ -84,6 +97,8 @@ impl ClusterState {
             partition: NetworkPartition::default(),
             failover_events: Vec::new(),
             rebalance_history: Vec::new(),
+            pending_syncs: Vec::new(),
+            sync_history: Vec::new(),
             now_tick: 0,
         }
     }
@@ -897,6 +912,67 @@ impl RebalanceService for InMemoryClusterRuntime {
     }
 }
 
+impl DataPlaneSync for InMemoryClusterRuntime {
+    fn transfer_snapshot(
+        &self,
+        source: &ClusterNodeId,
+        target: &ClusterNodeId,
+        shard_id: ShardId,
+        slots: SlotRange,
+        snapshot: SnapshotRef,
+    ) -> Result<(), OntolithError> {
+        self.with_mut(|s| {
+            if source == target {
+                return Err(OntolithError::InvalidArgument(
+                    "data plane transfer requires distinct source and target",
+                ));
+            }
+            if !s.nodes.contains_key(source.as_str()) || !s.nodes.contains_key(target.as_str()) {
+                return Err(OntolithError::NotFound(
+                    "data plane transfer requires registered source and target nodes",
+                ));
+            }
+            s.pending_syncs.push(PendingSync {
+                source: source.clone(),
+                target: target.clone(),
+                shard_id,
+                slots,
+                snapshot,
+            });
+            Ok(())
+        })?
+    }
+
+    fn pending_syncs(&self) -> usize {
+        self.with_ref(|s| s.pending_syncs.len()).unwrap_or_default()
+    }
+
+    fn drain_syncs(&self) -> Result<Vec<SyncReceipt>, OntolithError> {
+        self.with_mut(|s| {
+            let pending = std::mem::take(&mut s.pending_syncs);
+            let mut receipts = Vec::with_capacity(pending.len());
+            for transfer in pending {
+                let receipt = SyncReceipt {
+                    source: transfer.source,
+                    target: transfer.target,
+                    shard_id: transfer.shard_id,
+                    slots: transfer.slots,
+                    transferred_entries: transfer.snapshot.snapshot_id,
+                    completed_at_epoch: s.epoch,
+                };
+                s.sync_history.push(receipt.clone());
+                receipts.push(receipt);
+            }
+            Ok(receipts)
+        })?
+    }
+
+    fn sync_history(&self) -> Vec<SyncReceipt> {
+        self.with_ref(|s| s.sync_history.clone())
+            .unwrap_or_default()
+    }
+}
+
 impl FaultInjector for InMemoryClusterRuntime {
     fn inject_partition(&self, isolated: Vec<ClusterNodeId>) -> Result<(), OntolithError> {
         self.with_mut(|s| {
@@ -1123,5 +1199,76 @@ mod tests {
         let (rt, leader, f1, _) = runtime_three_nodes();
         let result = rt.campaign(&f1).unwrap();
         assert_eq!(result, Some(leader));
+    }
+
+    #[test]
+    fn data_plane_transfer_queues_then_drains_receipts() {
+        let (rt, leader, f1, _) = runtime_three_nodes();
+        let slots = SlotRange { start: 0, end: 255 };
+        let snapshot = SnapshotRef {
+            snapshot_id: 42,
+            read_txn_id: None,
+            consistency: ConsistencyLevel::Strong,
+        };
+
+        assert_eq!(rt.pending_syncs(), 0);
+        rt.transfer_snapshot(&leader, &f1, ShardId::new(0), slots, snapshot)
+            .unwrap();
+        assert_eq!(rt.pending_syncs(), 1);
+
+        let receipts = rt.drain_syncs().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].source, leader);
+        assert_eq!(receipts[0].target, f1);
+        assert_eq!(receipts[0].slots, slots);
+        assert_eq!(receipts[0].transferred_entries, 42);
+        assert_eq!(rt.pending_syncs(), 0);
+        assert_eq!(rt.sync_history().len(), 1);
+    }
+
+    #[test]
+    fn data_plane_rejects_same_node_and_unregistered_nodes() {
+        let (rt, leader, _, _) = runtime_three_nodes();
+        let slots = SlotRange { start: 0, end: 1 };
+        let snapshot = SnapshotRef {
+            snapshot_id: 1,
+            read_txn_id: None,
+            consistency: ConsistencyLevel::Strong,
+        };
+
+        let same = rt.transfer_snapshot(&leader, &leader, ShardId::new(0), slots, snapshot);
+        assert!(matches!(same, Err(OntolithError::InvalidArgument(_))));
+
+        let ghost = ClusterNodeId::new("ghost");
+        let missing = rt.transfer_snapshot(&leader, &ghost, ShardId::new(0), slots, snapshot);
+        assert!(matches!(missing, Err(OntolithError::NotFound(_))));
+        assert_eq!(rt.pending_syncs(), 0);
+    }
+
+    #[test]
+    fn rebalance_plans_can_be_migrated_through_data_plane() {
+        let (rt, leader, f1, _) = runtime_three_nodes();
+        let plans = rt.rebalance().unwrap();
+        let mut queued = 0usize;
+        for plan in plans {
+            // Source/target are the owning shard leaders; MVP uses the cluster
+            // leader as the shard owner for both sides of the handoff.
+            rt.transfer_snapshot(
+                &leader,
+                &f1,
+                plan.to_shard,
+                plan.slots,
+                SnapshotRef {
+                    snapshot_id: 7,
+                    read_txn_id: None,
+                    consistency: ConsistencyLevel::Strong,
+                },
+            )
+            .unwrap();
+            queued += 1;
+        }
+        assert_eq!(rt.pending_syncs(), queued);
+        assert_eq!(rt.drain_syncs().unwrap().len(), queued);
+        assert_eq!(rt.sync_history().len(), queued);
     }
 }

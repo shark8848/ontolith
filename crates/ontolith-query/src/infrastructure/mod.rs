@@ -830,4 +830,89 @@ mod tests {
         assert_eq!(result.solutions.len(), 1);
         assert_eq!(result.solutions[0].get("s"), Some(&BoundValue::Node(alice)));
     }
+
+    #[test]
+    fn property_path_zero_or_one_matches_self_and_one_step() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/alice");
+        let bob = dict.encode_node("http://ex.org/bob");
+        let carol = dict.encode_node("http://ex.org/carol");
+
+        let txn = TxnId::new(30);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/bob")),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            txn,
+            Triple {
+                subject: bob,
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/carol")),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s ?o WHERE { ?s <http://ex.org/knows>? ?o }",
+            ))
+            .unwrap();
+
+        // a -> {a, b}, b -> {b, c}, c -> {c}
+        assert_eq!(result.solutions.len(), 5);
+        let pairs: Vec<(BoundValue, BoundValue)> = result
+            .solutions
+            .iter()
+            .map(|s| (s.get("s").unwrap().clone(), s.get("o").unwrap().clone()))
+            .collect();
+        assert!(pairs.contains(&(BoundValue::Node(alice), BoundValue::Node(alice))));
+        assert!(pairs.contains(&(BoundValue::Node(alice), BoundValue::Node(bob))));
+        assert!(pairs.contains(&(BoundValue::Node(bob), BoundValue::Node(carol))));
+        assert!(pairs.contains(&(BoundValue::Node(carol), BoundValue::Node(carol))));
+    }
+
+    #[test]
+    fn whitespace_before_question_mark_is_a_variable_not_modifier() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/alice");
+        let txn = TxnId::new(31);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/name"),
+                object: Term::Literal(LiteralValue::String("Alice".into())),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s ?o WHERE { ?s <http://ex.org/name> ?o }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("o"),
+            Some(&BoundValue::Literal(LiteralValue::String("Alice".into())))
+        );
+    }
 }

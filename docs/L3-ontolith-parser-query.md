@@ -1,7 +1,7 @@
 # L3 — Parser & Query Engine 完整功能说明
 
 文档 ID: IMPL-L3-0001  
-版本: 2.4.0  
+版本: 2.6.0  
 状态: Implemented (full L3 core, not MVP-only)  
 日期: 2026-07-22  
 对应 crate:
@@ -48,10 +48,11 @@ SPARQL / RDF text
 | 解绑定 `Solution` 结果（非仅 row_count） | ✅ |
 | timeout + 协作式 cancel | ✅ |
 | 经 L2 SPO/POS/OSP 访问 | ✅ |
-| 属性路径最小集（`/`、`+`、`*`、`|`、`^`） | ✅ |
+| 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`） | ✅ |
+| RDF 序列化导出（N-Triples / N-Quads 写出，`SerializeFormat`） | ✅ |
 | JSON-LD | ❌ 明确 Unsupported |
 | SPARQL Update / DESCRIBE 执行 | ❌ 解析识别，执行 Unsupported |
-| 属性路径扩展（`?`、分组/嵌套更完整 1.1 语法） | ❌ 后续增强 |
+| 属性路径扩展（分组/嵌套更完整 1.1 语法） | ❌ 后续增强 |
 | 高级子查询 / EXISTS / 完整聚合（GROUP BY/HAVING） / 服务联邦 | ❌ 后续增强 |
 | 流式 Result 协议（网络层） | ❌ 属 L5 接入层 |
 
@@ -293,3 +294,5 @@ logical 含 `optimize:before->after`。
 | 2026-07-22 | 2.2.0 | 新增嵌套 SELECT+LIMIT 子查询基线与对应测试；W3C subset 子查询用例可通过 |
 | 2026-07-22 | 2.3.0 | 新增属性路径序列（iri/iri）基线与对应测试；W3C subset 属性路径基线用例可通过 |
 | 2026-07-22 | 2.4.0 | 新增属性路径高级算子最小集（`+`、`*`、`|`、`^`）与对应测试；W3C subset 路径最小集用例可通过 |
+| 2026-08-06 | 2.5.0 | 新增 RDF 序列化导出（`domain/serialize.rs`：N-Triples/N-Quads 写出、字面量转义与确定性词法、Dataset 按格式过滤），+5 测 |
+| 2026-08-06 | 2.6.0 | 新增属性路径 `?`（zero-or-one）：解析（修饰符紧贴 IRI，避免与变量 `?x` 混淆）、执行（自身 ∪ 单步去重）、W3C 子集新增 must-pass 用例（25/25），+2 测 |

@@ -1,7 +1,7 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.2.0  
+版本: 2.3.0  
 状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON + management server)  
 日期: 2026-07-23  
 对应 crate:
@@ -191,7 +191,7 @@ systemctl --user status ontolith-server
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
-| ontolith-security | 5 | 鉴权/权限/审计 |
+| ontolith-security | 9 | 鉴权/权限/审计（含哈希链完整性验证） |
 | ontolith-server | **8** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen** |
 
 ---
@@ -200,7 +200,7 @@ systemctl --user status ontolith-server
 
 1. 无 TLS / HTTP/2 / 完整框架中间件链  
 2. 鉴权非 OIDC/JWT  
-3. 审计仍进程内（不落盘）  
+3. 审计哈希链为完整性级（FNV-1a 64，非加密级；加密升级保持同 schema）  
 4. 租户隔离为可选命名图，非强制全库分片  
 5. SPARQL Results JSON 为兼容子集（非完整 XML/CSV）  
 
@@ -215,6 +215,7 @@ systemctl --user status ontolith-server
 | 2026-07-23 | 2.2.0 | 新增独立 `ontolith-management-server` 管理面（二进制 + 统一配置/监控/数据管理 API） |
 | 2026-07-23 | 2.2.1 | 管理面 ACL 分离：支持 read/write key 双轨控制（`X-Ontolith-Management-Key`） |
 | 2026-07-23 | 2.2.2 | 管理面 runtime probe：健康/监控响应增加运行时连通性与探测延迟信息 |
+| 2026-08-06 | 2.3.0 | 审计哈希链：`FileAuditLog` 每条追加 `prev`/`hash` 字段（FNV-1a 64，genesis=0），reopen 恢复链尾，新增 `verify_chain()` 全链校验与篡改检测，+2 测 |
 
 ## 8. 审计落盘与权限（v2.1）
 
@@ -222,6 +223,7 @@ systemctl --user status ontolith-server
 |------|------|
 | 内存审计 | `InMemoryAuditLog`（请求路径默认） |
 | 文件审计 | `FileAuditLog` JSONL；`ONTOLITH_AUDIT_PATH` 或 rocksdb 时 `$DATA_DIR/audit.jsonl` |
+| 哈希链 | 每条 JSONL 含 `prev`/`hash`（FNV-1a 64）；`verify_chain()` 全链校验 |
 | 权限 | 默认角色含 `cluster:admin`；集群写路径要求该权限 |
 
 环境变量：

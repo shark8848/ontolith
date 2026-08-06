@@ -7,3 +7,7 @@ edition = "2024"
 ontolith-core = { path = "../ontolith-core" }
 ontolith-rdf = { path = "../ontolith-rdf" }
 ontolith-query = { path = "../ontolith-query" }
+ontolith-storage = { path = "../ontolith-storage", default-features = false }
+
+[dev-dependencies]
+ontolith-transaction = { path = "../ontolith-transaction" }

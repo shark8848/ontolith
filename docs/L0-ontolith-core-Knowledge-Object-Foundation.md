@@ -1,7 +1,7 @@
 # L0 — ontolith-core Knowledge Object 基座功能说明
 
 文档 ID: IMPL-L0-0001  
-版本: 1.0.0  
+版本: 1.1.0  
 状态: Implemented  
 日期: 2026-07-17  
 对应 crate: `crates/ontolith-core`  
@@ -317,7 +317,7 @@ CanonicalEncode, CanonicalWriter
 | IRI 校验 | 基线启发式 | 完整 IRI/URI 规范可选 feature |
 | Literal Decimal | `f64` 位型确定性 | 十进制任意精度类型 |
 | Canonical 规范文档 | 代码即规范 | 独立 RFC/编码规范文档（P1-04） |
-| 序列化 Part II | 未做 | SAS-0401 Part II Metadata/Serialization |
+| 序列化 Part II | 已做（确定性二进制 `KoCodec`，含 KO 容器全量往返） | 独立编码规范 RFC（P1-04 关联） |
 | 应用服务 | application 占位 | 若需要 KO 仓储端口再扩 |
 
 ---
@@ -327,6 +327,7 @@ CanonicalEncode, CanonicalWriter
 | 日期 | 版本 | 说明 |
 |------|------|------|
 | 2026-07-17 | 1.0.0 | 首版：L0 实现同步功能说明 |
+| 2026-08-06 | 1.1.0 | 序列化 Part II：`domain/serialization.rs` 新增无依赖确定性二进制编解码（`KoCodec`/`encode_ko`/`decode_ko`），覆盖 Header/Metadata/Graph/Dataset/Ontology/Rule/Version 往返与损坏拒绝，+8 测 |
 
 ---
 

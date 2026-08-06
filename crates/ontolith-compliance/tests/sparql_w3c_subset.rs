@@ -564,6 +564,21 @@ fn cases() -> Vec<W3cCase> {
             }),
         },
         W3cCase {
+            id: "w3c-property-path-zero-or-one",
+            source: "W3C SPARQL 1.1 Query tests (property path)",
+            feature: "Property path ?",
+            class: CaseClass::MustPass,
+            reason: "zero-or-one matches the node itself plus one step",
+            strict_skip_exempt: false,
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/property_path_zero_or_one.rq"),
+            expected: Some(ExpectedOutcome::SelectRows {
+                rows: 2,
+                vars: &["o"],
+            }),
+        },
+        W3cCase {
             id: "w3c-property-path-star-bob",
             source: "W3C SPARQL 1.1 Query tests (property path)",
             feature: "Property path *",

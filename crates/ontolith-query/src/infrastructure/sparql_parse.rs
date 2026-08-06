@@ -535,11 +535,12 @@ impl<'a> SparqlParser<'a> {
         } else {
             match self.parse_var_or_term(false) {
                 Ok(TermPattern::Iri(_)) => {
+                    // Path modifiers (`?`/`*`/`+`) bind tightly to the IRI
+                    // with no whitespace; otherwise `?o` is a variable object.
+                    let adjacent_modifier =
+                        matches!(self.peek_char(), Some('?') | Some('*') | Some('+'));
                     self.skip();
-                    matches!(
-                        self.peek_char(),
-                        Some('/') | Some('|') | Some('+') | Some('*')
-                    )
+                    matches!(self.peek_char(), Some('/') | Some('|')) || adjacent_modifier
                 }
                 _ => false,
             }
@@ -616,13 +617,17 @@ impl<'a> SparqlParser<'a> {
             }
         };
 
-        self.skip();
+        // Path modifiers bind directly to the path element: a whitespace
+        // separated `?x` is a variable object, not a `?` modifier.
         if self.peek_char() == Some('+') {
             self.bump();
             base = PathExpression::OneOrMore(Box::new(base));
         } else if self.peek_char() == Some('*') {
             self.bump();
             base = PathExpression::ZeroOrMore(Box::new(base));
+        } else if self.peek_char() == Some('?') {
+            self.bump();
+            base = PathExpression::ZeroOrOne(Box::new(base));
         }
 
         Ok(base)

@@ -1,7 +1,7 @@
 # L2 — Storage & Transaction Kernel 功能说明
 
 文档 ID: IMPL-L2-0001  
-版本: 3.0.0  
+版本: 3.1.0  
 状态: Implemented (in-memory + RocksDB durable adapter)  
 日期: 2026-07-17  
 对应 crate:
@@ -178,7 +178,7 @@ ontolith-storage/src/
 1. RocksDB 读路径仍依赖 **打开时重建的内存二级索引**（非纯 CF 前缀扫描）。  
 2. **无真 MVCC 版本链** — 读 = 已提交 ∪ 本 txn staged。  
 3. **IndexMaintenance::Async** 仅枚举预留。  
-4. **命名图** 无六置换，仅 graph→quad。  
+4. **命名图六置换** 已补（`GraphIndex` 新增 `by_subject`/`by_predicate`/`by_object` + `matching_in_named_graphs`）；默认图语句仍走 `TripleIndexes`。  
 5. **字典 GC / 压缩 / vacuum** 未做。  
 6. 构建需要本机能编译 `librocksdb-sys`（C++ 工具链）。  
 7. SOP/PSO/OPS 已维护，L3 matching 组合过滤；未单独暴露 SOP 扫描 API。  
@@ -192,6 +192,7 @@ ontolith-storage/src/
 | 2026-07-17 | 1.0.0 | 内存基线：SPO/POS/OSP + WAL + 事务文档 |
 | 2026-07-17 | 2.0.0 | 增量六索引、精确删/去重、GraphIndex、Stats、ConsistencyLevel、matching；L3 接入 |
 | 2026-07-17 | 3.0.0 | RocksDB 适配（CF 布局、崩溃恢复、feature 门控、ADR-0001） |
+| 2026-08-06 | 3.1.0 | 命名图六置换索引：`GraphIndex` 位置索引（subject/predicate/object）与组合匹配 API，插入/删除/按主语删除同步维护，+4 测 |
 
 ---
 

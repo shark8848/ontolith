@@ -403,13 +403,13 @@ sudo -v# Ontolith 开发计划
 **SLO 与性能基线（P1）**
 
 - [ ] 天/周窗口 SLO 自动化与告警（systemd timer 或 Prometheus 规则）
-- [ ] `benchmarks/` 性能基线用例（P7-02）
+- [x] `benchmarks/` 性能基线用例（P7-02）：`storage_bench` + `benchmarks/README.md` + CI `bench` 作业
 - [ ] 核心 SLO 基线达标（R1）
 
 **R1 退出标准剩余项**
 
 - [ ] 多节点数据面（多进程 Raft / openraft，先补 ADR）
-- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 24/24）
+- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 25/25）
 - [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
 - [ ] 发布流水线与回滚演练通过
 - [ ] R1 退出标准全表勾选

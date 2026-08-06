@@ -15,6 +15,7 @@ mod consistency;
 mod identity;
 mod knowledge;
 mod resource;
+mod serialization;
 
 pub use canonical::{CanonicalEncode, CanonicalWriter};
 pub use consistency::ConsistencyLevel;
@@ -26,6 +27,7 @@ pub use knowledge::{
     RuleObject, VersionObject,
 };
 pub use resource::{BlankNodeId, BoundResource, Iri, LanguageTag, Literal, LiteralValue, Resource};
+pub use serialization::{KoCodec, decode_ko, encode_ko};
 
 /// Stable internal node identifier assigned by the dictionary layer.
 ///

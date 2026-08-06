@@ -60,17 +60,17 @@ Current must-pass increment:
 - Aggregate COUNT(*)
 - Subquery (nested SELECT + LIMIT baseline)
 - Property path sequence (iri/iri baseline)
-- Property path `+` / `*` / `|` / `^` minimal set baseline
+- Property path `+` / `*` / `?` / `|` / `^` minimal set baseline
 - ASK false / fixed-subject join / VALUES tuple / DISTINCT+OFFSET variants
 
 Current unsupported:
 
-- Property path `?` operator and grouped/nested path forms beyond current minimal set
+- Grouped/nested path forms beyond current minimal set
 - SPARQL Update (strict skip-exempt)
 
 ## Out of scope (R1+)
 
-- Property path `?` operator and grouped/nested path forms beyond current minimal set
+- Grouped/nested path forms beyond current minimal set
 - Advanced subquery forms beyond nested SELECT + LIMIT baseline
 - Full aggregates/GROUP BY/HAVING beyond COUNT baseline
 - SPARQL Update
@@ -86,7 +86,7 @@ Current unsupported:
 
 Current profile snapshot (v0, 2026-07-23):
 
-- must-pass: 24
+- must-pass: 25
 - known-gap: 0
 - unsupported: 1 (SPARQL Update, strict skip-exempt)
 

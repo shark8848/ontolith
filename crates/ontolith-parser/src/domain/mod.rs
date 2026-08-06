@@ -2,6 +2,10 @@
 
 use ontolith_rdf::domain::{Dataset, Quad, Triple};
 
+mod serialize;
+
+pub use serialize::{SerializeFormat, serialize_dataset, serialize_quad, serialize_triple};
+
 /// Concrete RDF syntax supported by the parser surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseFormat {

@@ -1,7 +1,7 @@
 # L4 — Cluster & Consistency
 
 文档 ID: IMPL-L4-0001  
-版本: 2.0.0  
+版本: 2.1.0  
 状态: Implemented (single-region in-process + L5 HTTP surface)  
 日期: 2026-07-17  
 对应 crate: `crates/ontolith-cluster`（+ L5 `/cluster/*`）
@@ -99,7 +99,7 @@ let plans = rt.rebalance()?;
 
 | Crate | 数量 |
 |-------|------|
-| ontolith-cluster | **14**（+session/partition/commit/rebalance） |
+| ontolith-cluster | **17**（+session/partition/commit/rebalance + data-plane sync） |
 | ontolith-server | **9**（+`/cluster` API） |
 
 ---
@@ -107,7 +107,7 @@ let plans = rt.rebalance()?;
 ## 6. 边界
 
 1. 单进程内存控制面，非生产多机 HA  
-2. Rebalance 只改 slot 映射，不做数据搬迁  
+2. Rebalance 已配套数据面搬迁通道（`DataPlaneSync`：快照传输入队/完成/回执）；真实多进程 RPC 传输未实现  
 3. 数据面仍由各节点本地 L2 引擎负责  
 4. 生产 Raft 需新 ADR（openraft）  
 
@@ -119,3 +119,4 @@ let plans = rt.rebalance()?;
 |------|------|------|
 | 2026-07-17 | 1.0.0 | 单区域 MVP 闭环 |
 | 2026-07-17 | 2.0.0 | session 粘性、quorum commit、partition、rebalance、L5 `/cluster` |
+| 2026-08-06 | 2.1.0 | 数据面同步（`DataPlaneSync`）：快照式 slot 迁移入队/`drain_syncs` 完成/`SyncReceipt` 回执，含源目标节点校验；`rebalance` 计划可经数据面搬迁，+3 测 |

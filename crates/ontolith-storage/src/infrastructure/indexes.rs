@@ -152,6 +152,12 @@ pub struct GraphIndex {
     /// graph IRI string → quads (default graph not stored here)
     pub by_graph: HashMap<String, Vec<Quad>>,
     pub all: Vec<Quad>,
+    /// Named-graph position indexes (six-permutation equivalent for quads).
+    /// Default-graph triples are covered by [`TripleIndexes`]; these maps hold
+    /// only quads carrying an explicit graph name.
+    pub by_subject: HashMap<NodeId, Vec<Quad>>,
+    pub by_predicate: HashMap<String, Vec<Quad>>,
+    pub by_object: HashMap<Vec<u8>, Vec<Quad>>,
 }
 
 impl GraphIndex {
@@ -162,8 +168,18 @@ impl GraphIndex {
         }
         self.all.push(quad.clone());
         if let Some(g) = &quad.graph_name {
-            self.by_graph
-                .entry(g.as_str().to_owned())
+            let graph = g.as_str().to_owned();
+            self.by_graph.entry(graph).or_default().push(quad.clone());
+            self.by_subject
+                .entry(quad.triple.subject)
+                .or_default()
+                .push(quad.clone());
+            self.by_predicate
+                .entry(quad.triple.predicate.as_str().to_owned())
+                .or_default()
+                .push(quad.clone());
+            self.by_object
+                .entry(object_key(&quad.triple.object))
                 .or_default()
                 .push(quad.clone());
         }
@@ -181,6 +197,15 @@ impl GraphIndex {
         {
             list.retain(|q| q != quad);
         }
+        remove_quad_from_position(self.by_subject.get_mut(&quad.triple.subject), quad);
+        remove_quad_from_position(
+            self.by_predicate.get_mut(quad.triple.predicate.as_str()),
+            quad,
+        );
+        remove_quad_from_position(
+            self.by_object.get_mut(&object_key(&quad.triple.object)),
+            quad,
+        );
         true
     }
 
@@ -200,6 +225,9 @@ impl GraphIndex {
             {
                 list.retain(|x| x != q);
             }
+            remove_quad_from_position(self.by_subject.get_mut(&q.triple.subject), q);
+            remove_quad_from_position(self.by_predicate.get_mut(q.triple.predicate.as_str()), q);
+            remove_quad_from_position(self.by_object.get_mut(&object_key(&q.triple.object)), q);
         }
         self.all.retain(|q| q.triple.subject != subject);
         before - self.all.len()
@@ -212,7 +240,173 @@ impl GraphIndex {
             .unwrap_or_default()
     }
 
+    pub fn by_subject_in_named_graphs(&self, subject: NodeId) -> Vec<Quad> {
+        self.by_subject.get(&subject).cloned().unwrap_or_default()
+    }
+
+    pub fn by_predicate_in_named_graphs(&self, predicate: &Iri) -> Vec<Quad> {
+        self.by_predicate
+            .get(predicate.as_str())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn by_object_in_named_graphs(&self, object: &Term) -> Vec<Quad> {
+        self.by_object
+            .get(&object_key(object))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Pick the most selective bound position over named-graph indexes, then
+    /// filter by the remaining bound positions and the target graph.
+    pub fn matching_in_named_graphs(
+        &self,
+        graph: Option<&Iri>,
+        subject: Option<NodeId>,
+        predicate: Option<&Iri>,
+        object: Option<&Term>,
+    ) -> Vec<Quad> {
+        let mut quads = if let Some(s) = subject {
+            self.by_subject_in_named_graphs(s)
+        } else if let Some(p) = predicate {
+            self.by_predicate_in_named_graphs(p)
+        } else if let Some(o) = object {
+            self.by_object_in_named_graphs(o)
+        } else {
+            self.all
+                .iter()
+                .filter(|q| q.graph_name.is_some())
+                .cloned()
+                .collect()
+        };
+        if let Some(p) = predicate {
+            quads.retain(|q| &q.triple.predicate == p);
+        }
+        if let Some(o) = object {
+            quads.retain(|q| &q.triple.object == o);
+        }
+        if let Some(s) = subject {
+            quads.retain(|q| q.triple.subject == s);
+        }
+        if let Some(g) = graph {
+            quads.retain(|q| q.graph_name.as_ref() == Some(g));
+        }
+        quads
+    }
+
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+}
+
+fn remove_quad_from_position(list: Option<&mut Vec<Quad>>, quad: &Quad) {
+    if let Some(v) = list {
+        v.retain(|q| q != quad);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ontolith_core::domain::{Iri, NodeId};
+
+    fn named_quad(s: u64, p: &str, o: &str, g: &str) -> Quad {
+        Quad::in_named_graph(
+            Triple::new(NodeId::new(s), Iri::new(p), Term::Iri(Iri::new(o))),
+            Iri::new(g),
+        )
+    }
+
+    fn default_quad(s: u64, p: &str, o: &str) -> Quad {
+        Quad::in_default_graph(Triple::new(
+            NodeId::new(s),
+            Iri::new(p),
+            Term::Iri(Iri::new(o)),
+        ))
+    }
+
+    #[test]
+    fn named_graph_six_permutation_indexes_are_maintained() {
+        let mut idx = GraphIndex::default();
+        let q1 = named_quad(1, "urn:p", "urn:o1", "urn:g");
+        let q2 = named_quad(1, "urn:q", "urn:o2", "urn:g");
+        let q3 = named_quad(2, "urn:p", "urn:o1", "urn:g2");
+        assert!(idx.insert(&q1));
+        assert!(idx.insert(&q2));
+        assert!(idx.insert(&q3));
+        assert!(!idx.insert(&q1)); // duplicate no-op
+
+        assert_eq!(idx.by_subject_in_named_graphs(NodeId::new(1)).len(), 2);
+        assert_eq!(
+            idx.by_predicate_in_named_graphs(&Iri::new("urn:p")).len(),
+            2
+        );
+        assert_eq!(
+            idx.by_object_in_named_graphs(&Term::Iri(Iri::new("urn:o1")))
+                .len(),
+            2
+        );
+        assert_eq!(idx.by_graph_name(&Iri::new("urn:g")).len(), 2);
+    }
+
+    #[test]
+    fn default_graph_quads_are_not_position_indexed() {
+        let mut idx = GraphIndex::default();
+        idx.insert(&default_quad(1, "urn:p", "urn:o"));
+        assert_eq!(idx.all.len(), 1);
+        assert!(idx.by_subject_in_named_graphs(NodeId::new(1)).is_empty());
+        assert!(idx.by_graph_name(&Iri::new("urn:g")).is_empty());
+    }
+
+    #[test]
+    fn matching_in_named_graphs_filters_by_bound_positions() {
+        let mut idx = GraphIndex::default();
+        idx.insert(&named_quad(1, "urn:p", "urn:o1", "urn:g"));
+        idx.insert(&named_quad(1, "urn:p", "urn:o2", "urn:g"));
+        idx.insert(&named_quad(2, "urn:p", "urn:o2", "urn:g2"));
+
+        let matched = idx.matching_in_named_graphs(
+            Some(&Iri::new("urn:g")),
+            Some(NodeId::new(1)),
+            Some(&Iri::new("urn:p")),
+            None,
+        );
+        assert_eq!(matched.len(), 2);
+
+        let exact = idx.matching_in_named_graphs(
+            Some(&Iri::new("urn:g2")),
+            Some(NodeId::new(2)),
+            Some(&Iri::new("urn:p")),
+            Some(&Term::Iri(Iri::new("urn:o2"))),
+        );
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].triple.subject, NodeId::new(2));
+
+        assert_eq!(
+            idx.matching_in_named_graphs(Some(&Iri::new("urn:g")), None, None, None)
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn removal_updates_position_indexes() {
+        let mut idx = GraphIndex::default();
+        let q = named_quad(1, "urn:p", "urn:o", "urn:g");
+        idx.insert(&q);
+        assert!(idx.remove_exact(&q));
+        assert!(idx.all.is_empty());
+        assert!(idx.by_subject_in_named_graphs(NodeId::new(1)).is_empty());
+        assert!(
+            idx.by_predicate_in_named_graphs(&Iri::new("urn:p"))
+                .is_empty()
+        );
+
+        idx.insert(&named_quad(1, "urn:p", "urn:o1", "urn:g"));
+        idx.insert(&named_quad(1, "urn:q", "urn:o2", "urn:g"));
+        assert_eq!(idx.remove_by_subject(NodeId::new(1)), 2);
+        assert!(idx.all.is_empty());
+        assert!(idx.by_graph_name(&Iri::new("urn:g")).is_empty());
     }
 }

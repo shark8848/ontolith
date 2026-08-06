@@ -350,6 +350,8 @@ dependencies = [
  "ontolith-core",
  "ontolith-query",
  "ontolith-rdf",
+ "ontolith-storage",
+ "ontolith-transaction",
 ]
 
 [[package]]

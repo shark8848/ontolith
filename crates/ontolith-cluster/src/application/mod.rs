@@ -3,10 +3,11 @@
 use crate::domain::{
     ClusterEpoch, ClusterNode, ClusterNodeId, ClusterStatus, FailoverEvent, LogEntry, Membership,
     NetworkPartition, ReadRoute, RebalancePlan, ReplicaSet, SessionId, ShardId, ShardMap,
-    WriteRoute,
+    SyncReceipt, WriteRoute,
 };
 use ontolith_core::domain::ConsistencyLevel;
 use ontolith_core::error::OntolithError;
+use ontolith_storage::domain::SnapshotRef;
 
 /// Strongly consistent metadata service (control plane).
 pub trait MetadataService: Send + Sync {
@@ -78,6 +79,32 @@ pub trait RebalanceService: Send + Sync {
     fn rebalance_history(&self) -> Vec<RebalancePlan>;
 }
 
+/// Snapshot-based data migration between shard owners (data plane).
+///
+/// This is the missing half of online rebalance: control-plane slot
+/// reassignment ([`RebalanceService`]) plus actual data handoff. The MVP
+/// implementation simulates the transfer in-process; multi-process RPC
+/// streams snapshot + log entries behind the same trait (ADR-0002 follow-up).
+pub trait DataPlaneSync: Send + Sync {
+    /// Queue a slot-range snapshot transfer from source to target node.
+    fn transfer_snapshot(
+        &self,
+        source: &ClusterNodeId,
+        target: &ClusterNodeId,
+        shard_id: ShardId,
+        slots: crate::domain::SlotRange,
+        snapshot: SnapshotRef,
+    ) -> Result<(), OntolithError>;
+
+    /// Number of queued, not-yet-completed transfers.
+    fn pending_syncs(&self) -> usize;
+
+    /// Complete all pending transfers; returns receipts in completion order.
+    fn drain_syncs(&self) -> Result<Vec<SyncReceipt>, OntolithError>;
+
+    fn sync_history(&self) -> Vec<SyncReceipt>;
+}
+
 /// Fault-injection for tests and chaos demos.
 pub trait FaultInjector: Send + Sync {
     fn inject_partition(&self, isolated: Vec<ClusterNodeId>) -> Result<(), OntolithError>;
@@ -93,6 +120,7 @@ pub trait ClusterRuntime:
     + Replicator
     + FailoverController
     + RebalanceService
+    + DataPlaneSync
     + FaultInjector
 {
     fn tick(&self, now_tick: u64) -> Result<Vec<FailoverEvent>, OntolithError> {

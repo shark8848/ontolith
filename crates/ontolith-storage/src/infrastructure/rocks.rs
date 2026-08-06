@@ -645,6 +645,24 @@ impl StorageEngine for RocksDbStorageEngine {
         }
         quads
     }
+
+    fn quads_matching_in_graph(
+        &self,
+        graph_name: &Iri,
+        subject: Option<NodeId>,
+        predicate: Option<&Iri>,
+        object: Option<&Term>,
+        txn_id: Option<TxnId>,
+    ) -> Vec<Quad> {
+        let _ = txn_id;
+        self.state
+            .read()
+            .map(|s| {
+                s.graph_index
+                    .matching_in_named_graphs(Some(graph_name), subject, predicate, object)
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// Open a durable engine at `path` (creates directory if needed).

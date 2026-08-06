@@ -302,6 +302,20 @@ pub struct RebalancePlan {
     pub reason: String,
 }
 
+/// Receipt for a completed snapshot-based slot migration (data plane).
+///
+/// MVP transfers are simulated in-process; a multi-process backend will
+/// stream snapshot + log entries over RPC behind the same contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncReceipt {
+    pub source: ClusterNodeId,
+    pub target: ClusterNodeId,
+    pub shard_id: ShardId,
+    pub slots: SlotRange,
+    pub transferred_entries: u64,
+    pub completed_at_epoch: ClusterEpoch,
+}
+
 /// Network partition set: nodes that cannot vote/replicate with the majority.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NetworkPartition {

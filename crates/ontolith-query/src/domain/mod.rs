@@ -102,6 +102,7 @@ pub enum PathExpression {
     Alternative(Box<PathExpression>, Box<PathExpression>),
     OneOrMore(Box<PathExpression>),
     ZeroOrMore(Box<PathExpression>),
+    ZeroOrOne(Box<PathExpression>),
 }
 
 /// SPARQL algebra (W3C-style subset used by the executor).
@@ -295,6 +296,7 @@ fn summarize_path(path: &PathExpression) -> String {
         }
         PathExpression::OneOrMore(inner) => format!("{}+", summarize_path(inner)),
         PathExpression::ZeroOrMore(inner) => format!("{}*", summarize_path(inner)),
+        PathExpression::ZeroOrOne(inner) => format!("{}?", summarize_path(inner)),
     }
 }
 

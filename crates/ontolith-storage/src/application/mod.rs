@@ -149,6 +149,25 @@ pub trait StorageEngine: Send + Sync {
                 .collect(),
         }
     }
+
+    /// Match quads in a named graph by bound positions (default: linear
+    /// filter over [`Self::quads_by_graph_in_txn`]; durable engines may
+    /// override with position indexes).
+    fn quads_matching_in_graph(
+        &self,
+        graph_name: &Iri,
+        subject: Option<NodeId>,
+        predicate: Option<&Iri>,
+        object: Option<&Term>,
+        txn_id: Option<TxnId>,
+    ) -> Vec<Quad> {
+        self.quads_by_graph_in_txn(Some(graph_name), txn_id)
+            .into_iter()
+            .filter(|q| subject.is_none_or(|s| q.triple.subject == s))
+            .filter(|q| predicate.is_none_or(|p| &q.triple.predicate == p))
+            .filter(|q| object.is_none_or(|o| &q.triple.object == o))
+            .collect()
+    }
 }
 
 /// Repository façade over default-graph triples.

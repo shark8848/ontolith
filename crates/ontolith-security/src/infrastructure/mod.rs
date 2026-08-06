@@ -8,16 +8,32 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Append-only JSONL audit log on disk.
+/// Append-only JSONL audit log on disk with an integrity hash chain.
 ///
 /// Format (one event per line):
-/// `{"ts":…,"tenant":"…","user":"…","action":"…","resource":"…","outcome":"…","detail":"…"}`
+/// `{"ts":…,"tenant":"…","user":"…","action":"…","resource":"…","outcome":"…","detail":"…","prev":"<hex>","hash":"<hex>"}`
 ///
-/// Not tamper-proof (no hash chain yet); process restart retains history.
+/// Each entry chains the previous entry's hash (genesis = 0) with the event
+/// payload using FNV-1a 64. This is an integrity-level chain (dependency-free,
+/// deterministic); a cryptographic upgrade keeps the same schema.
 #[derive(Debug)]
 pub struct FileAuditLog {
     path: PathBuf,
-    lock: Mutex<()>,
+    lock: Mutex<ChainState>,
+}
+
+#[derive(Debug, Default)]
+struct ChainState {
+    last_hash: u64,
+}
+
+/// Result of a full-chain integrity verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainVerify {
+    pub ok: bool,
+    pub entries: usize,
+    /// 1-based index of the first broken entry, if any.
+    pub broken_at: Option<usize>,
 }
 
 impl FileAuditLog {
@@ -38,9 +54,10 @@ impl FileAuditLog {
             .map_err(|e| {
                 OntolithError::Failed(format!("audit log open {}: {e}", path.display()))
             })?;
+        let last_hash = last_written_hash(&path)?;
         Ok(Self {
             path,
-            lock: Mutex::new(()),
+            lock: Mutex::new(ChainState { last_hash }),
         })
     }
 
@@ -49,8 +66,23 @@ impl FileAuditLog {
     }
 
     pub fn append(&self, event: &AuditEvent) -> Result<(), OntolithError> {
+        let mut guard = self
+            .lock
+            .lock()
+            .map_err(|_| OntolithError::Failed("audit log lock poisoned".into()))?;
+        let prev = guard.last_hash;
+        let payload = audit_fields_json(
+            event.timestamp_ms,
+            &event.tenant,
+            &event.user,
+            &event.action,
+            &event.resource,
+            event.outcome.as_str(),
+            &event.detail,
+        );
+        let hash = chain_hash(prev, payload.as_bytes());
         let line = format!(
-            r#"{{"ts":{},"tenant":{},"user":{},"action":{},"resource":{},"outcome":{},"detail":{}}}"#,
+            r#"{{"ts":{},"tenant":{},"user":{},"action":{},"resource":{},"outcome":{},"detail":{},"prev":"{prev:016x}","hash":"{hash:016x}"}}"#,
             event.timestamp_ms,
             json_escape(&event.tenant),
             json_escape(&event.user),
@@ -59,10 +91,6 @@ impl FileAuditLog {
             json_escape(event.outcome.as_str()),
             json_escape(&event.detail),
         );
-        let _guard = self
-            .lock
-            .lock()
-            .map_err(|_| OntolithError::Failed("audit log lock poisoned".into()))?;
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
@@ -79,7 +107,48 @@ impl FileAuditLog {
         f.flush().map_err(|e| {
             OntolithError::Failed(format!("audit log flush {}: {e}", self.path.display()))
         })?;
+        guard.last_hash = hash;
         Ok(())
+    }
+
+    /// Re-verify the full hash chain from genesis.
+    pub fn verify_chain(&self) -> Result<ChainVerify, OntolithError> {
+        let file = File::open(&self.path).map_err(|e| {
+            OntolithError::Failed(format!("audit log read {}: {e}", self.path.display()))
+        })?;
+        let reader = BufReader::new(file);
+        let mut expected_prev = 0u64;
+        let mut entries = 0usize;
+        for line in reader.lines() {
+            let line = line.map_err(|e| {
+                OntolithError::Failed(format!("audit log readline {}: {e}", self.path.display()))
+            })?;
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            entries += 1;
+            let Some(meta) = parse_jsonl_chain_meta(line) else {
+                return Ok(ChainVerify {
+                    ok: false,
+                    entries,
+                    broken_at: Some(entries),
+                });
+            };
+            if meta.prev != expected_prev || meta.hash != chain_hash(expected_prev, &meta.payload) {
+                return Ok(ChainVerify {
+                    ok: false,
+                    entries,
+                    broken_at: Some(entries),
+                });
+            }
+            expected_prev = meta.hash;
+        }
+        Ok(ChainVerify {
+            ok: true,
+            entries,
+            broken_at: None,
+        })
     }
 
     pub fn load_tail(&self, limit: usize) -> Result<Vec<AuditEvent>, OntolithError> {
@@ -118,6 +187,89 @@ impl FileAuditLog {
     pub fn is_empty(&self) -> Result<bool, OntolithError> {
         Ok(self.len()? == 0)
     }
+}
+
+fn audit_fields_json(
+    ts: u64,
+    tenant: &str,
+    user: &str,
+    action: &str,
+    resource: &str,
+    outcome: &str,
+    detail: &str,
+) -> String {
+    format!(
+        r#"{{"ts":{},"tenant":{},"user":{},"action":{},"resource":{},"outcome":{},"detail":{}}}"#,
+        ts,
+        json_escape(tenant),
+        json_escape(user),
+        json_escape(action),
+        json_escape(resource),
+        json_escape(outcome),
+        json_escape(detail),
+    )
+}
+
+/// FNV-1a 64-bit (deterministic, dependency-free; integrity level only).
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn chain_hash(prev: u64, payload: &[u8]) -> u64 {
+    let mut chain = Vec::with_capacity(8 + payload.len());
+    chain.extend_from_slice(&prev.to_le_bytes());
+    chain.extend_from_slice(payload);
+    fnv1a64(&chain)
+}
+
+struct ChainMeta {
+    prev: u64,
+    hash: u64,
+    payload: Vec<u8>,
+}
+
+fn parse_jsonl_chain_meta(line: &str) -> Option<ChainMeta> {
+    let prev = parse_hex_u64(extract_string(line, "\"prev\"")?.as_str())?;
+    let hash = parse_hex_u64(extract_string(line, "\"hash\"")?.as_str())?;
+    let ts = extract_number(line, "\"ts\"")?;
+    let tenant = extract_string(line, "\"tenant\"")?;
+    let user = extract_string(line, "\"user\"")?;
+    let action = extract_string(line, "\"action\"")?;
+    let resource = extract_string(line, "\"resource\"")?;
+    let outcome = extract_string(line, "\"outcome\"")?;
+    let detail = extract_string(line, "\"detail\"").unwrap_or_default();
+    let payload =
+        audit_fields_json(ts, &tenant, &user, &action, &resource, &outcome, &detail).into_bytes();
+    Some(ChainMeta {
+        prev,
+        hash,
+        payload,
+    })
+}
+
+fn parse_hex_u64(hex: &str) -> Option<u64> {
+    u64::from_str_radix(hex.trim(), 16).ok()
+}
+
+fn last_written_hash(path: &Path) -> Result<u64, OntolithError> {
+    let file = File::open(path)
+        .map_err(|e| OntolithError::Failed(format!("audit log read {}: {e}", path.display())))?;
+    let reader = BufReader::new(file);
+    let mut last = 0u64;
+    for line in reader.lines() {
+        let line = line.map_err(|e| {
+            OntolithError::Failed(format!("audit log readline {}: {e}", path.display()))
+        })?;
+        if let Some(meta) = parse_jsonl_chain_meta(line.trim()) {
+            last = meta.hash;
+        }
+    }
+    Ok(last)
 }
 
 fn json_escape(s: &str) -> String {
@@ -276,6 +428,99 @@ mod tests {
     fn in_memory_still_available() {
         let mem = InMemoryAuditLog::new();
         assert!(mem.is_empty());
+    }
+
+    #[test]
+    fn audit_hash_chain_verifies_and_survives_reopen() {
+        let dir = std::env::temp_dir().join(format!(
+            "ontolith-audit-chain-{}-{}",
+            std::process::id(),
+            now_ms_for_test()
+        ));
+        let path = dir.join("audit.jsonl");
+        {
+            let log = FileAuditLog::open(&path).expect("open");
+            for i in 0..3u64 {
+                log.append(&AuditEvent {
+                    timestamp_ms: i,
+                    tenant: "acme".into(),
+                    user: "alice".into(),
+                    action: "query".into(),
+                    resource: "sparql".into(),
+                    outcome: AuditOutcome::Allow,
+                    detail: format!("evt-{i}"),
+                })
+                .unwrap();
+            }
+            let verify = log.verify_chain().expect("verify");
+            assert!(verify.ok);
+            assert_eq!(verify.entries, 3);
+            assert_eq!(verify.broken_at, None);
+        }
+        // Reopen continues the chain from the recovered tail hash.
+        let log = FileAuditLog::open(&path).expect("reopen");
+        log.append(&AuditEvent {
+            timestamp_ms: 99,
+            tenant: "acme".into(),
+            user: "bob".into(),
+            action: "write".into(),
+            resource: "data".into(),
+            outcome: AuditOutcome::Deny,
+            detail: "late".into(),
+        })
+        .unwrap();
+        let verify = log.verify_chain().expect("verify after reopen");
+        assert!(verify.ok);
+        assert_eq!(verify.entries, 4);
+        assert_eq!(log.len().unwrap(), 4);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn audit_hash_chain_detects_tampering() {
+        let dir = std::env::temp_dir().join(format!(
+            "ontolith-audit-tamper-{}-{}",
+            std::process::id(),
+            now_ms_for_test()
+        ));
+        let path = dir.join("audit.jsonl");
+        let log = FileAuditLog::open(&path).expect("open");
+        log.append(&AuditEvent {
+            timestamp_ms: 1,
+            tenant: "acme".into(),
+            user: "alice".into(),
+            action: "query".into(),
+            resource: "sparql".into(),
+            outcome: AuditOutcome::Allow,
+            detail: "ok".into(),
+        })
+        .unwrap();
+        log.append(&AuditEvent {
+            timestamp_ms: 2,
+            tenant: "acme".into(),
+            user: "bob".into(),
+            action: "write".into(),
+            resource: "data".into(),
+            outcome: AuditOutcome::Deny,
+            detail: "nope".into(),
+        })
+        .unwrap();
+        assert!(log.verify_chain().expect("verify").ok);
+
+        // Flip a payload byte in the first line; chain must break.
+        let raw = std::fs::read(&path).expect("read raw");
+        let mut tampered = raw.clone();
+        let payload_start = tampered
+            .windows(6)
+            .position(|w| w == b"\"acme\"")
+            .expect("tenant payload");
+        tampered[payload_start + 2] ^= 0x01; // 'c' -> 'b'
+        std::fs::write(&path, &tampered).expect("write tampered");
+
+        let verify = log.verify_chain().expect("verify tampered");
+        assert!(!verify.ok);
+        assert_eq!(verify.broken_at, Some(1));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn now_ms_for_test() -> u64 {

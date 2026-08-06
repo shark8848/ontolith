@@ -403,13 +403,13 @@ Mandatory artifacts per phase:
 **SLO and performance baseline (P1)**
 
 - [ ] Automate day/week windowed SLO and alerting (systemd timer or Prometheus rules)
-- [ ] Add `benchmarks/` performance baseline cases (P7-02)
+- [x] Add `benchmarks/` performance baseline cases (P7-02): `storage_bench` + `benchmarks/README.md` + CI `bench` job
 - [ ] Meet the core SLO baseline (R1)
 
 **Remaining R1 exit criteria**
 
 - [ ] Multi-node data plane (multi-process Raft / openraft, ADR first)
-- [ ] Full W3C suite (currently required-lite subset must-pass 24/24)
+- [ ] Full W3C suite (currently required-lite subset must-pass 25/25)
 - [ ] Online rebalance and disaster-recovery drill runbook with evidence (P7-01 / P7-04)
 - [ ] Release pipeline and rollback drill pass
 - [ ] Tick all R1 exit criteria
