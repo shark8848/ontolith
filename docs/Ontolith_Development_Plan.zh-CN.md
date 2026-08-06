@@ -410,7 +410,8 @@ sudo -v# Ontolith 开发计划
 
 **R1 退出标准剩余项**
 
-- [ ] 多节点数据面（多进程 Raft / openraft，先补 ADR）
+- [x] 多节点数据面设计定稿（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)：openraft behind traits，2026-08-06）
+- [ ] 多节点数据面实施（M1–M3：openraft 适配 → 多进程 HTTP RPC + RocksDB raft CF → 默认运行时切换 + CI 三进程 smoke）
 - [x] 完整 W3C 套件接入（vendored 官方 `w3c/rdf-tests` sparql11 + manifest 驱动 runner + `w3c11_profile.tsv` 492 条基线：127 PASS / 365 FAIL 欠账 profile 化防回归；2026-08-06）
 - [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
 - [ ] 发布流水线与回滚演练通过

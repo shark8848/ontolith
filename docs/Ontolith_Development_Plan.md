@@ -410,7 +410,8 @@ Mandatory artifacts per phase:
 
 **Remaining R1 exit criteria**
 
-- [ ] Multi-node data plane (multi-process Raft / openraft, ADR first)
+- [x] Multi-node data plane design finalised ([ADR-0004](../adr/0004-multi-process-raft-data-plane.md): openraft behind traits, 2026-08-06)
+- [ ] Multi-node data plane implementation (M1–M3: openraft adapter → multi-process HTTP RPC + RocksDB raft CF → default runtime switch + CI 3-process smoke)
 - [x] Full W3C suite integration (vendored official `w3c/rdf-tests` sparql11 + manifest-driven runner + `w3c11_profile.tsv` 492-case baseline: 127 PASS / 365 FAIL, gaps profile-locked; 2026-08-06)
 - [ ] Online rebalance and disaster-recovery drill runbook with evidence (P7-01 / P7-04)
 - [ ] Release pipeline and rollback drill pass

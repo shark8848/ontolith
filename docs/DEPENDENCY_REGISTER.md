@@ -10,7 +10,7 @@ Tier definitions: PLAN-0001 §8 / SAS-0001 §12.
 | Crate | Tier | Version policy | Owner | Purpose | Risk | Rollback / replacement |
 |-------|------|----------------|-------|---------|------|------------------------|
 | `rocksdb` | A | Pin exact in Cargo.lock; no `*` | storage | Durable LSM/WAL embedded store for L2 | Native build; FFI surface; disk corruption if misused | Feature-off → `InMemoryStorageEngine`; later alternate CF store |
-| openraft (future) | A | TBD | cluster | Multi-node Raft for L4 production | Ops + async surface | Keep `InMemoryClusterRuntime` traits; see ADR-0002 |
+| openraft | A | Pin exact in Cargo.lock; feature `raft-backend` | cluster | Multi-node Raft for L4 data plane (see [ADR-0004](../adr/0004-multi-process-raft-data-plane.md)) | Async runtime surface; snapshot/GC ops | Keep `InMemoryClusterRuntime` simulator + traits; feature-off fallback |
 | (workspace path crates) | A/B | path deps | platform | Internal modules | Low | N/A |
 
 ## Admission checklist (Tier A)

@@ -139,7 +139,7 @@
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
 | P4-01 | 元数据服务与主从选举 | 部分完成 | 85% | membership/status + bootstrap + 分区感知选主 | 多进程 RPC |
-| P4-02 | Raft 控制基线 | 部分完成 | 55% | 任期/日志 + **commit_index 多数派**；ADR-0002 | openraft |
+| P4-02 | Raft 控制基线 | 部分完成 | 60% | 任期/日志 + **commit_index 多数派**；ADR-0002 模拟器；**多进程 Raft 设计定稿 [ADR-0004](../adr/0004-multi-process-raft-data-plane.md)**（openraft behind traits，M1–M3） | M1 单节点 openraft 适配 |
 | P4-03 | 单区域分片与复制 | 部分完成 | 85% | hash slot + lag + **rebalance** | 跨节点数据搬迁 |
 | P4-04 | 故障转移基线 | 部分完成 | 85% | failover + **partition 注入/愈合** | 真实网络分区 |
 | P4-05 | 读一致性级别与 API 说明 | 部分完成 | 95% | Session 粘性 + [L4 文档 v2](./L4-ontolith-cluster-consistency.md) + **/cluster HTTP** | — |
@@ -207,7 +207,7 @@
 |--------|------|------|
 | [~] RDF 核心运行时可验收 | 部分完成 | L0–L3 + 解析/存储闭环；缺正式验收包 |
 | [~] SPARQL 查询基线 | 部分完成 | SELECT/ASK/CONSTRUCT 核心；非完整 1.1 |
-| [~] 单区域集群核心 | 部分完成 | 控制面可测+HTTP 演示；无多节点数据面 |
+| [~] 单区域集群核心 | 部分完成 | 控制面可测+HTTP 演示；多节点数据面设计已定（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)），M1–M3 实施中 |
 | [~] 安全与审计基线 | 部分完成 | HTTP 鉴权+审计+JSONL 落盘；无 OIDC |
 | [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 17 测 + W3C 子集（required-lite，must-pass 30/30，skip=0）+ strict observer（non-blocking）+ strict readiness 自动评估 + **完整 W3C 套件 manifest 基线（492 条，127 PASS/365 FAIL 已 profile 化防回归）**；PASS 份额提升仍在进行 |
 | [ ] 核心 SLO 基线达标 | 未完成 | 无基准 |
@@ -354,6 +354,7 @@
 | 2026-08-06 | Codex | L5：天/周窗口 SLO 自动化与告警策略——`collect-slo-sample.sh` 持久化 runtime_probe 样本（samples.jsonl）；`check-slo-window-history.sh` 窗口评估（成功率/P95/连续失败/延迟尖峰）+ `--self-test` 四用例 + reports/alerts 落盘；systemd user timers（5min 采集、每日 24h、每周 168h 评估）与安装脚本；接入 ci-local。 |
 | 2026-08-06 | Codex | L5：管理面 TLS 终止与 R2 门禁（ADR-0003 转 Accepted）——`TlsServerConfig`/`HttpServer::with_tls`（rustls 进程内终止，PEM 加载，close_notify 冲刷）；`ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY`；`enforce_tls_gate` 非 loopback bind 无 TLS 拒绝启动；`/admin/config` 暴露 `tls` 姿态；`gen-self-signed-cert.sh` + env 示例；server 16→21 测，全量测试 205 通过。 |
 | 2026-08-06 | Codex | L3：完整 W3C 套件接入——vendored 官方 `w3c/rdf-tests` sparql11（941 文件/28 feature，QueryEvaluation/UpdateEvaluation/PositiveSyntax/NegativeSyntax 四类）；manifest 驱动 runner `w3c11_suite.rs`（自有 Turtle 解析官方 manifest、SRX/SRJ/TSV/CSV + Turtle 图 + ASK 结果比对、超时/panic 护栏）；`w3c11_profile.tsv` 锁定 492 条基线（127 PASS / 365 FAIL，按 reason-code 分类），普通模式 drift 防回归、`ONTOLITH_W3C11_LEARN=1` 重生成；顺带修复 Turtle 数字字面量词法 bug（`.` 不再当分隔符，完整 INTEGER/DECIMAL/DOUBLE 文法 + `.5` 前导点），parser 16→17 测。 |
+| 2026-08-06 | Codex | L4：多进程 Raft 设计定稿（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md) 转 Accepted）：openraft 共识引擎 behind 现有 cluster traits；树内 axum/reqwest HTTP RPC（`/internal/raft/*` + 共享 secret）；RocksDB 独立 `raft` CF 存日志/硬状态/快照；写入经多数派提交后落 L2；保留 `InMemoryClusterRuntime` 作测试 harness；DEPENDENCY_REGISTER 与 L4 文档同步。 |
 
 ---
 
@@ -405,7 +406,8 @@
 
 **R1 退出标准剩余项**
 
-- [ ] 多节点数据面（多进程 Raft / openraft，先补 ADR）
+- [x] 多节点数据面设计定稿：ADR-0004（openraft behind traits + 树内 HTTP RPC + RocksDB raft CF；M1–M3 里程碑；2026-08-06）
+- [ ] 多节点数据面实施（M1 单节点 openraft 适配 → M2 多进程 HTTP RPC + RocksDB raft CF → M3 默认运行时切换 + CI 三进程 smoke）
 - [x] 完整 W3C 套件接入（vendored `w3c/rdf-tests` sparql11 941 文件/28 feature + manifest 驱动 `w3c11_suite` runner + `w3c11_profile.tsv` 492 条基线：127 PASS / 365 FAIL 欠账 profile 化防回归；2026-08-06）
 - [x] 完整聚合（GROUP BY/HAVING + COUNT(DISTINCT)/SUM/AVG/MIN/MAX + 子查询聚合，W3C must-pass 27/27）
 - [x] SPARQL Update 基线（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE，W3C must-pass 30/30、skip=0）

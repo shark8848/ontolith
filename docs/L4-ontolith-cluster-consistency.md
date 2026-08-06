@@ -20,7 +20,7 @@
 | 在线 rebalance（slot 重划） | — | ✅ |
 | ClusterStatus 汇总 | — | ✅ |
 | L5 HTTP `/cluster/*` | — | ✅ |
-| 多进程 openraft | 延期 | 延期（ADR-0002） |
+| 多进程 openraft | ADR-0004 | 设计已定（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)）；M1 单节点适配 → M2 多进程 HTTP RPC + RocksDB raft CF → M3 默认运行时切换 |
 
 ---
 
@@ -109,7 +109,7 @@ let plans = rt.rebalance()?;
 1. 单进程内存控制面，非生产多机 HA  
 2. Rebalance 已配套数据面搬迁通道（`DataPlaneSync`：快照传输入队/完成/回执）；真实多进程 RPC 传输未实现  
 3. 数据面仍由各节点本地 L2 引擎负责  
-4. 生产 Raft 需新 ADR（openraft）  
+4. 生产 Raft 决策已定：[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)（openraft behind traits，M1–M3 实施中）；实施完成前多节点数据面仍为 ADR-0002 模拟器  
 
 ---
 
@@ -120,3 +120,4 @@ let plans = rt.rebalance()?;
 | 2026-07-17 | 1.0.0 | 单区域 MVP 闭环 |
 | 2026-07-17 | 2.0.0 | session 粘性、quorum commit、partition、rebalance、L5 `/cluster` |
 | 2026-08-06 | 2.1.0 | 数据面同步（`DataPlaneSync`）：快照式 slot 迁移入队/`drain_syncs` 完成/`SyncReceipt` 回执，含源目标节点校验；`rebalance` 计划可经数据面搬迁，+3 测 |
+| 2026-08-06 | 2.2.0 | 多进程 Raft 设计定稿（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)）：openraft 共识引擎 + 树内 axum/reqwest HTTP RPC（`/internal/raft/*`，共享 secret 认证）+ RocksDB `raft` CF 日志/快照 + 写入路径经 raft 多数派提交后落 L2；保留 `InMemoryClusterRuntime` 作为确定性测试 harness |
