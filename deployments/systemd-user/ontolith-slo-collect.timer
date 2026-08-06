@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect Ontolith SLO probe samples every 5 minutes
+Documentation=file:///home/ontolith/docs/L5-management-platform-slo.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

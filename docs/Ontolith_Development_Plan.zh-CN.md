@@ -404,7 +404,7 @@ sudo -v# Ontolith 开发计划
 
 **SLO 与性能基线（P1）**
 
-- [ ] 天/周窗口 SLO 自动化与告警（systemd timer 或 Prometheus 规则）
+- [x] 天/周窗口 SLO 自动化与告警（systemd timer：5min 采集 + 每日 24h / 每周 168h 窗口评估，成功率/P95/连续失败/尖峰告警）
 - [x] `benchmarks/` 性能基线用例（P7-02）：`storage_bench` + `benchmarks/README.md` + CI `bench` 作业
 - [ ] 核心 SLO 基线达标（R1）
 

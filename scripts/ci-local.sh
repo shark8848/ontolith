@@ -87,4 +87,7 @@ kill "$mgmt_pid" >/dev/null 2>&1 || true
 wait "$mgmt_pid" 2>/dev/null || true
 trap - EXIT
 
+echo "==> SLO history window checker self-test (day/week + alert policy)"
+bash scripts/check-slo-window-history.sh --self-test
+
 echo "==> OK: local CI gates passed"

@@ -404,7 +404,7 @@ Mandatory artifacts per phase:
 
 **SLO and performance baseline (P1)**
 
-- [ ] Automate day/week windowed SLO and alerting (systemd timer or Prometheus rules)
+- [x] Automate day/week windowed SLO and alerting (systemd timers: 5-min collection + daily 24h / weekly 168h windows; success-rate/P95/consecutive-failure/spike alerts)
 - [x] Add `benchmarks/` performance baseline cases (P7-02): `storage_bench` + `benchmarks/README.md` + CI `bench` job
 - [ ] Meet the core SLO baseline (R1)
 

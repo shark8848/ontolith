@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Ontolith weekly SLO window check Mondays 00:10
+Documentation=file:///home/ontolith/docs/L5-management-platform-slo.md
+
+[Timer]
+OnCalendar=Mon *-*-* 00:10:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
