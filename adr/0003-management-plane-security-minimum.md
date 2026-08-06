@@ -1,9 +1,11 @@
 # ADR-0003: Management Plane Minimum Security Baseline (TLS-first, OIDC-ready)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-23
+- Accepted: 2026-08-06
 - Deciders: sharky-ai
 - Tags: security, server, management-plane
+- Phase/WBS: PLAN-0001 §R1 退出标准“管理面安全（P0）”；PROGRESS §8 未完成项待办清单“管理面安全（P0，进行中）"
 
 ## Context
 
@@ -36,6 +38,20 @@ R1 requires a minimal, implementable hardening path without introducing high int
    - R1: smoke + ACL + probe + bind posture evidence.
    - R2: TLS mandatory for non-loopback deployments.
    - R2+: OIDC/JWT policy enforcement for management mutations.
+
+## Implementation status (2026-08-06)
+
+- In-process TLS termination landed with rustls: `HttpServer::with_tls` /
+  `TlsServerConfig` in `crates/ontolith-server/src/http.rs`.
+- Management server reads `ONTOLITH_TLS_CERT` / `ONTOLITH_TLS_KEY` (PEM) and
+  reports `tls: "on"|"off"` in `/admin/config` (bind posture evidence).
+- R2 gate enforced at startup: a non-loopback `ONTOLITH_MANAGEMENT_BIND`
+  refuses to start without TLS configured (`enforce_tls_gate`).
+- Deployment helpers: `scripts/gen-self-signed-cert.sh` and commented TLS vars
+  in `deployments/ontolith-management.user.env`.
+- OIDC/JWT verification remains on the R2+ track: the auth-context abstraction
+  in `crates/ontolith-security` is preserved as the integration point; a
+  follow-up ADR/RFC will define token validation + claim mapping.
 
 ## Consequences
 

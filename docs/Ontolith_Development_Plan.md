@@ -385,7 +385,7 @@ Mandatory artifacts per phase:
 - Start Phase 1 implementation with weekly architecture and risk review.
 - R1 management-platform SLO baseline and short-window thresholds are now implemented: local/CI smoke now enforces `runtime_probe` reachability, latency threshold, and short-window success%/p95 checks.
 - Extend short-window SLO checks to day/week automated tracking and alerting (systemd timer or Prometheus rules).
-- Minimum management-plane hardening path is captured in ADR-0003 (TLS-first / OIDC-ready); next step is phased implementation on the R2 track.
+- Minimum management-plane hardening path is captured and implemented in ADR-0003 (TLS-first / OIDC-ready; promoted to Accepted on 2026-08-06): in-process rustls TLS termination + mandatory TLS gate for non-loopback binds (R2). OIDC/JWT verification remains on the R2+ track.
 
 ### Outstanding Item Checklist (synced 2026-08-06 from PROGRESS §8)
 
@@ -393,14 +393,14 @@ Mandatory artifacts per phase:
 
 - [ ] Review and sign off PLAN-0001 to unblock P0-01 (approved scope baseline)
 - [ ] Finalize SAS / Volume 04 / SAS-0401 / Architecture Handbook ToC from Draft status
-- [ ] Promote ADR-0003 from Proposed to Accepted and link it to Phase/WBS rows
+- [x] Promote ADR-0003 from Proposed to Accepted and link it to Phase/WBS rows (2026-08-06)
 - [ ] Run the first substantive RFC (P0-04)
 - [ ] Track and accept the design package (interfaces, constraints, ADR links) per §10
 
 **Management-plane security (P0)**
 
-- [ ] Implement TLS termination, or an OIDC verification path
-- [ ] Enforce TLS for non-loopback exposure (R2 criterion)
+- [x] Implement TLS termination (in-process rustls termination via `ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY` + `/admin/config` TLS posture evidence), or an OIDC verification path
+- [x] Enforce TLS for non-loopback exposure (R2 criterion: non-loopback bind refuses to start without TLS)
 
 **SLO and performance baseline (P1)**
 

@@ -131,6 +131,8 @@ X-Ontolith-Tenant: acme
 | `ONTOLITH_MANAGEMENT_READ_KEY` | — | 管理面只读 key（可选） |
 | `ONTOLITH_MANAGEMENT_WRITE_KEY` | — | 管理面写操作 key（可选） |
 | `ONTOLITH_MANAGEMENT_PROBE_TIMEOUT_MS` | `300` | 管理面 runtime 探测超时（毫秒） |
+| `ONTOLITH_TLS_CERT` | — | 管理面 TLS 证书链 PEM（与 KEY 同设启用 rustls 进程内终止） |
+| `ONTOLITH_TLS_KEY` | — | 管理面 TLS 私钥 PEM（非 loopback bind 强制要求，R2 门禁） |
 
 ```bash
 # 内存
@@ -144,6 +146,25 @@ cargo run -p ontolith-server --bin ontolith-management-server
 ```
 
 实现：`AppState` 持有 `Arc<dyn StorageEngine>` + `Arc<dyn DictionaryCodec>` + 通用 `EngineTripleRepository`。
+
+### 传输加密（TLS 终止，ADR-0003）
+
+管理服务支持 rustls 进程内 TLS 终止：
+
+```bash
+# 自签证书（或使用正式 CA 证书）
+./scripts/gen-self-signed-cert.sh --cn mgmt.example.com /etc/ontolith/tls
+
+# 启动 HTTPS 管理面
+ONTOLITH_TLS_CERT=/etc/ontolith/tls/ontolith.crt.pem \
+ONTOLITH_TLS_KEY=/etc/ontolith/tls/ontolith.key.pem \
+cargo run -p ontolith-server --bin ontolith-management-server
+```
+
+- 仅设置其一会导致启动失败；证书/私钥 PEM 解析失败同样拒绝启动。
+- **R2 强制门禁**：`ONTOLITH_MANAGEMENT_BIND` 解析为非 loopback 地址且未配置 TLS 时，进程拒绝启动（`enforce_tls_gate`）。
+- 绑定姿态证据：`GET /admin/config` 返回 `"tls":"on"|"off"`。
+- 反向代理/ingress 前置 TLS 终止仍受支持（服务保持 loopback bind 即不触发门禁）。
 
 ### 后台 / systemd
 
@@ -192,13 +213,13 @@ systemctl --user status ontolith-server
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
 | ontolith-security | 9 | 鉴权/权限/审计（含哈希链完整性验证） |
-| ontolith-server | **8** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen** |
+| ontolith-server | **21** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁** |
 
 ---
 
 ## 7. 已知限制
 
-1. 无 TLS / HTTP/2 / 完整框架中间件链  
+1. TLS 已落地（rustls 进程内终止 + R2 非 loopback 门禁）；仍无 HTTP/2 / 完整框架中间件链  
 2. 鉴权非 OIDC/JWT  
 3. 审计哈希链为完整性级（FNV-1a 64，非加密级；加密升级保持同 schema）  
 4. 租户隔离为可选命名图，非强制全库分片  
@@ -216,6 +237,7 @@ systemctl --user status ontolith-server
 | 2026-07-23 | 2.2.1 | 管理面 ACL 分离：支持 read/write key 双轨控制（`X-Ontolith-Management-Key`） |
 | 2026-07-23 | 2.2.2 | 管理面 runtime probe：健康/监控响应增加运行时连通性与探测延迟信息 |
 | 2026-08-06 | 2.3.0 | 审计哈希链：`FileAuditLog` 每条追加 `prev`/`hash` 字段（FNV-1a 64，genesis=0），reopen 恢复链尾，新增 `verify_chain()` 全链校验与篡改检测，+2 测 |
+| 2026-08-06 | 2.4.0 | 管理面 TLS 终止（rustls）+ R2 非 loopback TLS 强制门禁（ADR-0003 转 Accepted）：`HttpServer::with_tls`/`TlsServerConfig`、`ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY`、`/admin/config` 暴露 `tls` 姿态、`gen-self-signed-cert.sh`，+4 测 |
 
 ## 8. 审计落盘与权限（v2.1）
 

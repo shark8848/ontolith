@@ -385,7 +385,7 @@ sudo -v# Ontolith 开发计划
 - 启动 Phase 1，并执行周度架构与风险评审。
 - 管理平台 R1 SLO 基线与窗口化阈值已落地：local/CI smoke 现已包含 `runtime_probe` 可达性 + 延迟阈值 + 短窗口 success%/p95 检查。
 - 将窗口化 SLO 检查从短窗门禁扩展到天/周自动统计与告警（systemd timer 或 Prometheus 规则）。
-- 管理平台最小安全加固路径已形成 ADR-0003（TLS-first / OIDC-ready），下一步按 R2 路线执行实现。
+- 管理平台最小安全加固路径已形成并落地 ADR-0003（TLS-first / OIDC-ready，2026-08-06 转 Accepted）：rustls 进程内 TLS 终止 + 非 loopback 强制 TLS 门禁（R2）。OIDC/JWT 验证留 R2+ 后续轨。
 
 ### 未完成项清单（2026-08-06 同步自 PROGRESS §8）
 
@@ -393,14 +393,14 @@ sudo -v# Ontolith 开发计划
 
 - [ ] 评审并签批 PLAN-0001，解除 P0-01（已批准范围基线）阻塞
 - [ ] SAS / Volume 04 / SAS-0401 / 架构手册目录 由 Draft 定稿
-- [ ] ADR-0003 由 Proposed 转 Accepted 并回填 Phase/WBS 关联
+- [x] ADR-0003 由 Proposed 转 Accepted 并回填 Phase/WBS 关联（2026-08-06）
 - [ ] 首个实质 RFC 试用（P0-04）
 - [ ] 设计包（接口、约束、ADR 关联）纳入台账跟踪与验收
 
 **管理面安全（P0）**
 
-- [ ] TLS 终止方案落地，或 OIDC 校验链路实现
-- [ ] 非 loopback 暴露场景 TLS 强制门禁（R2 判据）
+- [x] TLS 终止方案落地（rustls 进程内终止 + `ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY` + `/admin/config` TLS 姿态证据），或 OIDC 校验链路实现
+- [x] 非 loopback 暴露场景 TLS 强制门禁（R2 判据：非 loopback bind 无 TLS 拒绝启动）
 
 **SLO 与性能基线（P1）**
 

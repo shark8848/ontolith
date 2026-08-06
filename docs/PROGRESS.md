@@ -1,11 +1,11 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.17  
+版本: 0.1.18  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁 + 窗口化 SLO 门禁；安全加固 ADR-0003 已起草）；Git 当前头: `main` @ `cd098db`（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）；2026-08-06 增量：L0 序列化 Part II、L3 属性路径 `?`（W3C must-pass 25/25）+ RDF 序列化导出、L2 命名图六置换、L4 数据面同步、L5 审计哈希链、L6 前向链推理、L7 存储微基准与 CI bench/license 作业、**完整聚合（GROUP BY/HAVING + COUNT(DISTINCT)/SUM/AVG/MIN/MAX + 子查询聚合，W3C must-pass 27/27）**、**SPARQL Update（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE，W3C must-pass 30/30、skip=0）**、**天/周窗口 SLO 自动化（systemd timer 采集/日周评估 + 告警策略：成功率/连续失败/P95/尖峰）**；全量测试 200 通过
+对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁 + 窗口化 SLO 门禁；安全加固 ADR-0003 已起草）；Git 当前头: `main` @ `cd098db`（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）；2026-08-06 增量：L0 序列化 Part II、L3 属性路径 `?`（W3C must-pass 25/25）+ RDF 序列化导出、L2 命名图六置换、L4 数据面同步、L5 审计哈希链、L6 前向链推理、L7 存储微基准与 CI bench/license 作业、**完整聚合（GROUP BY/HAVING + COUNT(DISTINCT)/SUM/AVG/MIN/MAX + 子查询聚合，W3C must-pass 27/27）**、**SPARQL Update（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE，W3C must-pass 30/30、skip=0）**、**天/周窗口 SLO 自动化（systemd timer 采集/日周评估 + 告警策略：成功率/连续失败/P95/尖峰）**、**管理面 TLS 终止（rustls 进程内终止 + `ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY` + `/admin/config` TLS 姿态证据 + 自签证书脚本；ADR-0003 转 Accepted）**、**R2 非 loopback TLS 强制门禁（非 loopback bind 无 TLS 拒绝启动）**；全量测试 205 通过
 
 ---
 
@@ -352,6 +352,7 @@
 | 2026-08-06 | Codex | L3：SPARQL Update 落地——解析 `INSERT DATA` / `DELETE DATA` / `DELETE·INSERT…WHERE` / `DELETE WHERE`（LOAD/CLEAR/WITH 明确 Unsupported）；`QueryPlan.update_ops` + `QueryResult.affected`；`UpdateWriteService`（存储引擎写面）与 `UpdateQueryExecutor`（读委托 + 写事务，含字典 IRI→NodeId 桥）；server `/sparql` 接入写管线并渲染 update 结果；query 39→46 测，R1 烟雾 15→17，W3C 子集 must-pass 27→30/30 且 skip=0，全量测试 199 通过。 |
 | 2026-08-06 | Codex | docs：中英文开发计划同步勾选「天/周窗口 SLO 自动化与告警」项（PLAN-0001 §R1 退出标准 / P1）。 |
 | 2026-08-06 | Codex | L5：天/周窗口 SLO 自动化与告警策略——`collect-slo-sample.sh` 持久化 runtime_probe 样本（samples.jsonl）；`check-slo-window-history.sh` 窗口评估（成功率/P95/连续失败/延迟尖峰）+ `--self-test` 四用例 + reports/alerts 落盘；systemd user timers（5min 采集、每日 24h、每周 168h 评估）与安装脚本；接入 ci-local。 |
+| 2026-08-06 | Codex | L5：管理面 TLS 终止与 R2 门禁（ADR-0003 转 Accepted）——`TlsServerConfig`/`HttpServer::with_tls`（rustls 进程内终止，PEM 加载，close_notify 冲刷）；`ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY`；`enforce_tls_gate` 非 loopback bind 无 TLS 拒绝启动；`/admin/config` 暴露 `tls` 姿态；`gen-self-signed-cert.sh` + env 示例；server 16→21 测，全量测试 205 通过。 |
 
 ---
 
@@ -373,7 +374,7 @@
 - [x] 管理面最小安全加固 ADR 草案（ADR-0003）
 - [ ] 确认 Stream A/B/C/D 负责人并回填 §2 焦点表
 - [x] 本波次提交已推送 `origin/main`（直推模式，无 PR）
-- [ ] 管理面安全加固（TLS 终止方案落地或 OIDC 校验链路实现）
+- [x] 管理面安全加固（TLS 终止方案落地：rustls 进程内终止 + R2 门禁；OIDC 留 R2+ 后续轨）
 
 ### 未完成项待办清单（2026-08-06 整理）
 
@@ -384,15 +385,15 @@
 - [ ] 架构规范定稿：`docs/Ontolith Software Architecture Specification  Volume 04.md`（1.0.0-draft）
 - [ ] 架构规范定稿：`docs/SAS-0401 — Knowledge Object Model.md`（1.0.0-draft）
 - [ ] 架构手册目录（1.0 Draft）按“Specification Before Implementation”补齐对应章节
-- [ ] ADR-0003 由 Proposed 转 Accepted，并回填 Phase/WBS 关联
+- [x] ADR-0003 由 Proposed 转 Accepted，并回填 Phase/WBS 关联（2026-08-06）
 - [ ] 首个实质 RFC 试用，完成 P0-04（`docs/PROGRESS.md:88`）
 - [ ] PLAN §10 “设计包（接口、约束、ADR 关联）”纳入台账跟踪与验收
 
 **管理面安全（P0，进行中）**
 
-- [ ] TLS 终止方案落地（反向代理/ingress 示例 + 部署清单 + bind 姿态证据）
-- [ ] 或 OIDC 校验链路实现（token 验证 + claim 映射，落在 `crates/ontolith-security` 抽象内）
-- [ ] 非 loopback 暴露场景 TLS 强制门禁（R2 判据，ADR-0003 路线）
+- [x] TLS 终止方案落地（rustls 进程内终止 + `ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY` + `/admin/config` bind 姿态证据 + 自签证书脚本）
+- [ ] 或 OIDC 校验链路实现（token 验证 + claim 映射，落在 `crates/ontolith-security` 抽象内；TLS 已落地，本项为 R2+ 后续轨，不阻塞 P0）
+- [x] 非 loopback 暴露场景 TLS 强制门禁（R2 判据，ADR-0003 路线：非 loopback bind 无 TLS 拒绝启动）
 
 **SLO 与性能基线（P1，进行中）**
 

@@ -1,7 +1,7 @@
 //! Management server for unified control-plane operations.
 
 use crate::app::AppState;
-use crate::http::{Handler, HttpRequest, HttpResponse, HttpServer, now_ms};
+use crate::http::{Handler, HttpRequest, HttpResponse, HttpServer, TlsServerConfig, now_ms};
 use ontolith_cluster::application::{MetadataService, RebalanceService, Replicator};
 use ontolith_core::error::OntolithError;
 use ontolith_security::application::{
@@ -27,6 +27,8 @@ const MGMT_READ_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_READ_KEY";
 const MGMT_WRITE_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_WRITE_KEY";
 const MGMT_KEY_HEADER: &str = "x-ontolith-management-key";
 const MGMT_RUNTIME_PROBE_TIMEOUT_MS_ENV: &str = "ONTOLITH_MANAGEMENT_PROBE_TIMEOUT_MS";
+const TLS_CERT_ENV: &str = "ONTOLITH_TLS_CERT";
+const TLS_KEY_ENV: &str = "ONTOLITH_TLS_KEY";
 
 const DEFAULT_MGMT_BIND: &str = "127.0.0.1:9091";
 const DEFAULT_API_BIND: &str = "127.0.0.1:8080";
@@ -37,6 +39,7 @@ pub struct ManagementState {
     started_at_ms: u64,
     acl: ManagementAcl,
     runtime_probe_timeout_ms: u64,
+    tls_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -82,6 +85,7 @@ impl ManagementState {
         management_bind: String,
         acl: ManagementAcl,
         runtime_probe_timeout_ms: u64,
+        tls_enabled: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             app,
@@ -89,6 +93,7 @@ impl ManagementState {
             started_at_ms: now_ms(),
             acl,
             runtime_probe_timeout_ms,
+            tls_enabled,
         })
     }
 
@@ -228,7 +233,7 @@ impl ManagementState {
             200,
             "OK",
             format!(
-                r#"{{"management_bind":{},"runtime_bind":{},"storage_backend":{},"data_dir":{},"auth_mode":{},"audit_path":{},"started_at_ms":{}}}"#,
+                r#"{{"management_bind":{},"runtime_bind":{},"storage_backend":{},"data_dir":{},"auth_mode":{},"audit_path":{},"tls":{},"started_at_ms":{}}}"#,
                 json_string(&self.management_bind),
                 json_string(&self.app.bind_address),
                 json_string(self.app.backend.as_str()),
@@ -246,6 +251,7 @@ impl ManagementState {
                     .file_path()
                     .map(|p| json_string(&p))
                     .unwrap_or_else(|| "null".to_owned()),
+                if self.tls_enabled { "\"on\"" } else { "\"off\"" },
                 self.started_at_ms,
             ),
         ))
@@ -432,6 +438,8 @@ pub fn run() -> Result<(), String> {
     let api_bind = env::var(API_BIND_ENV).unwrap_or_else(|_| DEFAULT_API_BIND.to_owned());
     let acl = load_management_acl_from_env();
     let runtime_probe_timeout_ms = load_runtime_probe_timeout_ms();
+    let tls = load_tls_config_from_env()?;
+    enforce_tls_gate(&management_bind, tls.is_some())?;
 
     let authenticator = load_authenticator();
     let audit = load_audit_log_from_env().map_err(|e| e.message().to_owned())?;
@@ -441,22 +449,72 @@ pub fn run() -> Result<(), String> {
         management_bind.clone(),
         acl.clone(),
         runtime_probe_timeout_ms,
+        tls.is_some(),
     );
 
     println!(
-        "ontolith-management-server starting: bind={}, runtime_bind={}, backend={}, acl_read_key={}, acl_write_key={}, probe_timeout_ms={}",
+        "ontolith-management-server starting: bind={}, runtime_bind={}, backend={}, acl_read_key={}, acl_write_key={}, probe_timeout_ms={}, tls={}",
         management_bind,
         state.app.bind_address,
         state.app.backend.as_str(),
         acl.read_key.is_some(),
         acl.write_key.is_some(),
         runtime_probe_timeout_ms,
+        if tls.is_some() { "on" } else { "off" },
     );
 
-    let server = HttpServer::new(shared_management_handler(state));
+    let server = match tls {
+        Some(tls) => HttpServer::with_tls(shared_management_handler(state), tls),
+        None => HttpServer::new(shared_management_handler(state)),
+    };
     server
         .serve(&management_bind)
         .map_err(|e| format!("management server listen {}: {e}", management_bind))
+}
+
+fn load_tls_config_from_env() -> Result<Option<TlsServerConfig>, String> {
+    let cert_path = env::var(TLS_CERT_ENV).ok().filter(|v| !v.trim().is_empty());
+    let key_path = env::var(TLS_KEY_ENV).ok().filter(|v| !v.trim().is_empty());
+    match (cert_path, key_path) {
+        (None, None) => Ok(None),
+        (Some(cert), Some(key)) => {
+            let cert_pem = std::fs::read(&cert)
+                .map_err(|e| format!("read TLS cert file {cert}: {e}"))?;
+            let key_pem = std::fs::read(&key)
+                .map_err(|e| format!("read TLS key file {key}: {e}"))?;
+            TlsServerConfig::from_pem(&cert_pem, &key_pem).map(Some)
+        }
+        _ => Err(format!(
+            "TLS requires both {TLS_CERT_ENV} and {TLS_KEY_ENV} to be set"
+        )),
+    }
+}
+
+/// R2 gate: a non-loopback management bind must be TLS-terminated.
+fn enforce_tls_gate(bind: &str, tls_enabled: bool) -> Result<(), String> {
+    if tls_enabled || is_loopback_bind(bind) {
+        Ok(())
+    } else {
+        Err(format!(
+            "non-loopback management bind '{bind}' requires TLS (R2 gate): set {TLS_CERT_ENV} and {TLS_KEY_ENV}"
+        ))
+    }
+}
+
+fn is_loopback_bind(bind: &str) -> bool {
+    match bind.to_socket_addrs() {
+        Ok(addrs) => {
+            let mut found = false;
+            for addr in addrs {
+                found = true;
+                if !addr.ip().is_loopback() {
+                    return false;
+                }
+            }
+            found
+        }
+        Err(_) => false,
+    }
 }
 
 fn load_authenticator() -> HeaderAuthenticator {
@@ -698,7 +756,7 @@ mod tests {
             auth,
             InMemoryAuditLog::new(),
         );
-        ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl, 10)
+        ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl, 10, false)
     }
 
     #[test]
@@ -709,6 +767,25 @@ mod tests {
         let body = String::from_utf8(resp.body).expect("valid utf8");
         assert!(body.contains("\"management_bind\""));
         assert!(body.contains("\"storage_backend\""));
+        assert!(body.contains("\"tls\":\"off\""));
+    }
+
+    #[test]
+    fn tls_gate_allows_loopback_without_tls() {
+        assert!(enforce_tls_gate("127.0.0.1:9091", false).is_ok());
+        assert!(enforce_tls_gate("localhost:9091", false).is_ok());
+    }
+
+    #[test]
+    fn tls_gate_allows_non_loopback_with_tls() {
+        assert!(enforce_tls_gate("0.0.0.0:9091", true).is_ok());
+    }
+
+    #[test]
+    fn tls_gate_rejects_non_loopback_without_tls() {
+        let err = enforce_tls_gate("0.0.0.0:9091", false).expect_err("must reject");
+        assert!(err.contains("R2 gate"), "got: {err}");
+        assert!(err.contains("ONTOLITH_TLS_CERT"), "got: {err}");
     }
 
     #[test]

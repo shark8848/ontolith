@@ -16,6 +16,8 @@ default = ["rocksdb-backend"]
 rocksdb-backend = ["ontolith-storage/rocksdb-backend"]
 
 [dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2.2.0"
 ontolith-core = { path = "../ontolith-core" }
 ontolith-query = { path = "../ontolith-query" }
 ontolith-storage = { path = "../ontolith-storage" }
@@ -30,3 +32,4 @@ ontolith-parser = { path = "../ontolith-parser" }
 
 [dev-dependencies]
 tempfile = "3.14.0"
+rcgen = "0.13.2"
