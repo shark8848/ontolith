@@ -5,7 +5,7 @@
 
 use ontolith_parser::infrastructure::{parse_ntriples, parse_turtle_doc};
 use ontolith_query::domain::{QueryKind, QueryRequest};
-use ontolith_query::infrastructure::standard_pipeline_with_dictionary;
+use ontolith_query::infrastructure::update_pipeline;
 use ontolith_storage::application::{StorageEngine, TripleRepository};
 use ontolith_storage::infrastructure::{
     InMemoryDictionary, InMemoryStorageEngine, InMemoryTripleRepository,
@@ -45,6 +45,9 @@ enum ExpectedOutcome {
     },
     Ask(bool),
     ConstructRows(usize),
+    UpdateOk {
+        affected: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -169,13 +172,25 @@ fn w3c_subset_profile() {
 }
 
 fn run_case(case: &W3cCase) -> Result<(), String> {
-    let (repo, dict) = load_repo(case.format, case.dataset)?;
-    let pipeline = standard_pipeline_with_dictionary(repo, dict);
+    let loaded = load_repo(case.format, case.dataset)?;
+    let pipeline = update_pipeline(loaded.repo, loaded.engine, Some(loaded.dict));
     let result = pipeline
         .execute(&QueryRequest::new(case.query))
         .map_err(|e| format!("query execution error: {e:?}"))?;
 
     match case.expected {
+        Some(ExpectedOutcome::UpdateOk { affected }) => {
+            if result.kind != QueryKind::Update {
+                return Err(format!("expected UPDATE, got {:?}", result.kind));
+            }
+            if result.affected != affected as u64 {
+                return Err(format!(
+                    "expected {} affected triples, got {}",
+                    affected, result.affected
+                ));
+            }
+            Ok(())
+        }
         Some(ExpectedOutcome::SelectRows { rows, vars }) => {
             if result.kind != QueryKind::Select {
                 return Err(format!("expected SELECT, got {:?}", result.kind));
@@ -220,10 +235,13 @@ fn run_case(case: &W3cCase) -> Result<(), String> {
     }
 }
 
-fn load_repo(
-    format: DatasetFormat,
-    dataset: &str,
-) -> Result<(Arc<dyn TripleRepository>, Arc<InMemoryDictionary>), String> {
+struct LoadedRepo {
+    engine: Arc<InMemoryStorageEngine>,
+    repo: Arc<dyn TripleRepository>,
+    dict: Arc<InMemoryDictionary>,
+}
+
+fn load_repo(format: DatasetFormat, dataset: &str) -> Result<LoadedRepo, String> {
     let engine = Arc::new(InMemoryStorageEngine::new());
     let dict = Arc::new(InMemoryDictionary::new());
     let repo: Arc<dyn TripleRepository> =
@@ -245,7 +263,7 @@ fn load_repo(
         .commit_transaction(txn)
         .map_err(|e| format!("storage commit failed: {e:?}"))?;
 
-    Ok((repo, dict))
+    Ok(LoadedRepo { engine, repo, dict })
 }
 
 fn env_flag(name: &str) -> bool {
@@ -654,16 +672,40 @@ fn cases() -> Vec<W3cCase> {
             }),
         },
         W3cCase {
-            id: "w3c-update-unsupported",
-            source: "W3C SPARQL 1.1 Update tests",
-            feature: "SPARQL Update",
-            class: CaseClass::Unsupported,
-            reason: "update operations are not yet implemented",
-            strict_skip_exempt: true,
+            id: "w3c-update-insert-data",
+            source: "W3C SPARQL 1.1 Update tests (INSERT DATA)",
+            feature: "SPARQL Update INSERT DATA",
+            class: CaseClass::MustPass,
+            reason: "concrete triple insert with dictionary bridge",
+            strict_skip_exempt: false,
             format: DatasetFormat::NTriples,
             dataset: include_str!("w3c/data/basic.nt"),
-            query: include_str!("w3c/queries/update_unsupported.ru"),
-            expected: None,
+            query: include_str!("w3c/queries/update_insert_data.ru"),
+            expected: Some(ExpectedOutcome::UpdateOk { affected: 1 }),
+        },
+        W3cCase {
+            id: "w3c-update-delete-insert-where",
+            source: "W3C SPARQL 1.1 Update tests (DELETE/INSERT ... WHERE)",
+            feature: "SPARQL Update template with WHERE",
+            class: CaseClass::MustPass,
+            reason: "template materialization over WHERE solutions",
+            strict_skip_exempt: false,
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/update_delete_insert_where.ru"),
+            expected: Some(ExpectedOutcome::UpdateOk { affected: 2 }),
+        },
+        W3cCase {
+            id: "w3c-update-delete-where",
+            source: "W3C SPARQL 1.1 Update tests (DELETE WHERE)",
+            feature: "SPARQL Update DELETE WHERE",
+            class: CaseClass::MustPass,
+            reason: "delete all pattern matches (deduplicated)",
+            strict_skip_exempt: false,
+            format: DatasetFormat::NTriples,
+            dataset: include_str!("w3c/data/basic.nt"),
+            query: include_str!("w3c/queries/update_delete_where.ru"),
+            expected: Some(ExpectedOutcome::UpdateOk { affected: 1 }),
         },
     ]
 }

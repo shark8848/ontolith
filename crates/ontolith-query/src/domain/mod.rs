@@ -118,6 +118,23 @@ pub struct AggregateSpec {
     pub output: String,
 }
 
+/// SPARQL Update operation (L3 write surface).
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateOp {
+    /// `INSERT DATA { ... }` — concrete triples (no variables).
+    InsertData(Vec<TriplePattern>),
+    /// `DELETE DATA { ... }` — concrete triples (no variables).
+    DeleteData(Vec<TriplePattern>),
+    /// `DELETE { tpl } INSERT { tpl } WHERE { pattern }` (either side may be empty).
+    DeleteInsert {
+        delete: Vec<TriplePattern>,
+        insert: Vec<TriplePattern>,
+        where_pattern: Algebra,
+    },
+    /// `DELETE WHERE { pattern }` — delete every match of the pattern.
+    DeleteWhere(Vec<TriplePattern>),
+}
+
 /// Property path subset used by the L3 executor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathExpression {
@@ -204,6 +221,8 @@ pub struct QueryPlan {
     pub id: QueryPlanId,
     pub kind: QueryKind,
     pub algebra: Algebra,
+    /// SPARQL Update operations (only for `QueryKind::Update`).
+    pub update_ops: Vec<UpdateOp>,
     pub prefixes: BTreeMap<String, String>,
     pub base: Option<String>,
     pub logical_steps: Vec<String>,
@@ -494,6 +513,8 @@ pub struct QueryResult {
     pub solutions: Vec<Solution>,
     pub boolean: Option<bool>,
     pub construct_triples: Vec<ontolith_rdf::domain::Triple>,
+    /// Number of triples inserted/deleted by a SPARQL Update (0 for reads).
+    pub affected: u64,
     pub elapsed_ms: u64,
     pub timed_out: bool,
     pub cancelled: bool,

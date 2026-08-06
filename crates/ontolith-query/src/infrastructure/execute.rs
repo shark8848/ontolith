@@ -1,16 +1,18 @@
 //! Algebra executor producing solution bindings (L3).
 
-use crate::application::QueryReadService;
+use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
     AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, PathExpression, QueryKind,
-    QueryPlan, QueryRequest, QueryResult, Solution, TermPattern, TriplePattern,
+    QueryPlan, QueryRequest, QueryResult, Solution, TermPattern, TriplePattern, UpdateOp,
 };
 use ontolith_core::domain::{Iri, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
+use ontolith_storage::domain::WriteOperation;
 use ontolith_transaction::domain::TxnId;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 pub struct AlgebraExecutor {
@@ -39,6 +41,7 @@ impl AlgebraExecutor {
                     None
                 },
                 construct_triples: Vec::new(),
+                affected: 0,
                 elapsed_ms: 0,
                 timed_out: true,
                 cancelled: false,
@@ -68,6 +71,7 @@ impl AlgebraExecutor {
                         None
                     },
                     construct_triples: Vec::new(),
+                    affected: 0,
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     timed_out: true,
                     cancelled: false,
@@ -91,6 +95,7 @@ impl AlgebraExecutor {
                 solutions: Vec::new(),
                 boolean: Some(!solutions.is_empty()),
                 construct_triples: Vec::new(),
+                affected: 0,
                 elapsed_ms: started.elapsed().as_millis() as u64,
                 timed_out,
                 cancelled,
@@ -103,6 +108,7 @@ impl AlgebraExecutor {
                     solutions: Vec::new(),
                     boolean: None,
                     construct_triples: triples,
+                    affected: 0,
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     timed_out,
                     cancelled,
@@ -124,6 +130,7 @@ impl AlgebraExecutor {
                     solutions,
                     boolean: None,
                     construct_triples: Vec::new(),
+                    affected: 0,
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     timed_out,
                     cancelled,
@@ -166,10 +173,200 @@ fn empty_cancelled(kind: QueryKind, started: Instant) -> QueryResult {
             None
         },
         construct_triples: Vec::new(),
+        affected: 0,
         elapsed_ms: started.elapsed().as_millis() as u64,
         timed_out: false,
         cancelled: true,
     }
+}
+
+/// SPARQL Update execution: resolves concrete triples, evaluates DELETE/INSERT
+/// templates against the WHERE solutions, and applies writes in one txn.
+pub fn execute_update(
+    plan: &QueryPlan,
+    request: &QueryRequest,
+    read: &dyn QueryReadService,
+    write: &dyn UpdateWriteService,
+) -> Result<QueryResult, OntolithError> {
+    let started = Instant::now();
+    let txn_id = next_update_txn();
+    let ctx = ExecCtx {
+        read,
+        txn_id: Some(txn_id),
+        request,
+        started,
+    };
+    let mut affected: u64 = 0;
+
+    let result = (|| -> Result<(), OntolithError> {
+        for op in &plan.update_ops {
+            match op {
+                UpdateOp::InsertData(patterns) => {
+                    let triples = concrete_update_triples(patterns, read)?;
+                    let ops: Vec<_> = triples
+                        .iter()
+                        .map(|t| WriteOperation::PutTriple(t.clone()))
+                        .collect();
+                    if !ops.is_empty() {
+                        write.apply_write_batch(txn_id, ops)?;
+                    }
+                    affected += triples.len() as u64;
+                }
+                UpdateOp::DeleteData(patterns) => {
+                    let triples = concrete_update_triples(patterns, read)?;
+                    let ops: Vec<_> = triples
+                        .iter()
+                        .map(|t| WriteOperation::DeleteTriple(t.clone()))
+                        .collect();
+                    if !ops.is_empty() {
+                        write.apply_write_batch(txn_id, ops)?;
+                    }
+                    affected += triples.len() as u64;
+                }
+                UpdateOp::DeleteInsert {
+                    delete,
+                    insert,
+                    where_pattern,
+                } => {
+                    let solutions = eval_algebra(where_pattern, &ctx)?;
+                    let mut ops = Vec::new();
+                    let mut seen = HashSet::new();
+                    for sol in &solutions {
+                        for t in materialize_update_triples(delete, sol, read)? {
+                            if seen.insert(triple_key(&t)) {
+                                ops.push(WriteOperation::DeleteTriple(t));
+                            }
+                        }
+                        for t in materialize_update_triples(insert, sol, read)? {
+                            ops.push(WriteOperation::PutTriple(t));
+                        }
+                    }
+                    if !ops.is_empty() {
+                        affected += ops.len() as u64;
+                        write.apply_write_batch(txn_id, ops)?;
+                    }
+                }
+                UpdateOp::DeleteWhere(patterns) => {
+                    let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &ctx)?;
+                    let mut ops = Vec::new();
+                    let mut seen = HashSet::new();
+                    for sol in &solutions {
+                        for t in materialize_update_triples(patterns, sol, read)? {
+                            if seen.insert(triple_key(&t)) {
+                                ops.push(WriteOperation::DeleteTriple(t));
+                            }
+                        }
+                    }
+                    if !ops.is_empty() {
+                        affected += ops.len() as u64;
+                        write.apply_write_batch(txn_id, ops)?;
+                    }
+                }
+            }
+            ctx.check()?;
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => write.commit(txn_id)?,
+        Err(e) => {
+            let _ = write.abort(txn_id);
+            return Err(e);
+        }
+    }
+
+    Ok(QueryResult {
+        kind: QueryKind::Update,
+        variables: Vec::new(),
+        solutions: Vec::new(),
+        boolean: None,
+        construct_triples: Vec::new(),
+        affected,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        timed_out: false,
+        cancelled: false,
+    })
+}
+
+static UPDATE_TXN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_update_txn() -> TxnId {
+    // Offset range keeps L3-generated txn ids disjoint from L5 txn manager ids.
+    let n = UPDATE_TXN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    TxnId::new(0x8000_0000_0000_0000 + n as u128)
+}
+
+fn concrete_update_triples(
+    patterns: &[TriplePattern],
+    read: &dyn QueryReadService,
+) -> Result<Vec<Triple>, OntolithError> {
+    let mut out = Vec::new();
+    for p in patterns {
+        let triples = materialize_update_triples(std::slice::from_ref(p), &Solution::new(), read)?;
+        if triples.is_empty() {
+            return Err(OntolithError::query(
+                "DATA block triples must be concrete (no variables)",
+            ));
+        }
+        out.extend(triples);
+    }
+    Ok(out)
+}
+
+fn materialize_update_triples(
+    patterns: &[TriplePattern],
+    sol: &Solution,
+    read: &dyn QueryReadService,
+) -> Result<Vec<Triple>, OntolithError> {
+    let mut out = Vec::new();
+    for p in patterns {
+        let subject = match &p.subject {
+            TermPattern::Node(n) => *n,
+            TermPattern::Iri(i) => read.encode_node(i.as_str()).ok_or_else(|| {
+                OntolithError::query(format!(
+                    "cannot resolve subject <{}> to a node id (missing dictionary bridge)",
+                    i.as_str()
+                ))
+            })?,
+            TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v) {
+                Some(BoundValue::Node(n) | BoundValue::Blank(n)) => *n,
+                _ => continue,
+            },
+            TermPattern::Literal(_) => {
+                return Err(OntolithError::query("literal cannot be a triple subject"));
+            }
+        };
+        let predicate = match &p.predicate {
+            TermPattern::Iri(i) => i.clone(),
+            TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v) {
+                Some(BoundValue::Iri(i)) => i.clone(),
+                _ => continue,
+            },
+            _ => return Err(OntolithError::query("predicate must be an IRI")),
+        };
+        let object = match &p.object {
+            TermPattern::Iri(i) => Term::Iri(i.clone()),
+            TermPattern::Literal(l) => Term::Literal(l.clone()),
+            TermPattern::Node(n) => Term::BlankNode(*n),
+            TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v) {
+                Some(BoundValue::Iri(i)) => Term::Iri(i.clone()),
+                Some(BoundValue::Literal(l)) => Term::Literal(l.clone()),
+                Some(BoundValue::Node(n) | BoundValue::Blank(n)) => Term::BlankNode(*n),
+                None => continue,
+            },
+        };
+        out.push(Triple {
+            subject,
+            predicate,
+            object,
+        });
+    }
+    Ok(out)
+}
+
+fn triple_key(t: &Triple) -> String {
+    format!("{}|{}|{t:?}", t.subject.get(), t.predicate.as_str())
 }
 
 fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, OntolithError> {

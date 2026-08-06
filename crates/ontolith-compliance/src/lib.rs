@@ -48,7 +48,7 @@ pub const SPARQL_W3C_SUBSET_FEATURES: &[&str] = &[
     "Aggregate GROUP BY / HAVING (full aggregation)",
     "Subquery (nested SELECT + LIMIT baseline)",
     "PREFIX + Turtle ingest",
-    "unsupported: update",
+    "SPARQL Update (INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE)",
 ];
 
 pub fn profile_name() -> &'static str {

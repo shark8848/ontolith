@@ -10,14 +10,16 @@ mod sparql_mvp_legacy {
     // Intentionally empty shim — full engine replaces sparql_mvp.
 }
 
-use crate::application::{QueryExecutor, QueryPlanner, QueryReadService};
+use crate::application::{
+    EngineUpdateWriteService, QueryExecutor, QueryPlanner, QueryReadService, UpdateWriteService,
+};
 #[cfg(test)]
 use crate::domain::QueryResultSummary;
-use crate::domain::{QueryPlan, QueryRequest, QueryResult};
+use crate::domain::{QueryKind, QueryPlan, QueryRequest, QueryResult};
 use ontolith_core::domain::{Iri, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
-use ontolith_storage::application::{DictionaryCodec, TripleRepository};
+use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
 use ontolith_transaction::domain::TxnId;
 use std::sync::Arc;
 
@@ -86,6 +88,10 @@ impl QueryReadService for InMemoryQueryReadService {
             .map(|dict| dict.encode_node(iri.as_str())))
     }
 
+    fn encode_node(&self, value: &str) -> Option<NodeId> {
+        self.dictionary.as_ref().map(|dict| dict.encode_node(value))
+    }
+
     fn matching(
         &self,
         subject: Option<NodeId>,
@@ -132,6 +138,37 @@ impl QueryExecutor for ReadServiceQueryExecutor {
     }
 }
 
+/// Executor that handles SPARQL Update plans (write) and delegates reads.
+pub struct UpdateQueryExecutor<W> {
+    inner: ReadServiceQueryExecutor,
+    read: Arc<dyn QueryReadService>,
+    write: W,
+}
+
+impl<W: UpdateWriteService> UpdateQueryExecutor<W> {
+    pub fn new(read_service: Arc<dyn QueryReadService>, write_service: W) -> Self {
+        Self {
+            inner: ReadServiceQueryExecutor::new(Arc::clone(&read_service)),
+            read: read_service,
+            write: write_service,
+        }
+    }
+}
+
+impl<W: UpdateWriteService> QueryExecutor for UpdateQueryExecutor<W> {
+    fn execute(
+        &self,
+        plan: &QueryPlan,
+        request: &QueryRequest,
+    ) -> Result<QueryResult, OntolithError> {
+        if plan.kind == QueryKind::Update {
+            execute::execute_update(plan, request, self.read.as_ref(), &self.write)
+        } else {
+            self.inner.execute(plan, request)
+        }
+    }
+}
+
 /// Build the standard L3 pipeline: parse → rule optimize → execute.
 pub fn standard_pipeline(
     repo: Arc<dyn TripleRepository>,
@@ -145,6 +182,27 @@ pub fn standard_pipeline(
         SimpleQueryPlanner,
         RuleBasedOptimizer,
         ReadServiceQueryExecutor::new(read),
+    )
+}
+
+/// Pipeline with SPARQL Update support over a storage engine (memory or RocksDB).
+pub fn update_pipeline(
+    repo: Arc<dyn TripleRepository>,
+    engine: Arc<dyn StorageEngine>,
+    dictionary: Option<Arc<dyn DictionaryCodec>>,
+) -> crate::application::QueryPipeline<
+    SimpleQueryPlanner,
+    RuleBasedOptimizer,
+    UpdateQueryExecutor<EngineUpdateWriteService>,
+> {
+    let read: Arc<dyn QueryReadService> = match dictionary {
+        Some(dict) => Arc::new(InMemoryQueryReadService::with_dictionary(repo, dict)),
+        None => Arc::new(InMemoryQueryReadService::new(repo)),
+    };
+    crate::application::QueryPipeline::new(
+        SimpleQueryPlanner,
+        RuleBasedOptimizer,
+        UpdateQueryExecutor::new(read, EngineUpdateWriteService::new(engine)),
     )
 }
 
@@ -238,6 +296,177 @@ mod tests {
         repo: Arc<dyn TripleRepository>,
     ) -> QueryPipeline<SimpleQueryPlanner, RuleBasedOptimizer, ReadServiceQueryExecutor> {
         standard_pipeline(repo)
+    }
+
+    /// Dictionary-backed seed: alice/bob have `<name>` literals.
+    fn seed_update() -> (
+        Arc<InMemoryStorageEngine>,
+        Arc<InMemoryDictionary>,
+        Arc<dyn TripleRepository>,
+    ) {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+        let txn = TxnId::new(1);
+        for (s, name) in [
+            ("http://ex.org/alice", "Alice"),
+            ("http://ex.org/bob", "Bob"),
+        ] {
+            repo.insert(
+                txn,
+                Triple {
+                    subject: dict.encode_node(s),
+                    predicate: Iri::new("http://ex.org/name"),
+                    object: Term::Literal(LiteralValue::String(name.into())),
+                },
+            )
+            .unwrap();
+        }
+        engine.commit_transaction(txn).unwrap();
+        (engine, dict, repo)
+    }
+
+    fn update_pipeline(
+        engine: Arc<InMemoryStorageEngine>,
+        dict: Arc<InMemoryDictionary>,
+        repo: Arc<dyn TripleRepository>,
+    ) -> crate::application::QueryPipeline<
+        SimpleQueryPlanner,
+        RuleBasedOptimizer,
+        UpdateQueryExecutor<EngineUpdateWriteService>,
+    > {
+        crate::infrastructure::update_pipeline(repo, engine, Some(dict))
+    }
+
+    fn count_names(
+        p: &crate::application::QueryPipeline<
+            SimpleQueryPlanner,
+            RuleBasedOptimizer,
+            UpdateQueryExecutor<EngineUpdateWriteService>,
+        >,
+    ) -> usize {
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT (COUNT(?n) AS ?c) WHERE { ?s <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        r.solutions[0]
+            .get("c")
+            .map(|v| match v {
+                BoundValue::Literal(LiteralValue::Integer(i)) => *i as usize,
+                _ => 0,
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn update_insert_data() {
+        let (engine, dict, repo) = seed_update();
+        let p = update_pipeline(engine, dict, repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "INSERT DATA { <http://ex.org/carol> <http://ex.org/name> \"Carol\" }",
+            ))
+            .unwrap();
+        assert_eq!(r.kind, crate::domain::QueryKind::Update);
+        assert_eq!(r.affected, 1);
+        assert_eq!(count_names(&p), 3);
+    }
+
+    #[test]
+    fn update_delete_data() {
+        let (engine, dict, repo) = seed_update();
+        let p = update_pipeline(engine, dict, repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "DELETE DATA { <http://ex.org/alice> <http://ex.org/name> \"Alice\" }",
+            ))
+            .unwrap();
+        assert_eq!(r.affected, 1);
+        assert_eq!(count_names(&p), 1);
+    }
+
+    #[test]
+    fn update_insert_where_materializes_template() {
+        let (engine, dict, repo) = seed_update();
+        let p = update_pipeline(engine, dict, repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "INSERT { ?s <http://ex.org/p> <http://ex.org/q> } WHERE { ?s <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        assert_eq!(r.affected, 2);
+        let q = p
+            .execute(&QueryRequest::new(
+                "SELECT (COUNT(?s) AS ?c) WHERE { ?s <http://ex.org/p> <http://ex.org/q> }",
+            ))
+            .unwrap();
+        assert_eq!(
+            q.solutions[0].get("c"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(2)))
+        );
+    }
+
+    #[test]
+    fn update_delete_where() {
+        let (engine, dict, repo) = seed_update();
+        let p = update_pipeline(engine, dict, repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "DELETE WHERE { ?s <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        assert_eq!(r.affected, 2);
+        assert_eq!(count_names(&p), 0);
+    }
+
+    #[test]
+    fn update_delete_insert_rename() {
+        let (engine, dict, repo) = seed_update();
+        let p = update_pipeline(engine, dict, repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "DELETE { ?s <http://ex.org/name> ?n } INSERT { ?s <http://ex.org/renamed> ?n } WHERE { ?s <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        assert_eq!(r.affected, 4);
+        assert_eq!(count_names(&p), 0);
+        let q = p
+            .execute(&QueryRequest::new(
+                "SELECT (COUNT(?n) AS ?c) WHERE { ?s <http://ex.org/renamed> ?n }",
+            ))
+            .unwrap();
+        assert_eq!(
+            q.solutions[0].get("c"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(2)))
+        );
+    }
+
+    #[test]
+    fn update_data_block_rejects_variables() {
+        let planner = SimpleQueryPlanner;
+        let err = planner
+            .plan(&QueryRequest::new(
+                "INSERT DATA { ?s <http://ex.org/p> <http://ex.org/q> }",
+            ))
+            .expect_err("variables in DATA block rejected");
+        assert!(err.message().contains("concrete"));
+    }
+
+    #[test]
+    fn update_unsupported_forms() {
+        let planner = SimpleQueryPlanner;
+        for q in [
+            "LOAD <http://example.org/g>",
+            "CLEAR ALL",
+            "WITH <http://ex.org/g> DELETE { ?s ?p ?o }",
+        ] {
+            let err = planner
+                .plan(&QueryRequest::new(q))
+                .expect_err("unsupported");
+            assert!(matches!(err, OntolithError::Failed(_)));
+        }
     }
 
     #[test]
@@ -561,7 +790,9 @@ mod tests {
         let (_e, repo) = seed();
         let p = pipeline(repo);
         let err = p
-            .execute(&QueryRequest::new("INSERT DATA { <a> <b> <c> }"))
+            .execute(&QueryRequest::new(
+                "INSERT DATA { <http://ex.org/a> <http://ex.org/b> <http://ex.org/c> }",
+            ))
             .expect_err("update");
         assert!(matches!(err, OntolithError::Unsupported(_)));
     }

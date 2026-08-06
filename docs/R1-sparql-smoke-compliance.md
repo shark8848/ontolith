@@ -1,7 +1,7 @@
 # R1 SPARQL Smoke Compliance Profile
 
 文档 ID: COMP-R1-0001  
-版本: 1.7.2  
+版本: 1.7.3  
 日期: 2026-08-06  
 Crate: [`ontolith-compliance`](../crates/ontolith-compliance)
 
@@ -59,6 +59,7 @@ Current must-pass increment:
 - Aggregate COUNT (no GROUP BY)
 - Aggregate COUNT(*)
 - Aggregate GROUP BY / HAVING (full aggregation: COUNT/SUM/AVG/MIN/MAX)
+- SPARQL Update (INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE)
 - Subquery (nested SELECT + LIMIT baseline)
 - Property path sequence (iri/iri baseline)
 - Property path `+` / `*` / `?` / `|` / `^` minimal set baseline
@@ -67,13 +68,11 @@ Current must-pass increment:
 Current unsupported:
 
 - Grouped/nested path forms beyond current minimal set
-- SPARQL Update (strict skip-exempt)
 
 ## Out of scope (R1+)
 
 - Grouped/nested path forms beyond current minimal set
 - Advanced subquery forms beyond nested SELECT + LIMIT baseline
-- SPARQL Update
 - Full W3C manifest-driven suite
 - Performance / SLO gates
 
@@ -84,11 +83,11 @@ Current unsupported:
 - `sparql_w3c_subset_strict`: non-blocking observer (`ONTOLITH_W3C_SUBSET_STRICT=1`) for xfail and in-scope skip debt trend.
 - `sparql_w3c_strict_promotion_readiness`: main 分支自动评估最近 3 次 strict observer 是否连续全绿，并在 Job Summary 输出 READY/NOT READY 信号。
 
-Current profile snapshot (v0, 2026-07-23):
+Current profile snapshot (v0, 2026-08-06):
 
-- must-pass: 27
+- must-pass: 30
 - known-gap: 0
-- unsupported: 1 (SPARQL Update, strict skip-exempt)
+- unsupported: 0
 
 ## Next
 

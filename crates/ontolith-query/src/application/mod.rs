@@ -4,6 +4,10 @@ use crate::domain::{QueryExplain, QueryPlan, QueryRequest, QueryResult, QueryRes
 use ontolith_core::domain::{Iri, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
+use ontolith_storage::application::StorageEngine;
+use ontolith_storage::domain::{WriteBatch, WriteOperation};
+use ontolith_transaction::domain::TxnId;
+use std::sync::Arc;
 
 /// Storage-backed triple access used by the physical executor.
 pub trait QueryReadService: Send + Sync {
@@ -33,6 +37,12 @@ pub trait QueryReadService: Send + Sync {
     /// Optional dictionary bridge for features that need subject-node lookup by IRI.
     fn node_for_iri(&self, _iri: &Iri) -> Result<Option<NodeId>, OntolithError> {
         Ok(None)
+    }
+
+    /// Dictionary-backed IRI → NodeId encoding for INSERT DATA subjects.
+    /// Returns `None` when no dictionary bridge is available.
+    fn encode_node(&self, _value: &str) -> Option<NodeId> {
+        None
     }
 
     /// Multi-bound pattern probe (L2 `matching_in_txn`); default filters single-index results.
@@ -118,6 +128,49 @@ pub trait QueryReadService: Send + Sync {
             elapsed_ms: started.elapsed().as_millis() as u64,
             timed_out: false,
         })
+    }
+}
+
+/// Write surface required by the SPARQL Update executor (L3).
+pub trait UpdateWriteService: Send + Sync {
+    fn apply_write_batch(
+        &self,
+        txn_id: TxnId,
+        operations: Vec<WriteOperation>,
+    ) -> Result<(), OntolithError>;
+
+    fn commit(&self, txn_id: TxnId) -> Result<(), OntolithError>;
+
+    fn abort(&self, txn_id: TxnId) -> Result<(), OntolithError>;
+}
+
+/// [`UpdateWriteService`] backed by a [`StorageEngine`] (memory or RocksDB).
+pub struct EngineUpdateWriteService {
+    engine: Arc<dyn StorageEngine>,
+}
+
+impl EngineUpdateWriteService {
+    pub fn new(engine: Arc<dyn StorageEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+impl UpdateWriteService for EngineUpdateWriteService {
+    fn apply_write_batch(
+        &self,
+        txn_id: TxnId,
+        operations: Vec<WriteOperation>,
+    ) -> Result<(), OntolithError> {
+        self.engine
+            .apply_write_batch(&WriteBatch { txn_id, operations })
+    }
+
+    fn commit(&self, txn_id: TxnId) -> Result<(), OntolithError> {
+        self.engine.commit_transaction(txn_id)
+    }
+
+    fn abort(&self, txn_id: TxnId) -> Result<(), OntolithError> {
+        self.engine.abort_transaction(txn_id)
     }
 }
 

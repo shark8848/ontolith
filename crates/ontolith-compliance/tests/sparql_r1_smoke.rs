@@ -6,7 +6,7 @@
 use ontolith_core::domain::{Iri, LiteralValue, NodeId};
 use ontolith_parser::infrastructure::{parse_ntriples, parse_turtle_doc};
 use ontolith_query::domain::{BoundValue, QueryKind, QueryRequest};
-use ontolith_query::infrastructure::standard_pipeline;
+use ontolith_query::infrastructure::{standard_pipeline, update_pipeline};
 use ontolith_rdf::domain::{Term, Triple};
 use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
 use ontolith_storage::infrastructure::{
@@ -78,6 +78,39 @@ fn exec(q: &str) -> ontolith_query::domain::QueryResult {
         .expect("query must succeed")
 }
 
+/// Dictionary-backed seed so INSERT DATA IRI subjects resolve to node ids.
+fn seed_repo_dict() -> (
+    Arc<InMemoryStorageEngine>,
+    Arc<InMemoryDictionary>,
+    Arc<dyn TripleRepository>,
+) {
+    let engine = Arc::new(InMemoryStorageEngine::new());
+    let dict = Arc::new(InMemoryDictionary::new());
+    let repo: Arc<dyn TripleRepository> =
+        Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+    let parsed = parse_ntriples(
+        r#"
+<http://ex.org/alice> <http://ex.org/name> "Alice" .
+<http://ex.org/bob> <http://ex.org/name> "Bob" .
+"#,
+        dict.as_ref(),
+    )
+    .expect("ntriples parse");
+    let txn = TxnId::new(1);
+    for triple in parsed.dataset.default_graph {
+        repo.insert(txn, triple).expect("insert");
+    }
+    engine.commit_transaction(txn).expect("commit");
+    (engine, dict, repo)
+}
+
+fn exec_update(q: &str) -> ontolith_query::domain::QueryResult {
+    let (engine, dict, repo) = seed_repo_dict();
+    let p = update_pipeline(repo, engine, Some(dict));
+    p.execute(&QueryRequest::new(q))
+        .expect("update must succeed")
+}
+
 #[test]
 fn profile_metadata_lists_features() {
     assert_eq!(ontolith_compliance::profile_name(), "R1-smoke");
@@ -121,6 +154,32 @@ fn construct_emits_triples() {
     );
     assert_eq!(r.kind, QueryKind::Construct);
     assert_eq!(r.construct_triples.len(), 2);
+}
+
+#[test]
+fn update_insert_data_persists_and_queryable() {
+    let (engine, dict, repo) = seed_repo_dict();
+    let p = update_pipeline(repo, engine, Some(dict));
+    let r = p
+        .execute(&QueryRequest::new(
+            "INSERT DATA { <http://ex.org/carol> <http://ex.org/name> \"Carol\" }",
+        ))
+        .expect("insert data");
+    assert_eq!(r.kind, QueryKind::Update);
+    assert_eq!(r.affected, 1);
+    let q = p
+        .execute(&QueryRequest::new(
+            "SELECT ?s WHERE { ?s <http://ex.org/name> ?n }",
+        ))
+        .expect("select");
+    assert_eq!(q.solutions.len(), 3);
+}
+
+#[test]
+fn update_delete_where_removes_matches() {
+    let r = exec_update("DELETE WHERE { ?s <http://ex.org/name> ?n }");
+    assert_eq!(r.kind, QueryKind::Update);
+    assert_eq!(r.affected, 2);
 }
 
 #[test]

@@ -6,7 +6,7 @@
 
 use crate::domain::{
     AggregateFunction, AggregateSpec, Algebra, Expression, OrderKey, PathExpression, QueryKind,
-    QueryPlan, QueryPlanId, QueryRequest, TermPattern, TriplePattern,
+    QueryPlan, QueryPlanId, QueryRequest, TermPattern, TriplePattern, UpdateOp,
 };
 use ontolith_core::domain::{Iri, LiteralValue};
 use ontolith_core::error::OntolithError;
@@ -73,11 +73,11 @@ impl<'a> SparqlParser<'a> {
             QueryKind::Construct
         } else if self.eat_keyword("DESCRIBE") {
             QueryKind::Describe
-        } else if self.eat_keyword("INSERT")
-            || self.eat_keyword("DELETE")
-            || self.eat_keyword("WITH")
-            || self.eat_keyword("LOAD")
-            || self.eat_keyword("CLEAR")
+        } else if self.looking_at_keyword("INSERT")
+            || self.looking_at_keyword("DELETE")
+            || self.looking_at_keyword("WITH")
+            || self.looking_at_keyword("LOAD")
+            || self.looking_at_keyword("CLEAR")
         {
             QueryKind::Update
         } else {
@@ -86,15 +86,31 @@ impl<'a> SparqlParser<'a> {
         };
         self.logical.push(format!("detect_kind:{}", kind.as_str()));
 
-        if matches!(kind, QueryKind::Update | QueryKind::Describe) {
+        if kind == QueryKind::Describe {
             return Ok(QueryPlan {
                 id: plan_id(self.input),
                 kind,
                 algebra: Algebra::Identity,
+                update_ops: Vec::new(),
                 prefixes: self.prefixes.clone(),
                 base: self.base.clone(),
                 logical_steps: self.logical.clone(),
                 physical_steps: vec![format!("unsupported:{}", kind.as_str())],
+                construct_template: Vec::new(),
+            });
+        }
+
+        if kind == QueryKind::Update {
+            let update_ops = self.parse_update_ops()?;
+            return Ok(QueryPlan {
+                id: plan_id(self.input),
+                kind,
+                algebra: Algebra::Identity,
+                update_ops,
+                prefixes: self.prefixes.clone(),
+                base: self.base.clone(),
+                logical_steps: self.logical.clone(),
+                physical_steps: vec!["update:ops".to_string()],
                 construct_template: Vec::new(),
             });
         }
@@ -372,6 +388,7 @@ impl<'a> SparqlParser<'a> {
             id: plan_id(self.input),
             kind,
             algebra,
+            update_ops: Vec::new(),
             prefixes: self.prefixes.clone(),
             base: self.base.clone(),
             logical_steps: self.logical.clone(),
@@ -418,6 +435,81 @@ impl<'a> SparqlParser<'a> {
         }
         self.expect_char('}')?;
         Ok(patterns)
+    }
+
+    fn parse_data_block(&mut self) -> Result<Vec<TriplePattern>, OntolithError> {
+        let patterns = self.parse_construct_template()?;
+        for p in &patterns {
+            if p.subject.is_variable()
+                || p.predicate.is_variable()
+                || p.object.is_variable()
+                || matches!(p.subject, TermPattern::Blank(_))
+                || matches!(p.object, TermPattern::Blank(_))
+            {
+                return Err(self.err("DATA block triples must be concrete (no variables)"));
+            }
+        }
+        Ok(patterns)
+    }
+
+    fn parse_update_ops(&mut self) -> Result<Vec<UpdateOp>, OntolithError> {
+        let mut ops = Vec::new();
+        self.skip();
+        if self.eat_keyword("INSERT") {
+            self.skip();
+            if self.eat_keyword("DATA") {
+                self.skip();
+                ops.push(UpdateOp::InsertData(self.parse_data_block()?));
+            } else {
+                let insert = self.parse_construct_template()?;
+                self.skip();
+                self.expect_keyword("WHERE")?;
+                self.skip();
+                let where_pattern = self.parse_group_graph_pattern()?;
+                ops.push(UpdateOp::DeleteInsert {
+                    delete: Vec::new(),
+                    insert,
+                    where_pattern,
+                });
+            }
+        } else if self.eat_keyword("DELETE") {
+            self.skip();
+            if self.eat_keyword("DATA") {
+                self.skip();
+                ops.push(UpdateOp::DeleteData(self.parse_data_block()?));
+            } else if self.looking_at_keyword("WHERE") {
+                self.eat_keyword("WHERE");
+                self.skip();
+                ops.push(UpdateOp::DeleteWhere(self.parse_construct_template()?));
+            } else {
+                let delete = self.parse_construct_template()?;
+                self.skip();
+                let mut insert = Vec::new();
+                if self.eat_keyword("INSERT") {
+                    self.skip();
+                    insert = self.parse_construct_template()?;
+                    self.skip();
+                }
+                self.expect_keyword("WHERE")?;
+                self.skip();
+                let where_pattern = self.parse_group_graph_pattern()?;
+                ops.push(UpdateOp::DeleteInsert {
+                    delete,
+                    insert,
+                    where_pattern,
+                });
+            }
+        } else if self.eat_keyword("WITH") {
+            return Err(self.err("WITH graph-scoped updates are not supported"));
+        } else if self.eat_keyword("LOAD") {
+            return Err(self.err("LOAD remote graph is not supported"));
+        } else if self.eat_keyword("CLEAR") {
+            return Err(self.err("CLEAR graph is not supported"));
+        } else {
+            return Err(self.err("expected update operation INSERT/DELETE"));
+        }
+        self.logical.push(format!("update_ops:{}", ops.len()));
+        Ok(ops)
     }
 
     fn parse_aggregate_spec(&mut self) -> Result<AggregateSpec, OntolithError> {

@@ -16,7 +16,7 @@ use ontolith_parser::infrastructure::{
     parse_nquads, parse_ntriples, parse_trig_doc, parse_turtle_doc,
 };
 use ontolith_query::domain::{BoundValue, QueryKind, QueryRequest, QueryResult};
-use ontolith_query::infrastructure::standard_pipeline;
+use ontolith_query::infrastructure::update_pipeline;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
@@ -469,7 +469,13 @@ impl AppState {
             qreq = qreq.with_timeout(t);
         }
 
-        let pipeline = standard_pipeline(Arc::clone(&self.triples));
+        // Update-capable pipeline: SELECT/ASK/CONSTRUCT delegate to the read
+        // executor; INSERT/DELETE apply writes through the storage engine.
+        let pipeline = update_pipeline(
+            Arc::clone(&self.triples),
+            Arc::clone(&self.storage),
+            Some(Arc::clone(&self.dictionary)),
+        );
 
         if explain {
             let plan = pipeline.explain(&qreq)?;
@@ -501,7 +507,11 @@ impl AppState {
             "query",
             "sparql",
             AuditOutcome::Allow,
-            format!("rows={}", result.row_count()),
+            if result.kind == QueryKind::Update {
+                format!("affected={}", result.affected)
+            } else {
+                format!("rows={}", result.row_count())
+            },
         );
 
         // SPARQL Query Results JSON Format (W3C-inspired) when accept/format asks for it.
@@ -1036,6 +1046,15 @@ fn sparql_results_json(
                 json_string(ctx.tenant.as_str()),
             )
         }
+        QueryKind::Update => format!(
+            r#"{{"head":{{}},"update":{{"affected":{}}},"meta":{{"elapsed_ms":{},"timed_out":{},"cancelled":{},"tenant":{},"consistency":{}}}}}"#,
+            result.affected,
+            result.elapsed_ms,
+            result.timed_out,
+            result.cancelled,
+            json_string(ctx.tenant.as_str()),
+            json_string(consistency.as_str()),
+        ),
         _ => {
             // SELECT (and fallback): W3C SPARQL Results JSON-like
             let vars = json_string_array(&result.variables);
@@ -1282,4 +1301,55 @@ pub fn shared_handler(state: Arc<AppState>) -> crate::http::Handler {
 
 pub fn dispatch_for_test(state: &Arc<AppState>, req: HttpRequest) -> HttpResponse {
     state.handle(req)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn sparql_req(method: &str, query: &str) -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "content-type".to_owned(),
+            "application/sparql-query".to_owned(),
+        );
+        HttpRequest {
+            method: method.to_owned(),
+            path: "/sparql".to_owned(),
+            query: HashMap::new(),
+            headers,
+            body: query.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn sparql_update_insert_data_via_http() {
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let resp = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "INSERT DATA { <http://ex.org/a> <http://ex.org/b> \"c\" }",
+            ),
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        assert!(String::from_utf8_lossy(&resp.body).contains("\"affected\":1"));
+
+        let read = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "SELECT (COUNT(?s) AS ?c) WHERE { ?s <http://ex.org/b> ?o }",
+            ),
+        );
+        assert_eq!(read.status, 200);
+        assert!(String::from_utf8_lossy(&read.body).contains("\"c\""));
+    }
 }
