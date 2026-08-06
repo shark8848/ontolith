@@ -67,12 +67,16 @@ pub struct ReasoningTask {
     pub plan_id: Option<QueryPlanId>,
     pub mode: InferenceMode,
     pub max_iterations: u32,
+    /// Wall-clock budget per materialization in milliseconds; `None` = unlimited.
+    pub max_elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReasoningReport {
     pub inferred_triples: usize,
     pub elapsed_ms: u64,
+    /// True when the wall-clock budget was exhausted before convergence.
+    pub timed_out: bool,
 }
 
 /// Outcome of a materialization run.

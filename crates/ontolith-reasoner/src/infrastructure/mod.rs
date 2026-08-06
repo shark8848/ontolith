@@ -2,7 +2,8 @@
 //!
 //! Fixpoint iteration over the supported rule set (rdfs5/6/7/8/9, prp-inv1/2,
 //! prp-symp, prp-trp, cax-sco) with per-iteration dedup. Guards:
-//! `max_iterations` bounds the loop and `InferenceMode::Off` short-circuits.
+//! `max_iterations` and `max_elapsed_ms` bound the loop and
+//! `InferenceMode::Off` short-circuits.
 
 mod shacl;
 
@@ -45,11 +46,19 @@ impl Reasoner for ForwardChainReasoner {
                 report: ReasoningReport {
                     inferred_triples: 0,
                     elapsed_ms: started.elapsed().as_millis() as u64,
+                    timed_out: false,
                 },
             });
         }
 
+        let mut timed_out = false;
         for _ in 0..task.max_iterations.max(1) {
+            if let Some(limit) = task.max_elapsed_ms
+                && started.elapsed().as_millis() as u64 >= limit
+            {
+                timed_out = true;
+                break;
+            }
             let mut frontier = Vec::new();
             apply_rules(dict, &closure, &mut frontier);
             let new_count = absorb_new(&mut closure, frontier);
@@ -64,6 +73,7 @@ impl Reasoner for ForwardChainReasoner {
             report: ReasoningReport {
                 inferred_triples: inferred,
                 elapsed_ms: started.elapsed().as_millis() as u64,
+                timed_out,
             },
         })
     }
@@ -305,6 +315,7 @@ mod tests {
             plan_id: None,
             mode,
             max_iterations: 16,
+            max_elapsed_ms: None,
         }
     }
 
@@ -541,5 +552,40 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing rule {expected}");
         }
+    }
+
+    #[test]
+    fn wall_clock_budget_guards_materialization() {
+        let dict = InMemoryDictionary::new();
+        let rdfs = "http://www.w3.org/2000/01/rdf-schema#";
+        let input = vec![
+            t("urn:A", &format!("{rdfs}subClassOf"), "urn:B", &dict),
+            t("urn:B", &format!("{rdfs}subClassOf"), "urn:C", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+
+        let exhausted = ReasoningTask {
+            plan_id: None,
+            mode: InferenceMode::ForwardChaining,
+            max_iterations: 16,
+            max_elapsed_ms: Some(0),
+        };
+        let outcome = reasoner
+            .materialize(&dict, &exhausted, &input)
+            .expect("materialize");
+        assert!(outcome.report.timed_out, "expected early stop");
+        assert_eq!(outcome.report.inferred_triples, 0);
+
+        let ample = ReasoningTask {
+            plan_id: None,
+            mode: InferenceMode::ForwardChaining,
+            max_iterations: 16,
+            max_elapsed_ms: Some(60_000),
+        };
+        let outcome = reasoner
+            .materialize(&dict, &ample, &input)
+            .expect("materialize");
+        assert!(!outcome.report.timed_out);
+        assert!(outcome.report.inferred_triples >= 1);
     }
 }
