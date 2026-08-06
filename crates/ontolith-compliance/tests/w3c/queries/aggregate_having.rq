@@ -1,0 +1,5 @@
+SELECT ?s (COUNT(?p) AS ?c) WHERE {
+  ?s ?p ?o .
+}
+GROUP BY ?s
+HAVING (COUNT(?p) >= 2)

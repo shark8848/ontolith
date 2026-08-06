@@ -93,12 +93,14 @@ fn eliminate_identity(algebra: Algebra) -> Algebra {
             input: Box::new(eliminate_identity(*input)),
         },
         Algebra::Aggregate {
-            function,
-            output,
+            groups,
+            aggregates,
+            having,
             input,
         } => Algebra::Aggregate {
-            function,
-            output,
+            groups: groups.clone(),
+            aggregates: aggregates.clone(),
+            having: having.clone(),
             input: Box::new(eliminate_identity(*input)),
         },
         Algebra::Path {
@@ -178,12 +180,14 @@ fn reorder_and_merge(algebra: Algebra) -> Algebra {
             input: Box::new(reorder_and_merge(*input)),
         },
         Algebra::Aggregate {
-            function,
-            output,
+            groups,
+            aggregates,
+            having,
             input,
         } => Algebra::Aggregate {
-            function,
-            output,
+            groups: groups.clone(),
+            aggregates: aggregates.clone(),
+            having: having.clone(),
             input: Box::new(reorder_and_merge(*input)),
         },
         Algebra::Path {
@@ -283,12 +287,14 @@ fn push_filters(algebra: Algebra) -> Algebra {
             input: Box::new(push_filters(*input)),
         },
         Algebra::Aggregate {
-            function,
-            output,
+            groups,
+            aggregates,
+            having,
             input,
         } => Algebra::Aggregate {
-            function,
-            output,
+            groups: groups.clone(),
+            aggregates: aggregates.clone(),
+            having: having.clone(),
             input: Box::new(push_filters(*input)),
         },
         Algebra::Path {

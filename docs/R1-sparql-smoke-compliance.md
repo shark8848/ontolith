@@ -1,8 +1,8 @@
 # R1 SPARQL Smoke Compliance Profile
 
 文档 ID: COMP-R1-0001  
-版本: 1.7.1  
-日期: 2026-07-23  
+版本: 1.7.2  
+日期: 2026-08-06  
 Crate: [`ontolith-compliance`](../crates/ontolith-compliance)
 
 ---
@@ -58,6 +58,7 @@ Current must-pass increment:
 
 - Aggregate COUNT (no GROUP BY)
 - Aggregate COUNT(*)
+- Aggregate GROUP BY / HAVING (full aggregation: COUNT/SUM/AVG/MIN/MAX)
 - Subquery (nested SELECT + LIMIT baseline)
 - Property path sequence (iri/iri baseline)
 - Property path `+` / `*` / `?` / `|` / `^` minimal set baseline
@@ -72,7 +73,6 @@ Current unsupported:
 
 - Grouped/nested path forms beyond current minimal set
 - Advanced subquery forms beyond nested SELECT + LIMIT baseline
-- Full aggregates/GROUP BY/HAVING beyond COUNT baseline
 - SPARQL Update
 - Full W3C manifest-driven suite
 - Performance / SLO gates
@@ -86,7 +86,7 @@ Current unsupported:
 
 Current profile snapshot (v0, 2026-07-23):
 
-- must-pass: 25
+- must-pass: 27
 - known-gap: 0
 - unsupported: 1 (SPARQL Update, strict skip-exempt)
 

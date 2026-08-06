@@ -231,6 +231,7 @@ Dependencies:
 ### WBS-04 Query and Optimization
 - SPARQL parser and algebra translation.
 - Logical/physical planner and iterator executor.
+- Full aggregation (GROUP BY/HAVING, COUNT(DISTINCT)/SUM/AVG/MIN/MAX, subquery aggregation). ✅
 - Explain, timeout, and cancellation.
 
 ### WBS-05 Reasoning and SHACL
@@ -409,7 +410,7 @@ Mandatory artifacts per phase:
 **Remaining R1 exit criteria**
 
 - [ ] Multi-node data plane (multi-process Raft / openraft, ADR first)
-- [ ] Full W3C suite (currently required-lite subset must-pass 25/25)
+- [ ] Full W3C suite (currently required-lite subset must-pass 27/27)
 - [ ] Online rebalance and disaster-recovery drill runbook with evidence (P7-01 / P7-04)
 - [ ] Release pipeline and rollback drill pass
 - [ ] Tick all R1 exit criteria

@@ -1,7 +1,7 @@
 # L3 — Parser & Query Engine 完整功能说明
 
 文档 ID: IMPL-L3-0001  
-版本: 2.6.0  
+版本: 2.7.0  
 状态: Implemented (full L3 core, not MVP-only)  
 日期: 2026-07-22  
 对应 crate:
@@ -53,7 +53,8 @@ SPARQL / RDF text
 | JSON-LD | ❌ 明确 Unsupported |
 | SPARQL Update / DESCRIBE 执行 | ❌ 解析识别，执行 Unsupported |
 | 属性路径扩展（分组/嵌套更完整 1.1 语法） | ❌ 后续增强 |
-| 高级子查询 / EXISTS / 完整聚合（GROUP BY/HAVING） / 服务联邦 | ❌ 后续增强 |
+| 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合） | ✅ |
+| 高级子查询（相关子查询等） / EXISTS / 服务联邦 | ❌ 后续增强 |
 | 流式 Result 协议（网络层） | ❌ 属 L5 接入层 |
 
 ---
@@ -144,8 +145,10 @@ Query text
 | 形态 | 支持 |
 |------|------|
 | SELECT [DISTINCT] * / ?vars | ✅ |
-| SELECT (COUNT(...) AS ?x)（无 GROUP BY） | ✅ |
+| SELECT (AGG(...) AS ?x)（COUNT/SUM/AVG/MIN/MAX、COUNT(DISTINCT)） | ✅ |
+| GROUP BY ?v / (expr AS ?alias) + HAVING（可引用聚合别名或 `SUM(?v) > n`） | ✅ |
 | 嵌套子查询 `{ SELECT ... LIMIT ... }`（基线） | ✅ |
+| 子查询内聚合 + 外层继续聚合 | ✅ |
 | ASK WHERE { ... } | ✅ → `boolean` |
 | CONSTRUCT { template } WHERE { ... } | ✅ → `construct_triples` |
 | DESCRIBE / UPDATE | 识别 kind，执行 `Unsupported` |
@@ -253,7 +256,7 @@ logical 含 `optimize:before->after`。
 | Crate | 测试数 | 覆盖 |
 |-------|--------|------|
 | parser | 11 | NT/NQ/Turtle/TriG/集合/blank 属性表/流式/定位错误/JSON-LD |
-| query | 30 | SELECT/JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/ASK/DISTINCT/ORDER/LIMIT/PREFIX/COUNT(无 GROUP BY)/子查询基线/属性路径最小集（`/`、`+`、`*`、`|`、`^`）/Explain/timeout/cancel/txn/hint |
+| query | 39 | SELECT/JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/ASK/DISTINCT/ORDER/LIMIT/PREFIX/完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）/子查询基线/属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）/Explain/timeout/cancel/txn/hint |
 | storage 回归 | 24 | 绿 |
 | core 回归 | 11 | 绿 |
 
@@ -261,7 +264,7 @@ logical 含 `optimize:before->after`。
 
 ## 6. 已知限制（完整 L3 边界，非“未开工”）
 
-1. **属性路径扩展（`?`、分组/嵌套更完整 1.1 语法）**、**高级子查询（相关子查询等）**、**EXISTS/NOT EXISTS**、**GROUP BY/HAVING 与其他聚合函数**、**SERVICE** 未实现（已支持 COUNT 无 GROUP BY、嵌套 SELECT+LIMIT 子查询与属性路径最小集 `p1/p2`、`+`、`*`、`|`、`^`）。  
+1. **属性路径扩展（分组/嵌套更完整 1.1 语法）**、**高级子查询（相关子查询等）**、**EXISTS/NOT EXISTS**、**SERVICE** 未实现（已支持完整聚合 GROUP BY/HAVING、嵌套 SELECT+LIMIT 子查询、子查询聚合与属性路径最小集 `p1/p2`、`+`、`*`、`?`、`|`、`^`）。HAVING 中聚合调用需匹配投影聚合表达式（重写为别名求值）。  
 2. **SPARQL Update / DESCRIBE** 仅 kind 识别。  
 3. **JSON-LD** 未实现。  
 4. JOIN 为嵌套循环式 solution merge（正确优先，非代价模型）。  
@@ -296,3 +299,4 @@ logical 含 `optimize:before->after`。
 | 2026-07-22 | 2.4.0 | 新增属性路径高级算子最小集（`+`、`*`、`|`、`^`）与对应测试；W3C subset 路径最小集用例可通过 |
 | 2026-08-06 | 2.5.0 | 新增 RDF 序列化导出（`domain/serialize.rs`：N-Triples/N-Quads 写出、字面量转义与确定性词法、Dataset 按格式过滤），+5 测 |
 | 2026-08-06 | 2.6.0 | 新增属性路径 `?`（zero-or-one）：解析（修饰符紧贴 IRI，避免与变量 `?x` 混淆）、执行（自身 ∪ 单步去重）、W3C 子集新增 must-pass 用例（25/25），+2 测 |
+| 2026-08-06 | 2.7.0 | 新增完整聚合：投影聚合表达式（COUNT/SUM/AVG/MIN/MAX、COUNT(DISTINCT)）解析、GROUP BY（变量或 `(expr AS ?alias)`）、HAVING（聚合调用重写为投影别名）、子查询聚合；执行器按组求值（SUM 整数保精、AVG 十进制、MIN/MAX 序比较）；query 32→39 测，W3C 子集 must-pass 25→27/27，全量测试 190 通过 |

@@ -231,6 +231,7 @@ sudo -v# Ontolith 开发计划
 ### WBS-04 查询与优化
 - SPARQL 解析与代数转换。
 - 逻辑/物理计划与迭代执行器。
+- 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）。✅
 - Explain、超时、取消。
 
 ### WBS-05 推理与 SHACL
@@ -409,7 +410,7 @@ sudo -v# Ontolith 开发计划
 **R1 退出标准剩余项**
 
 - [ ] 多节点数据面（多进程 Raft / openraft，先补 ADR）
-- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 25/25）
+- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 27/27）
 - [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
 - [ ] 发布流水线与回滚演练通过
 - [ ] R1 退出标准全表勾选

@@ -5,8 +5,8 @@
 //! VALUES, DISTINCT, ORDER BY, LIMIT/OFFSET, PREFIX/BASE.
 
 use crate::domain::{
-    AggregateFunction, Algebra, Expression, OrderKey, PathExpression, QueryKind, QueryPlan,
-    QueryPlanId, QueryRequest, TermPattern, TriplePattern,
+    AggregateFunction, AggregateSpec, Algebra, Expression, OrderKey, PathExpression, QueryKind,
+    QueryPlan, QueryPlanId, QueryRequest, TermPattern, TriplePattern,
 };
 use ontolith_core::domain::{Iri, LiteralValue};
 use ontolith_core::error::OntolithError;
@@ -29,11 +29,6 @@ struct SparqlParser<'a> {
     prefixes: BTreeMap<String, String>,
     base: Option<String>,
     logical: Vec<String>,
-}
-
-struct SelectCountProjection {
-    variable: Option<String>,
-    output: String,
 }
 
 impl<'a> SparqlParser<'a> {
@@ -106,7 +101,9 @@ impl<'a> SparqlParser<'a> {
 
         let mut distinct = false;
         let mut select_vars: Vec<String> = Vec::new();
-        let mut select_count_projection: Option<SelectCountProjection> = None;
+        let mut plain_vars: Vec<String> = Vec::new();
+        let mut aggregates: Vec<AggregateSpec> = Vec::new();
+        let mut star_projection = false;
         let mut construct_template = Vec::new();
 
         if kind == QueryKind::Select {
@@ -118,18 +115,37 @@ impl<'a> SparqlParser<'a> {
             self.skip();
             if self.peek_char() == Some('*') {
                 self.bump();
-                select_vars.clear();
+                star_projection = true;
                 self.logical.push("project:*".into());
             } else {
-                while self.peek_char() == Some('?') || self.peek_char() == Some('$') {
-                    select_vars.push(self.parse_var_name()?);
+                loop {
                     self.skip();
+                    if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
+                        let v = self.parse_var_name()?;
+                        select_vars.push(v.clone());
+                        plain_vars.push(v);
+                    } else if self.peek_char() == Some('(') {
+                        let spec = self.parse_aggregate_spec()?;
+                        select_vars.push(spec.output.clone());
+                        aggregates.push(spec);
+                    } else {
+                        break;
+                    }
                 }
-                if select_vars.is_empty() && self.looking_at_keyword("WHERE") {
+                if select_vars.is_empty()
+                    && aggregates.is_empty()
+                    && self.looking_at_keyword("WHERE")
+                {
                     // SELECT WHERE without vars → *
+                    star_projection = true;
+                    self.logical.push("project:*".into());
                 } else if !select_vars.is_empty() {
                     self.logical
                         .push(format!("project:{}", select_vars.join(",")));
+                }
+                if !aggregates.is_empty() {
+                    self.logical
+                        .push(format!("aggregates:{}", aggregates.len()));
                 }
             }
         } else if kind == QueryKind::Construct {
@@ -163,20 +179,6 @@ impl<'a> SparqlParser<'a> {
                 object: TermPattern::Variable("o".into()),
             }])
         };
-        self.skip();
-        if self.peek_char() == Some('(') {
-            if !select_vars.is_empty() {
-                return Err(OntolithError::query(
-                    "mixed aggregate and non-aggregate projection requires GROUP BY",
-                ));
-            }
-            let projection = self.parse_select_count_projection()?;
-            self.logical
-                .push(format!("aggregate:count:as=?{}", projection.output));
-            select_vars.push(projection.output.clone());
-            select_count_projection = Some(projection);
-            self.skip();
-        }
         // Legacy `# subject=N` specializes unbound subjects even when WHERE is present.
         if let Some(hint_subj) = parse_subject_hint(self.input)?
             && apply_subject_hint(&mut body, hint_subj)
@@ -185,21 +187,82 @@ impl<'a> SparqlParser<'a> {
         }
         self.logical.push(format!("where:{}", algebra_tag(&body)));
 
-        if distinct && select_count_projection.is_some() {
+        if star_projection && !aggregates.is_empty() {
             return Err(OntolithError::query(
-                "DISTINCT with aggregate projection is not yet supported",
+                "SELECT * cannot be mixed with aggregate expressions",
             ));
+        }
+
+        self.skip();
+
+        // GROUP BY — appears after the WHERE group, before solution modifiers.
+        let mut groups: Vec<String> = Vec::new();
+        if self.eat_keyword("GROUP") {
+            self.skip();
+            self.expect_keyword("BY")?;
+            loop {
+                self.skip();
+                if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
+                    groups.push(self.parse_var_name()?);
+                } else if self.peek_char() == Some('(') {
+                    self.bump();
+                    self.skip();
+                    let expr = self.parse_expression()?;
+                    self.skip();
+                    self.expect_keyword("AS")?;
+                    self.skip();
+                    let alias = self.parse_var_name()?;
+                    self.skip();
+                    self.expect_char(')')?;
+                    groups.push(alias.clone());
+                    body = Algebra::Extend {
+                        variable: alias,
+                        expression: expr,
+                        input: Box::new(body),
+                    };
+                } else {
+                    break;
+                }
+            }
+            self.logical.push(format!("group_by:{}", groups.len()));
+            self.skip();
+        }
+
+        // HAVING — filter applied to the grouped result (may reference aliases).
+        let mut having: Option<Expression> = None;
+        if self.looking_at_keyword("HAVING") {
+            self.eat_keyword("HAVING");
+            self.skip();
+            having = Some(rewrite_having_aggregates(
+                self.parse_constraint()?,
+                &aggregates,
+            )?);
+            self.logical.push("having".into());
+        }
+
+        if !aggregates.is_empty() && !plain_vars.is_empty() && groups.is_empty() {
+            return Err(OntolithError::query(
+                "mixed aggregate and non-aggregate projection requires GROUP BY",
+            ));
+        }
+        if !groups.is_empty() {
+            for v in &plain_vars {
+                if !groups.contains(v) {
+                    return Err(OntolithError::query(format!(
+                        "projected variable ?{v} must appear in GROUP BY"
+                    )));
+                }
+            }
         }
 
         // solution modifiers
         let mut algebra = body;
 
-        if let Some(aggregate) = select_count_projection {
+        if !aggregates.is_empty() || !groups.is_empty() {
             algebra = Algebra::Aggregate {
-                function: AggregateFunction::Count {
-                    variable: aggregate.variable,
-                },
-                output: aggregate.output,
+                groups,
+                aggregates,
+                having,
                 input: Box::new(algebra),
             };
         }
@@ -289,7 +352,7 @@ impl<'a> SparqlParser<'a> {
             };
         }
 
-        if kind == QueryKind::Select {
+        if kind == QueryKind::Select && !star_projection {
             algebra = Algebra::Project {
                 variables: select_vars,
                 input: Box::new(algebra),
@@ -357,27 +420,10 @@ impl<'a> SparqlParser<'a> {
         Ok(patterns)
     }
 
-    fn parse_select_count_projection(&mut self) -> Result<SelectCountProjection, OntolithError> {
+    fn parse_aggregate_spec(&mut self) -> Result<AggregateSpec, OntolithError> {
         self.expect_char('(')?;
         self.skip();
-        if !self.eat_keyword("COUNT") {
-            return Err(self.err("only COUNT aggregate is currently supported"));
-        }
-        self.skip();
-        self.expect_char('(')?;
-        self.skip();
-
-        let variable = if self.peek_char() == Some('*') {
-            self.bump();
-            None
-        } else if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
-            Some(self.parse_var_name()?)
-        } else {
-            return Err(self.err("COUNT expects '*' or variable"));
-        };
-
-        self.skip();
-        self.expect_char(')')?;
+        let function = self.parse_aggregate_call()?;
         self.skip();
         self.expect_keyword("AS")?;
         self.skip();
@@ -385,7 +431,65 @@ impl<'a> SparqlParser<'a> {
         self.skip();
         self.expect_char(')')?;
 
-        Ok(SelectCountProjection { variable, output })
+        Ok(AggregateSpec { function, output })
+    }
+
+    fn parse_aggregate_call(&mut self) -> Result<AggregateFunction, OntolithError> {
+        if self.looking_at_keyword("COUNT") {
+            self.eat_keyword("COUNT");
+            self.skip();
+            self.expect_char('(')?;
+            self.skip();
+            let distinct = self.eat_keyword("DISTINCT");
+            self.skip();
+            let variable = if self.peek_char() == Some('*') {
+                self.bump();
+                None
+            } else if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
+                Some(self.parse_var_name()?)
+            } else {
+                return Err(self.err("COUNT expects '*' or variable"));
+            };
+            self.skip();
+            self.expect_char(')')?;
+            Ok(AggregateFunction::Count { variable, distinct })
+        } else if self.looking_at_keyword("SUM") {
+            self.eat_keyword("SUM");
+            Ok(AggregateFunction::Sum {
+                variable: self.parse_aggregate_arg()?,
+            })
+        } else if self.looking_at_keyword("AVG") {
+            self.eat_keyword("AVG");
+            Ok(AggregateFunction::Avg {
+                variable: self.parse_aggregate_arg()?,
+            })
+        } else if self.looking_at_keyword("MIN") {
+            self.eat_keyword("MIN");
+            Ok(AggregateFunction::Min {
+                variable: self.parse_aggregate_arg()?,
+            })
+        } else if self.looking_at_keyword("MAX") {
+            self.eat_keyword("MAX");
+            Ok(AggregateFunction::Max {
+                variable: self.parse_aggregate_arg()?,
+            })
+        } else {
+            Err(self.err("expected aggregate function COUNT/SUM/AVG/MIN/MAX"))
+        }
+    }
+
+    fn parse_aggregate_arg(&mut self) -> Result<String, OntolithError> {
+        self.skip();
+        self.expect_char('(')?;
+        self.skip();
+        if self.eat_keyword("DISTINCT") {
+            return Err(self.err("DISTINCT is only supported on COUNT"));
+        }
+        self.skip();
+        let variable = self.parse_var_name()?;
+        self.skip();
+        self.expect_char(')')?;
+        Ok(variable)
     }
 
     fn parse_group_graph_pattern(&mut self) -> Result<Algebra, OntolithError> {
@@ -639,6 +743,8 @@ impl<'a> SparqlParser<'a> {
 
         let mut distinct = false;
         let mut select_vars: Vec<String> = Vec::new();
+        let mut plain_vars: Vec<String> = Vec::new();
+        let mut aggregates: Vec<AggregateSpec> = Vec::new();
 
         if self.eat_keyword("DISTINCT") {
             distinct = true;
@@ -649,11 +755,21 @@ impl<'a> SparqlParser<'a> {
             self.bump();
             self.skip();
         } else {
-            while self.peek_char() == Some('?') || self.peek_char() == Some('$') {
-                select_vars.push(self.parse_var_name()?);
+            loop {
                 self.skip();
+                if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
+                    let v = self.parse_var_name()?;
+                    select_vars.push(v.clone());
+                    plain_vars.push(v);
+                } else if self.peek_char() == Some('(') {
+                    let spec = self.parse_aggregate_spec()?;
+                    select_vars.push(spec.output.clone());
+                    aggregates.push(spec);
+                } else {
+                    break;
+                }
             }
-            if select_vars.is_empty() {
+            if select_vars.is_empty() && aggregates.is_empty() {
                 return Err(self.err("subquery SELECT requires '*' or variables"));
             }
         }
@@ -665,6 +781,71 @@ impl<'a> SparqlParser<'a> {
         }
 
         let mut algebra = self.parse_group_graph_pattern()?;
+
+        self.skip();
+
+        let mut groups: Vec<String> = Vec::new();
+        if self.eat_keyword("GROUP") {
+            self.skip();
+            self.expect_keyword("BY")?;
+            loop {
+                self.skip();
+                if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
+                    groups.push(self.parse_var_name()?);
+                } else if self.peek_char() == Some('(') {
+                    self.bump();
+                    self.skip();
+                    let expr = self.parse_expression()?;
+                    self.skip();
+                    self.expect_keyword("AS")?;
+                    self.skip();
+                    let alias = self.parse_var_name()?;
+                    self.skip();
+                    self.expect_char(')')?;
+                    groups.push(alias.clone());
+                    algebra = Algebra::Extend {
+                        variable: alias,
+                        expression: expr,
+                        input: Box::new(algebra),
+                    };
+                } else {
+                    break;
+                }
+            }
+            self.skip();
+        }
+
+        let mut having: Option<Expression> = None;
+        if self.looking_at_keyword("HAVING") {
+            self.eat_keyword("HAVING");
+            self.skip();
+            having = Some(rewrite_having_aggregates(
+                self.parse_constraint()?,
+                &aggregates,
+            )?);
+        }
+
+        if !aggregates.is_empty() && !plain_vars.is_empty() && groups.is_empty() {
+            return Err(self.err("mixed aggregate and non-aggregate projection requires GROUP BY"));
+        }
+        if !groups.is_empty() {
+            for v in &plain_vars {
+                if !groups.contains(v) {
+                    return Err(
+                        self.err(format!("projected variable ?{v} must appear in GROUP BY"))
+                    );
+                }
+            }
+        }
+
+        if !aggregates.is_empty() || !groups.is_empty() {
+            algebra = Algebra::Aggregate {
+                groups,
+                aggregates,
+                having,
+                input: Box::new(algebra),
+            };
+        }
 
         self.skip();
         if self.eat_keyword("ORDER") {
@@ -1033,6 +1214,14 @@ impl<'a> SparqlParser<'a> {
             self.skip();
             self.expect_char(')')?;
             return Ok(Expression::IsBlank(Box::new(e)));
+        }
+        if self.looking_at_keyword("COUNT")
+            || self.looking_at_keyword("SUM")
+            || self.looking_at_keyword("AVG")
+            || self.looking_at_keyword("MIN")
+            || self.looking_at_keyword("MAX")
+        {
+            return Ok(Expression::Aggregate(self.parse_aggregate_call()?));
         }
         if self.peek_char() == Some('(') {
             self.bump();
@@ -1475,18 +1664,42 @@ fn walk_physical(algebra: &Algebra, steps: &mut Vec<String>) {
             steps.push(format!("slice:{offset}:{limit:?}"));
         }
         Algebra::Aggregate {
-            function,
-            output,
+            groups,
+            aggregates,
+            having,
             input,
         } => {
             walk_physical(input, steps);
-            match function {
-                AggregateFunction::Count { variable: None } => {
-                    steps.push(format!("aggregate_count:*->{output}"));
-                }
-                AggregateFunction::Count { variable: Some(v) } => {
-                    steps.push(format!("aggregate_count:?{v}->?{output}"));
-                }
+            if !groups.is_empty() {
+                steps.push(format!("group_by:{}", groups.join(",")));
+            }
+            for spec in aggregates {
+                let fun = match &spec.function {
+                    AggregateFunction::Count {
+                        variable: None,
+                        distinct: false,
+                    } => "COUNT(*)".to_string(),
+                    AggregateFunction::Count {
+                        variable: Some(v),
+                        distinct: false,
+                    } => format!("COUNT(?{v})"),
+                    AggregateFunction::Count {
+                        variable: Some(v),
+                        distinct: true,
+                    } => format!("COUNT(DISTINCT ?{v})"),
+                    AggregateFunction::Count {
+                        variable: None,
+                        distinct: true,
+                    } => "COUNT(DISTINCT *)".to_string(),
+                    AggregateFunction::Sum { variable } => format!("SUM(?{variable})"),
+                    AggregateFunction::Avg { variable } => format!("AVG(?{variable})"),
+                    AggregateFunction::Min { variable } => format!("MIN(?{variable})"),
+                    AggregateFunction::Max { variable } => format!("MAX(?{variable})"),
+                };
+                steps.push(format!("{fun}->?{}", spec.output));
+            }
+            if having.is_some() {
+                steps.push("having".into());
             }
         }
         Algebra::Path { path, .. } => {
@@ -1573,4 +1786,70 @@ fn is_integer(s: &str) -> bool {
 
 fn is_decimal(s: &str) -> bool {
     s.parse::<f64>().is_ok() && s.chars().any(|c| c == '.' || c == 'e' || c == 'E')
+}
+
+/// Rewrites aggregate function calls in a HAVING expression to the output
+/// alias of the matching projection aggregate. SPARQL evaluates HAVING
+/// aggregates over each group; requiring a matching projection aggregate keeps
+/// the executor single-pass over the grouped result.
+fn rewrite_having_aggregates(
+    expr: Expression,
+    aggregates: &[AggregateSpec],
+) -> Result<Expression, OntolithError> {
+    match expr {
+        Expression::Aggregate(function) => aggregates
+            .iter()
+            .find(|spec| spec.function == function)
+            .map(|spec| Expression::Variable(spec.output.clone()))
+            .ok_or_else(|| {
+                OntolithError::query(
+                    "HAVING aggregate must match a projection aggregate expression",
+                )
+            }),
+        Expression::Not(e) => Ok(Expression::Not(Box::new(rewrite_having_aggregates(
+            *e, aggregates,
+        )?))),
+        Expression::And(a, b) => Ok(Expression::And(
+            Box::new(rewrite_having_aggregates(*a, aggregates)?),
+            Box::new(rewrite_having_aggregates(*b, aggregates)?),
+        )),
+        Expression::Or(a, b) => Ok(Expression::Or(
+            Box::new(rewrite_having_aggregates(*a, aggregates)?),
+            Box::new(rewrite_having_aggregates(*b, aggregates)?),
+        )),
+        Expression::Equal(a, b) => Ok(Expression::Equal(
+            Box::new(rewrite_having_aggregates(*a, aggregates)?),
+            Box::new(rewrite_having_aggregates(*b, aggregates)?),
+        )),
+        Expression::NotEqual(a, b) => Ok(Expression::NotEqual(
+            Box::new(rewrite_having_aggregates(*a, aggregates)?),
+            Box::new(rewrite_having_aggregates(*b, aggregates)?),
+        )),
+        Expression::Less(a, b) => Ok(Expression::Less(
+            Box::new(rewrite_having_aggregates(*a, aggregates)?),
+            Box::new(rewrite_having_aggregates(*b, aggregates)?),
+        )),
+        Expression::LessEq(a, b) => Ok(Expression::LessEq(
+            Box::new(rewrite_having_aggregates(*a, aggregates)?),
+            Box::new(rewrite_having_aggregates(*b, aggregates)?),
+        )),
+        Expression::Greater(a, b) => Ok(Expression::Greater(
+            Box::new(rewrite_having_aggregates(*a, aggregates)?),
+            Box::new(rewrite_having_aggregates(*b, aggregates)?),
+        )),
+        Expression::GreaterEq(a, b) => Ok(Expression::GreaterEq(
+            Box::new(rewrite_having_aggregates(*a, aggregates)?),
+            Box::new(rewrite_having_aggregates(*b, aggregates)?),
+        )),
+        Expression::IsIri(e) => Ok(Expression::IsIri(Box::new(rewrite_having_aggregates(
+            *e, aggregates,
+        )?))),
+        Expression::IsLiteral(e) => Ok(Expression::IsLiteral(Box::new(rewrite_having_aggregates(
+            *e, aggregates,
+        )?))),
+        Expression::IsBlank(e) => Ok(Expression::IsBlank(Box::new(rewrite_having_aggregates(
+            *e, aggregates,
+        )?))),
+        other => Ok(other),
+    }
 }

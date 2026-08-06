@@ -84,13 +84,38 @@ pub enum Expression {
     LessEq(Box<Expression>, Box<Expression>),
     Greater(Box<Expression>, Box<Expression>),
     GreaterEq(Box<Expression>, Box<Expression>),
+    /// Aggregate function call — only valid inside HAVING; resolved to the
+    /// matching projection alias before execution.
+    Aggregate(AggregateFunction),
 }
 
-/// Aggregate function subset for SELECT projections.
+/// Aggregate function subset for SELECT projections (full aggregation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AggregateFunction {
     /// COUNT(*) when `variable` is None, COUNT(?v) otherwise.
-    Count { variable: Option<String> },
+    Count {
+        variable: Option<String>,
+        distinct: bool,
+    },
+    Sum {
+        variable: String,
+    },
+    Avg {
+        variable: String,
+    },
+    Min {
+        variable: String,
+    },
+    Max {
+        variable: String,
+    },
+}
+
+/// One aggregate expression in the SELECT projection: `(AGG(?v) AS ?out)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateSpec {
+    pub function: AggregateFunction,
+    pub output: String,
 }
 
 /// Property path subset used by the L3 executor.
@@ -152,9 +177,11 @@ pub enum Algebra {
         limit: Option<usize>,
         input: Box<Algebra>,
     },
+    /// Full aggregation: GROUP BY keys, aggregate expressions, optional HAVING.
     Aggregate {
-        function: AggregateFunction,
-        output: String,
+        groups: Vec<String>,
+        aggregates: Vec<AggregateSpec>,
+        having: Option<Expression>,
         input: Box<Algebra>,
     },
     Path {
@@ -263,16 +290,27 @@ pub fn summarize_algebra(algebra: &Algebra) -> String {
             summarize_algebra(input)
         ),
         Algebra::Aggregate {
-            function,
-            output,
+            groups,
+            aggregates,
+            having,
             input,
         } => {
-            let fun = match function {
-                AggregateFunction::Count { variable: None } => "COUNT(*)".to_string(),
-                AggregateFunction::Count { variable: Some(v) } => format!("COUNT(?{v})"),
-            };
+            let funs: Vec<String> = aggregates
+                .iter()
+                .map(|spec| {
+                    format!(
+                        "{} AS ?{}",
+                        summarize_aggregate(&spec.function),
+                        spec.output
+                    )
+                })
+                .collect();
             format!(
-                "Aggregate({fun} AS ?{output}, {})",
+                "Aggregate(groups=[{}], [{}]{}having={}, {})",
+                groups.join(","),
+                funs.join(", "),
+                if having.is_some() { " " } else { "" },
+                having.is_some(),
                 summarize_algebra(input)
             )
         }
@@ -281,6 +319,31 @@ pub fn summarize_algebra(algebra: &Algebra) -> String {
             path,
             object,
         } => format!("Path({subject:?}, {}, {object:?})", summarize_path(path)),
+    }
+}
+
+fn summarize_aggregate(function: &AggregateFunction) -> String {
+    match function {
+        AggregateFunction::Count {
+            variable: None,
+            distinct: false,
+        } => "COUNT(*)".to_string(),
+        AggregateFunction::Count {
+            variable: Some(v),
+            distinct: false,
+        } => format!("COUNT(?{v})"),
+        AggregateFunction::Count {
+            variable: Some(v),
+            distinct: true,
+        } => format!("COUNT(DISTINCT ?{v})"),
+        AggregateFunction::Count {
+            variable: None,
+            distinct: true,
+        } => "COUNT(DISTINCT *)".to_string(),
+        AggregateFunction::Sum { variable } => format!("SUM(?{variable})"),
+        AggregateFunction::Avg { variable } => format!("AVG(?{variable})"),
+        AggregateFunction::Min { variable } => format!("MIN(?{variable})"),
+        AggregateFunction::Max { variable } => format!("MAX(?{variable})"),
     }
 }
 

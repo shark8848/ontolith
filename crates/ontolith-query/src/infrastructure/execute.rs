@@ -2,14 +2,14 @@
 
 use crate::application::QueryReadService;
 use crate::domain::{
-    AggregateFunction, Algebra, BoundValue, Expression, PathExpression, QueryKind, QueryPlan,
-    QueryRequest, QueryResult, Solution, TermPattern, TriplePattern,
+    AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, PathExpression, QueryKind,
+    QueryPlan, QueryRequest, QueryResult, Solution, TermPattern, TriplePattern,
 };
 use ontolith_core::domain::{Iri, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
 use ontolith_transaction::domain::TxnId;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -283,10 +283,11 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
             })
         }
         Algebra::Aggregate {
-            function,
-            output,
+            groups,
+            aggregates,
+            having,
             input,
-        } => eval_aggregate(function, output, input, ctx),
+        } => eval_aggregate(groups, aggregates, having, input, ctx),
         Algebra::Path {
             subject,
             path,
@@ -296,25 +297,143 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
 }
 
 fn eval_aggregate(
-    function: &AggregateFunction,
-    output: &str,
+    groups: &[String],
+    aggregates: &[AggregateSpec],
+    having: &Option<Expression>,
     input: &Algebra,
     ctx: &ExecCtx<'_>,
 ) -> Result<Vec<Solution>, OntolithError> {
     let rows = eval_algebra(input, ctx)?;
-    let count = match function {
-        AggregateFunction::Count { variable: None } => rows.len(),
-        AggregateFunction::Count { variable: Some(v) } => {
-            rows.iter().filter(|s| s.get(v).is_some()).count()
-        }
-    };
 
-    let mut out = Solution::new();
-    out.insert(
-        output.to_owned(),
-        BoundValue::Literal(LiteralValue::Integer(count as i64)),
-    );
-    Ok(vec![out])
+    let mut grouped: BTreeMap<Vec<String>, Vec<Solution>> = BTreeMap::new();
+    for row in &rows {
+        let key: Vec<String> = groups
+            .iter()
+            .map(|g| match row.get(g) {
+                Some(v) => format!("{v:?}"),
+                None => String::new(),
+            })
+            .collect();
+        grouped.entry(key).or_default().push(row.clone());
+    }
+
+    let mut out_rows = Vec::new();
+    if groups.is_empty() {
+        let mut out = Solution::new();
+        for spec in aggregates {
+            if let Some(v) = eval_aggregate_spec(spec, &rows) {
+                out.insert(spec.output.clone(), v);
+            }
+        }
+        out_rows.push(out);
+    } else {
+        for (_key, group_rows) in grouped {
+            let representative = &group_rows[0];
+            let mut out = Solution::new();
+            for g in groups {
+                if let Some(v) = representative.get(g) {
+                    out.insert(g.clone(), v.clone());
+                }
+            }
+            for spec in aggregates {
+                if let Some(v) = eval_aggregate_spec(spec, &group_rows) {
+                    out.insert(spec.output.clone(), v);
+                }
+            }
+            out_rows.push(out);
+        }
+    }
+
+    if let Some(having) = having {
+        out_rows.retain(|row| eval_expr_bool(having, row) == Some(true));
+    }
+
+    Ok(out_rows)
+}
+
+fn eval_aggregate_spec(spec: &AggregateSpec, rows: &[Solution]) -> Option<BoundValue> {
+    match &spec.function {
+        AggregateFunction::Count { variable, distinct } => {
+            let n = match (variable.as_deref(), *distinct) {
+                (None, _) => rows.len(),
+                (Some(v), false) => rows.iter().filter(|s| s.get(v).is_some()).count(),
+                (Some(v), true) => {
+                    let mut seen = HashSet::new();
+                    rows.iter()
+                        .filter_map(|s| s.get(v))
+                        .filter(|bv| seen.insert(format!("{bv:?}")))
+                        .count()
+                }
+            };
+            Some(BoundValue::Literal(LiteralValue::Integer(n as i64)))
+        }
+        AggregateFunction::Sum { variable } => {
+            let mut acc_i: i64 = 0;
+            let mut acc_d: f64 = 0.0;
+            let mut all_int = true;
+            let mut any = false;
+            for s in rows {
+                let Some(bv) = s.get(variable) else { continue };
+                if let BoundValue::Literal(LiteralValue::Integer(x)) = bv {
+                    acc_i += x;
+                    acc_d += *x as f64;
+                    any = true;
+                } else if let Some(x) = numeric_value(bv) {
+                    acc_d += x;
+                    all_int = false;
+                    any = true;
+                }
+            }
+            if !any {
+                None
+            } else if all_int {
+                Some(BoundValue::Literal(LiteralValue::Integer(acc_i)))
+            } else {
+                Some(BoundValue::Literal(LiteralValue::Decimal(acc_d)))
+            }
+        }
+        AggregateFunction::Avg { variable } => {
+            let mut acc_d: f64 = 0.0;
+            let mut n: i64 = 0;
+            for s in rows {
+                if let Some(x) = s.get(variable).and_then(numeric_value) {
+                    acc_d += x;
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                None
+            } else {
+                Some(BoundValue::Literal(LiteralValue::Decimal(acc_d / n as f64)))
+            }
+        }
+        AggregateFunction::Min { variable } => extremum(variable, rows, -1),
+        AggregateFunction::Max { variable } => extremum(variable, rows, 1),
+    }
+}
+
+fn numeric_value(bv: &BoundValue) -> Option<f64> {
+    match bv {
+        BoundValue::Literal(LiteralValue::Integer(x)) => Some(*x as f64),
+        BoundValue::Literal(LiteralValue::Decimal(x)) => Some(*x),
+        _ => None,
+    }
+}
+
+/// `sign` of -1 keeps the smaller value (MIN), 1 keeps the larger (MAX).
+fn extremum(variable: &str, rows: &[Solution], sign: i8) -> Option<BoundValue> {
+    let mut best: Option<BoundValue> = None;
+    for s in rows {
+        let Some(bv) = s.get(variable) else { continue };
+        best = Some(match best {
+            None => bv.clone(),
+            Some(cur) => match compare_values(bv, &cur) {
+                Some(c) if c == sign => bv.clone(),
+                _ => cur,
+            },
+        });
+    }
+    best
 }
 
 fn eval_path_pattern(
@@ -929,6 +1048,9 @@ fn eval_expr_value(expr: &Expression, sol: &Solution) -> Option<BoundValue> {
         Expression::GreaterEq(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
             compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? >= 0,
         ))),
+        // Aggregates are only valid in HAVING and are rewritten to their
+        // projection alias before execution; a stray call is an error.
+        Expression::Aggregate(_) => None,
     }
 }
 

@@ -45,6 +45,7 @@ pub const SPARQL_W3C_SUBSET_FEATURES: &[&str] = &[
     "Property path +/*/|/^ (minimal set baseline with multiple roots)",
     "Aggregate COUNT",
     "Aggregate COUNT(*)",
+    "Aggregate GROUP BY / HAVING (full aggregation)",
     "Subquery (nested SELECT + LIMIT baseline)",
     "PREFIX + Turtle ingest",
     "unsupported: update",

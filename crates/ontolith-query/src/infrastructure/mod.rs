@@ -611,6 +611,191 @@ mod tests {
         assert!(err.message().contains("GROUP BY"));
     }
 
+    /// Fresh seed: <n1> <age> 30, <n2> <age> 20, <n3> <age> 30, <n3> <age> 10.
+    fn seed_ages() -> (Arc<InMemoryStorageEngine>, Arc<dyn TripleRepository>) {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+        repo.insert(
+            TxnId::new(2),
+            Triple {
+                subject: NodeId::new(1),
+                predicate: Iri::new("http://ex.org/age"),
+                object: Term::Literal(LiteralValue::Integer(30)),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            TxnId::new(2),
+            Triple {
+                subject: NodeId::new(2),
+                predicate: Iri::new("http://ex.org/age"),
+                object: Term::Literal(LiteralValue::Integer(20)),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            TxnId::new(2),
+            Triple {
+                subject: NodeId::new(3),
+                predicate: Iri::new("http://ex.org/age"),
+                object: Term::Literal(LiteralValue::Integer(30)),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            TxnId::new(2),
+            Triple {
+                subject: NodeId::new(3),
+                predicate: Iri::new("http://ex.org/age"),
+                object: Term::Literal(LiteralValue::Integer(10)),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(TxnId::new(2)).unwrap();
+        (engine, repo)
+    }
+
+    #[test]
+    fn aggregate_group_by_count() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s (COUNT(?p) AS ?c) WHERE { ?s ?p ?o } GROUP BY ?s",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 2);
+        for s in &result.solutions {
+            assert_eq!(
+                s.get("c"),
+                Some(&BoundValue::Literal(LiteralValue::Integer(2)))
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_sum_avg_min_max() {
+        let (_e, repo) = seed_ages();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT (SUM(?age) AS ?sum) (AVG(?age) AS ?avg) (MIN(?age) AS ?min) (MAX(?age) AS ?max) WHERE { ?s <http://ex.org/age> ?age }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        let row = &result.solutions[0];
+        assert_eq!(
+            row.get("sum"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(90)))
+        );
+        assert_eq!(
+            row.get("min"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(10)))
+        );
+        assert_eq!(
+            row.get("max"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(30)))
+        );
+        let BoundValue::Literal(LiteralValue::Decimal(avg)) = row.get("avg").unwrap() else {
+            panic!("expected decimal avg");
+        };
+        assert!((avg - 22.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_count_distinct() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT (COUNT(DISTINCT ?p) AS ?c) WHERE { ?s ?p ?o }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("c"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(3)))
+        );
+    }
+
+    #[test]
+    fn aggregate_having() {
+        let (_e, repo) = seed_ages();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s (SUM(?age) AS ?sum) WHERE { ?s <http://ex.org/age> ?age } GROUP BY ?s HAVING (SUM(?age) > 25)",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 2);
+        let mut sums: Vec<_> = result
+            .solutions
+            .iter()
+            .map(|s| s.get("sum").unwrap().clone())
+            .collect();
+        sums.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+        assert_eq!(
+            sums,
+            vec![
+                BoundValue::Literal(LiteralValue::Integer(30)),
+                BoundValue::Literal(LiteralValue::Integer(40)),
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregate_having_by_alias() {
+        let (_e, repo) = seed_ages();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s (COUNT(?age) AS ?c) WHERE { ?s <http://ex.org/age> ?age } GROUP BY ?s HAVING (?c >= 2)",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("c"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(2)))
+        );
+    }
+
+    #[test]
+    fn aggregate_group_by_expr_alias() {
+        let (_e, repo) = seed_ages();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?bucket (COUNT(?s) AS ?c) WHERE { ?s <http://ex.org/age> ?age } GROUP BY ((?age >= 20) AS ?bucket)",
+            ))
+            .unwrap();
+        // age>=20 buckets: true(30,20,30) / false(10)
+        assert_eq!(result.solutions.len(), 2);
+        assert!(result.variables.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn aggregate_in_subquery() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT ?s (COUNT(?p) AS ?c) WHERE {
+                    {
+                        SELECT ?s ?p WHERE { ?s ?p ?o }
+                    }
+                } GROUP BY ?s"#,
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 2);
+        for s in &result.solutions {
+            assert_eq!(
+                s.get("c"),
+                Some(&BoundValue::Literal(LiteralValue::Integer(2)))
+            );
+        }
+    }
+
     #[test]
     fn subquery_select_with_limit() {
         let (_e, repo) = seed();
