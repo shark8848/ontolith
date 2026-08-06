@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.12  
+版本: 0.1.13  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -341,6 +341,7 @@
 | 2026-07-23 | GitHub Copilot | 安全治理增量：起草 ADR-0003（管理面最小安全基线，TLS-first / OIDC-ready 路径）。 |
 | 2026-07-23 | GitHub Copilot | SLO 增量：新增 `scripts/check-management-slo-window.sh` 窗口检查脚本（success%/p95），并接入 local/CI 管理面 smoke；补充 management env 模板阈值参数。 |
 | 2026-07-23 | GitHub Copilot | 收工快照：提交 `14ac4a7`、`cd098db` 已推送至 `origin/main`；本地 `scripts/ci-local.sh`（含 management windowed SLO）通过，工作区与远端同步。 |
+| 2026-08-06 | Codex | 文档审计：依据 PLAN/PROGRESS/ADR 中的“进行中 / 草案 / 未完成”描述整理未完成项待办清单（§8），覆盖规划签批、架构定稿、ADR-0003 落地、天/周 SLO 与性能基线、R1 退出标准剩余项。 |
 
 ---
 
@@ -363,6 +364,40 @@
 - [ ] 确认 Stream A/B/C/D 负责人并回填 §2 焦点表
 - [x] 本波次提交已推送 `origin/main`（直推模式，无 PR）
 - [ ] 管理面安全加固（TLS 终止方案落地或 OIDC 校验链路实现）
+
+### 未完成项待办清单（2026-08-06 整理）
+
+**规划与设计（草案 → 定稿）**
+
+- [ ] 评审并签批 PLAN-0001，解除 P0-01（已批准范围基线）阻塞（`docs/PROGRESS.md:85`）
+- [ ] 架构规范定稿：`docs/Ontolith_Software_Architecture_Specification.md`（1.2.0-draft）
+- [ ] 架构规范定稿：`docs/Ontolith Software Architecture Specification  Volume 04.md`（1.0.0-draft）
+- [ ] 架构规范定稿：`docs/SAS-0401 — Knowledge Object Model.md`（1.0.0-draft）
+- [ ] 架构手册目录（1.0 Draft）按“Specification Before Implementation”补齐对应章节
+- [ ] ADR-0003 由 Proposed 转 Accepted，并回填 Phase/WBS 关联
+- [ ] 首个实质 RFC 试用，完成 P0-04（`docs/PROGRESS.md:88`）
+- [ ] PLAN §10 “设计包（接口、约束、ADR 关联）”纳入台账跟踪与验收
+
+**管理面安全（P0，进行中）**
+
+- [ ] TLS 终止方案落地（反向代理/ingress 示例 + 部署清单 + bind 姿态证据）
+- [ ] 或 OIDC 校验链路实现（token 验证 + claim 映射，落在 `crates/ontolith-security` 抽象内）
+- [ ] 非 loopback 暴露场景 TLS 强制门禁（R2 判据，ADR-0003 路线）
+
+**SLO 与性能基线（P1，进行中）**
+
+- [ ] 天/周窗口 SLO 自动化（systemd timer 或 Prometheus 规则）
+- [ ] 告警策略（连续失败次数 / 延迟异常突增）
+- [ ] `benchmarks/` 性能基线用例（P7-02，当前为空）
+- [ ] 核心 SLO 基线达标（R1 检查项，`docs/PROGRESS.md:213`）
+
+**R1 退出标准剩余项**
+
+- [ ] 多节点数据面（多进程 Raft / openraft，先补 ADR）
+- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 24/24）
+- [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
+- [ ] 发布流水线与回滚演练通过（`docs/PROGRESS.md:215`）
+- [ ] R1 退出标准全表勾选（`docs/PROGRESS.md:375`）
 
 ### R1 关键路径（按依赖序）
 

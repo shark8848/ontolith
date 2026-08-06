@@ -384,3 +384,32 @@ sudo -v# Ontolith 开发计划
 - 管理平台 R1 SLO 基线与窗口化阈值已落地：local/CI smoke 现已包含 `runtime_probe` 可达性 + 延迟阈值 + 短窗口 success%/p95 检查。
 - 将窗口化 SLO 检查从短窗门禁扩展到天/周自动统计与告警（systemd timer 或 Prometheus 规则）。
 - 管理平台最小安全加固路径已形成 ADR-0003（TLS-first / OIDC-ready），下一步按 R2 路线执行实现。
+
+### 未完成项清单（2026-08-06 同步自 PROGRESS §8）
+
+**规划与设计（草案 → 定稿）**
+
+- [ ] 评审并签批 PLAN-0001，解除 P0-01（已批准范围基线）阻塞
+- [ ] SAS / Volume 04 / SAS-0401 / 架构手册目录 由 Draft 定稿
+- [ ] ADR-0003 由 Proposed 转 Accepted 并回填 Phase/WBS 关联
+- [ ] 首个实质 RFC 试用（P0-04）
+- [ ] 设计包（接口、约束、ADR 关联）纳入台账跟踪与验收
+
+**管理面安全（P0）**
+
+- [ ] TLS 终止方案落地，或 OIDC 校验链路实现
+- [ ] 非 loopback 暴露场景 TLS 强制门禁（R2 判据）
+
+**SLO 与性能基线（P1）**
+
+- [ ] 天/周窗口 SLO 自动化与告警（systemd timer 或 Prometheus 规则）
+- [ ] `benchmarks/` 性能基线用例（P7-02）
+- [ ] 核心 SLO 基线达标（R1）
+
+**R1 退出标准剩余项**
+
+- [ ] 多节点数据面（多进程 Raft / openraft，先补 ADR）
+- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 24/24）
+- [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
+- [ ] 发布流水线与回滚演练通过
+- [ ] R1 退出标准全表勾选

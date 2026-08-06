@@ -384,3 +384,32 @@ Mandatory artifacts per phase:
 - R1 management-platform SLO baseline and short-window thresholds are now implemented: local/CI smoke now enforces `runtime_probe` reachability, latency threshold, and short-window success%/p95 checks.
 - Extend short-window SLO checks to day/week automated tracking and alerting (systemd timer or Prometheus rules).
 - Minimum management-plane hardening path is captured in ADR-0003 (TLS-first / OIDC-ready); next step is phased implementation on the R2 track.
+
+### Outstanding Item Checklist (synced 2026-08-06 from PROGRESS §8)
+
+**Planning and design (draft -> final)**
+
+- [ ] Review and sign off PLAN-0001 to unblock P0-01 (approved scope baseline)
+- [ ] Finalize SAS / Volume 04 / SAS-0401 / Architecture Handbook ToC from Draft status
+- [ ] Promote ADR-0003 from Proposed to Accepted and link it to Phase/WBS rows
+- [ ] Run the first substantive RFC (P0-04)
+- [ ] Track and accept the design package (interfaces, constraints, ADR links) per §10
+
+**Management-plane security (P0)**
+
+- [ ] Implement TLS termination, or an OIDC verification path
+- [ ] Enforce TLS for non-loopback exposure (R2 criterion)
+
+**SLO and performance baseline (P1)**
+
+- [ ] Automate day/week windowed SLO and alerting (systemd timer or Prometheus rules)
+- [ ] Add `benchmarks/` performance baseline cases (P7-02)
+- [ ] Meet the core SLO baseline (R1)
+
+**Remaining R1 exit criteria**
+
+- [ ] Multi-node data plane (multi-process Raft / openraft, ADR first)
+- [ ] Full W3C suite (currently required-lite subset must-pass 24/24)
+- [ ] Online rebalance and disaster-recovery drill runbook with evidence (P7-01 / P7-04)
+- [ ] Release pipeline and rollback drill pass
+- [ ] Tick all R1 exit criteria
