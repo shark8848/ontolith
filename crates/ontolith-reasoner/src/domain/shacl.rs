@@ -79,6 +79,24 @@ pub enum ConstraintComponent {
     Or(Vec<String>),
     /// `sh:not S` — no value node conforms to the referenced shape.
     Not(String),
+    /// `sh:minInclusive v` — every value node is >= v (numeric or string literal).
+    MinInclusive(Term),
+    /// `sh:maxInclusive v` — every value node is <= v.
+    MaxInclusive(Term),
+    /// `sh:minExclusive v` — every value node is > v.
+    MinExclusive(Term),
+    /// `sh:maxExclusive v` — every value node is < v.
+    MaxExclusive(Term),
+    /// `sh:equals p` — the value set equals the value set of predicate p (property shapes only).
+    Equals(String),
+    /// `sh:disjoint p` — the value set is disjoint from the value set of p (property shapes only).
+    Disjoint(String),
+    /// `sh:lessThan p` — every value node is less than every value node of p (property shapes only).
+    LessThan(String),
+    /// `sh:lessThanOrEquals p` — every value node is <= every value node of p (property shapes only).
+    LessThanOrEquals(String),
+    /// `sh:flags f` — regex flags for a sibling `sh:pattern` (e.g. "i").
+    PatternFlags(String),
     /// `sh:qualifiedValueShape S` — value nodes must conform to S (property shapes only).
     QualifiedValueShape { shape: String },
     /// `sh:qualifiedMinCount n` — at least n value nodes conform to `sh:qualifiedValueShape`.
@@ -108,6 +126,15 @@ impl ConstraintComponent {
             Self::And(_) => shacl("AndConstraintComponent"),
             Self::Or(_) => shacl("OrConstraintComponent"),
             Self::Not(_) => shacl("NotConstraintComponent"),
+            Self::MinInclusive(_) => shacl("MinInclusiveConstraintComponent"),
+            Self::MaxInclusive(_) => shacl("MaxInclusiveConstraintComponent"),
+            Self::MinExclusive(_) => shacl("MinExclusiveConstraintComponent"),
+            Self::MaxExclusive(_) => shacl("MaxExclusiveConstraintComponent"),
+            Self::Equals(_) => shacl("EqualsConstraintComponent"),
+            Self::Disjoint(_) => shacl("DisjointConstraintComponent"),
+            Self::LessThan(_) => shacl("LessThanConstraintComponent"),
+            Self::LessThanOrEquals(_) => shacl("LessThanOrEqualsConstraintComponent"),
+            Self::PatternFlags(_) => shacl("PatternConstraintComponent"),
             Self::QualifiedValueShape { .. } => shacl("QualifiedValueShapeConstraintComponent"),
             Self::QualifiedMinCount(_) => shacl("QualifiedMinCountConstraintComponent"),
             Self::QualifiedMaxCount(_) => shacl("QualifiedMaxCountConstraintComponent"),

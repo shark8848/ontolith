@@ -7,9 +7,13 @@
 //! `sh:minLength`/`sh:maxLength`, `sh:pattern`, `sh:in`, `sh:hasValue`,
 //! `sh:node`, `sh:and`/`sh:or`/`sh:not`, `sh:qualifiedValueShape` with
 //! `sh:qualifiedMinCount`/`sh:qualifiedMaxCount`/`sh:qualifiedValueShapesDisjoint`,
-//! `sh:closed` with `sh:ignoredProperties`), severities and messages.
+//! numeric ranges (`sh:minInclusive`/`sh:maxInclusive`/`sh:minExclusive`/
+//! `sh:maxExclusive`), property pairs (`sh:equals`/`sh:disjoint`/`sh:lessThan`/
+//! `sh:lessThanOrEquals`), `sh:pattern` with `sh:flags`, `sh:closed` with
+//! `sh:ignoredProperties`), severities and messages.
 //! `sh:pattern` uses a small self-contained regex subset (literals, `.`,
-//! `[...]`, `\d\w\s\D\W\S`, `*+?`, full-string match; no groups/alternation).
+//! `[...]`, `\d\w\s\D\W\S`, `*+?`, full-string match; no groups/alternation);
+//! `sh:flags` supports `i` (case-insensitive).
 
 use crate::application::ShaclValidator;
 use crate::domain::{
@@ -20,6 +24,7 @@ use ontolith_core::domain::{Iri, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
 use ontolith_storage::application::DictionaryCodec;
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -74,6 +79,51 @@ fn literal_bool(term: &Term) -> Option<bool> {
         Term::Literal(LiteralValue::Boolean(b)) => Some(*b),
         _ => None,
     }
+}
+
+/// Comparable value extracted from a literal: numbers compare numerically,
+/// strings compare by code point order. Other terms are not comparable.
+fn compare_terms(a: &Term, b: &Term) -> Option<Ordering> {
+    match (a, b) {
+        (Term::Literal(LiteralValue::Integer(x)), Term::Literal(LiteralValue::Integer(y))) => {
+            Some(x.cmp(y))
+        }
+        (Term::Literal(LiteralValue::Decimal(x)), Term::Literal(LiteralValue::Decimal(y))) => {
+            x.partial_cmp(y)
+        }
+        (Term::Literal(LiteralValue::Integer(x)), Term::Literal(LiteralValue::Decimal(y))) => {
+            (*x as f64).partial_cmp(y)
+        }
+        (Term::Literal(LiteralValue::Decimal(x)), Term::Literal(LiteralValue::Integer(y))) => {
+            x.partial_cmp(&(*y as f64))
+        }
+        (Term::Literal(LiteralValue::String(x)), Term::Literal(LiteralValue::String(y))) => {
+            Some(x.cmp(y))
+        }
+        _ => None,
+    }
+}
+
+fn value_ge(v: &Term, limit: &Term) -> bool {
+    matches!(
+        compare_terms(v, limit),
+        Some(Ordering::Greater | Ordering::Equal)
+    )
+}
+
+fn value_le(v: &Term, limit: &Term) -> bool {
+    matches!(
+        compare_terms(v, limit),
+        Some(Ordering::Less | Ordering::Equal)
+    )
+}
+
+fn value_gt(v: &Term, limit: &Term) -> bool {
+    compare_terms(v, limit) == Some(Ordering::Greater)
+}
+
+fn value_lt(v: &Term, limit: &Term) -> bool {
+    compare_terms(v, limit) == Some(Ordering::Less)
 }
 
 /// Index shapes-graph triples by subject key.
@@ -196,6 +246,26 @@ fn parse_property_shape(
             x if x == shacl("qualifiedValueShapesDisjoint") && literal_bool(o) == Some(true) => {
                 constraints.push(ConstraintComponent::QualifiedValueShapesDisjoint);
             }
+            x if x == shacl("equals") => {
+                if let Some(iri) = term_iri(o) {
+                    constraints.push(ConstraintComponent::Equals(iri));
+                }
+            }
+            x if x == shacl("disjoint") => {
+                if let Some(iri) = term_iri(o) {
+                    constraints.push(ConstraintComponent::Disjoint(iri));
+                }
+            }
+            x if x == shacl("lessThan") => {
+                if let Some(iri) = term_iri(o) {
+                    constraints.push(ConstraintComponent::LessThan(iri));
+                }
+            }
+            x if x == shacl("lessThanOrEquals") => {
+                if let Some(iri) = term_iri(o) {
+                    constraints.push(ConstraintComponent::LessThanOrEquals(iri));
+                }
+            }
             _ => {}
         }
     }
@@ -244,6 +314,18 @@ fn parse_shape_body(
                     constraints.push(ConstraintComponent::MaxCount(n));
                 }
             }
+            x if x == shacl("minInclusive") => {
+                constraints.push(ConstraintComponent::MinInclusive(o.clone()));
+            }
+            x if x == shacl("maxInclusive") => {
+                constraints.push(ConstraintComponent::MaxInclusive(o.clone()));
+            }
+            x if x == shacl("minExclusive") => {
+                constraints.push(ConstraintComponent::MinExclusive(o.clone()));
+            }
+            x if x == shacl("maxExclusive") => {
+                constraints.push(ConstraintComponent::MaxExclusive(o.clone()));
+            }
             x if x == shacl("minLength") => {
                 if let Some(n) = literal_usize(o) {
                     constraints.push(ConstraintComponent::MinLength(n));
@@ -291,6 +373,11 @@ fn parse_shape_body(
             }
             x if x == shacl("not") => {
                 constraints.push(ConstraintComponent::Not(term_key(dict, o)));
+            }
+            x if x == shacl("flags") => {
+                if let Some(s) = literal_string(o) {
+                    constraints.push(ConstraintComponent::PatternFlags(s));
+                }
             }
             x if x == shacl("closed") => {
                 if literal_bool(o) == Some(true) {
@@ -420,6 +507,19 @@ fn is_instance_of(dict: &dyn DictionaryCodec, data: &[Triple], node: &str, class
     })
 }
 
+/// All `(key, term)` value nodes of `path` for the focus node.
+fn path_values(
+    dict: &dyn DictionaryCodec,
+    data: &[Triple],
+    focus: &str,
+    path: &str,
+) -> Vec<(String, Term)> {
+    data.iter()
+        .filter(|t| subject_key(dict, t.subject) == focus && t.predicate.as_str() == path)
+        .map(|t| (term_key(dict, &t.object), t.object.clone()))
+        .collect()
+}
+
 fn default_message(component: &str, detail: &str) -> String {
     match component {
         c if c == shacl("ClassConstraintComponent") => {
@@ -457,6 +557,30 @@ fn default_message(component: &str, detail: &str) -> String {
         }
         c if c == shacl("NotConstraintComponent") => {
             "value conforms to the shape in sh:not".to_owned()
+        }
+        c if c == shacl("MinInclusiveConstraintComponent") => {
+            "value is less than the inclusive minimum".to_owned()
+        }
+        c if c == shacl("MaxInclusiveConstraintComponent") => {
+            "value is greater than the inclusive maximum".to_owned()
+        }
+        c if c == shacl("MinExclusiveConstraintComponent") => {
+            "value is not greater than the exclusive minimum".to_owned()
+        }
+        c if c == shacl("MaxExclusiveConstraintComponent") => {
+            "value is not less than the exclusive maximum".to_owned()
+        }
+        c if c == shacl("EqualsConstraintComponent") => {
+            "value set does not equal the value set of the given property".to_owned()
+        }
+        c if c == shacl("DisjointConstraintComponent") => {
+            "value set is not disjoint from the given property".to_owned()
+        }
+        c if c == shacl("LessThanConstraintComponent") => {
+            "value is not less than all values of the given property".to_owned()
+        }
+        c if c == shacl("LessThanOrEqualsConstraintComponent") => {
+            "value is not less than or equal to all values of the given property".to_owned()
         }
         c if c == shacl("QualifiedMinCountConstraintComponent") => {
             format!("fewer than {detail} values conform to the qualified value shape")
@@ -622,9 +746,12 @@ fn check_values(
             }
         }
         ConstraintComponent::Pattern(pat) => {
+            let flags = sibling_pattern_flags(shapes, source_shape, ps);
             for (vkey, v) in values {
                 let ok = match v {
-                    Term::Literal(lv) => Some(pattern_matches(pat, &lv.lexical_form())),
+                    Term::Literal(lv) => {
+                        Some(pattern_matches_flags(pat, &lv.lexical_form(), &flags))
+                    }
                     _ => None,
                 };
                 if ok != Some(true) {
@@ -636,6 +763,170 @@ fn check_values(
                         source_shape,
                         &shacl("PatternConstraintComponent"),
                         pat,
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::MinInclusive(limit) => {
+            for (vkey, v) in values {
+                if !value_ge(v, limit) {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("MinInclusiveConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::MaxInclusive(limit) => {
+            for (vkey, v) in values {
+                if !value_le(v, limit) {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("MaxInclusiveConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::MinExclusive(limit) => {
+            for (vkey, v) in values {
+                if !value_gt(v, limit) {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("MinExclusiveConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::MaxExclusive(limit) => {
+            for (vkey, v) in values {
+                if !value_lt(v, limit) {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("MaxExclusiveConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::Equals(other_path) => {
+            let other = path_values(dict, data, focus, other_path);
+            for (vkey, _) in values {
+                if !other.iter().any(|(k, _)| k == vkey) {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("EqualsConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+            for (ukey, _) in &other {
+                if !values.iter().any(|(k, _)| k == ukey) {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(ukey.clone()),
+                        source_shape,
+                        &shacl("EqualsConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::Disjoint(other_path) => {
+            let other = path_values(dict, data, focus, other_path);
+            for (vkey, _) in values {
+                if other.iter().any(|(k, _)| k == vkey) {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("DisjointConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::LessThan(other_path) => {
+            let other = path_values(dict, data, focus, other_path);
+            for (vkey, v) in values {
+                let ok = other
+                    .iter()
+                    .all(|(_, u)| compare_terms(v, u) == Some(Ordering::Less));
+                if !ok {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("LessThanConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::LessThanOrEquals(other_path) => {
+            let other = path_values(dict, data, focus, other_path);
+            for (vkey, v) in values {
+                let ok = other.iter().all(|(_, u)| {
+                    matches!(
+                        compare_terms(v, u),
+                        Some(Ordering::Less) | Some(Ordering::Equal)
+                    )
+                });
+                if !ok {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("LessThanOrEqualsConstraintComponent"),
+                        "",
                         severity,
                         message,
                     );
@@ -740,7 +1031,8 @@ fn check_values(
             }
         }
         ConstraintComponent::QualifiedValueShape { .. }
-        | ConstraintComponent::QualifiedValueShapesDisjoint => {}
+        | ConstraintComponent::QualifiedValueShapesDisjoint
+        | ConstraintComponent::PatternFlags(_) => {}
         ConstraintComponent::QualifiedMinCount(n) => {
             if let Some((shape_key, disjoint, siblings)) =
                 qualified_value_context(shapes, source_shape, ps)
@@ -913,6 +1205,31 @@ fn qualified_value_context<'a>(
     Some((shape_key, disjoint, siblings))
 }
 
+/// Regex flags of a sibling `sh:flags` in the same shape body (property shape
+/// if given, otherwise the node shape that carries the `sh:pattern`).
+fn sibling_pattern_flags(
+    shapes: &[Shape],
+    source_shape: Option<&str>,
+    ps: Option<&PropertyShape>,
+) -> String {
+    let flags = match ps {
+        Some(ps) => ps.constraints.iter().find_map(|c| match c {
+            ConstraintComponent::PatternFlags(f) => Some(f.clone()),
+            _ => None,
+        }),
+        None => shapes
+            .iter()
+            .find(|s| s.id == source_shape.unwrap_or(""))
+            .and_then(|s| {
+                s.constraints.iter().find_map(|c| match c {
+                    ConstraintComponent::PatternFlags(f) => Some(f.clone()),
+                    _ => None,
+                })
+            }),
+    };
+    flags.unwrap_or_default()
+}
+
 /// True if evaluating `shape_key` with focus node `focus` produces no `sh:Violation` results.
 fn conforms_to(
     dict: &dyn DictionaryCodec,
@@ -966,11 +1283,7 @@ fn evaluate_shape(
     }
     // Property shapes apply to values of the path.
     for ps in &shape.property_shapes {
-        let values: Vec<(String, Term)> = data
-            .iter()
-            .filter(|t| subject_key(dict, t.subject) == focus && t.predicate.as_str() == ps.path)
-            .map(|t| (term_key(dict, &t.object), t.object.clone()))
-            .collect();
+        let values = path_values(dict, data, focus, &ps.path);
         for c in &ps.constraints {
             check_values(
                 dict,
@@ -1216,6 +1529,15 @@ fn pattern_matches(pattern: &str, text: &str) -> bool {
     let tokens = parse_pattern(pattern);
     let text: Vec<char> = text.chars().collect();
     match_at(&tokens, 0, &text, 0)
+}
+
+/// `sh:pattern` with optional regex flags (`i` = case-insensitive; other flags ignored).
+fn pattern_matches_flags(pattern: &str, text: &str, flags: &str) -> bool {
+    if flags.contains('i') {
+        pattern_matches(&pattern.to_lowercase(), &text.to_lowercase())
+    } else {
+        pattern_matches(pattern, text)
+    }
 }
 
 #[cfg(test)]
@@ -1694,6 +2016,163 @@ mod tests {
         assert_eq!(
             report.results[0].component,
             "http://www.w3.org/ns/shacl#ClosedConstraintComponent"
+        );
+    }
+
+    #[test]
+    fn numeric_range_constraints() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+                    sh:property [ sh:path ex:age ; sh:minInclusive 18 ; sh:maxInclusive 65 ] ;
+                    sh:property [ sh:path ex:score ; sh:minExclusive 0 ; sh:maxExclusive 100 ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:p1 a ex:Person ; ex:age 30 ; ex:score 80 .
+                ex:p2 a ex:Person ; ex:age 17 ; ex:score 50 .
+                ex:p3 a ex:Person ; ex:age 70 ; ex:score 50 .
+                ex:p4 a ex:Person ; ex:age 30 ; ex:score 0 .
+                ex:p5 a ex:Person ; ex:age 30 ; ex:score 100 ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 4);
+        let components: Vec<_> = report
+            .results
+            .iter()
+            .map(|r| r.component.as_str())
+            .collect();
+        assert!(components.contains(&"http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent"));
+        assert!(components.contains(&"http://www.w3.org/ns/shacl#MaxInclusiveConstraintComponent"));
+        assert!(components.contains(&"http://www.w3.org/ns/shacl#MinExclusiveConstraintComponent"));
+        assert!(components.contains(&"http://www.w3.org/ns/shacl#MaxExclusiveConstraintComponent"));
+        let foci: Vec<_> = report
+            .results
+            .iter()
+            .map(|r| r.focus_node.as_str())
+            .collect();
+        assert!(foci.contains(&"http://ex.org/p2"));
+        assert!(foci.contains(&"http://ex.org/p3"));
+        assert!(foci.contains(&"http://ex.org/p4"));
+        assert!(foci.contains(&"http://ex.org/p5"));
+    }
+
+    #[test]
+    fn equals_constraint_requires_same_value_set() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+                    sh:property [ sh:path ex:primaryEmail ; sh:equals ex:email ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:p1 a ex:Person ; ex:primaryEmail \"a@x.org\" ; ex:email \"a@x.org\" .
+                ex:p2 a ex:Person ; ex:primaryEmail \"a@x.org\" ; ex:email \"b@x.org\" .
+                ex:p3 a ex:Person ; ex:primaryEmail \"a@x.org\" ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 3);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| r.component == "http://www.w3.org/ns/shacl#EqualsConstraintComponent")
+        );
+        assert_eq!(report.results.iter().filter(|r| r.focus_node == "http://ex.org/p2").count(), 2);
+        assert_eq!(report.results.iter().filter(|r| r.focus_node == "http://ex.org/p3").count(), 1);
+    }
+
+    #[test]
+    fn disjoint_constraint_rejects_overlap() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:StaffShape a sh:NodeShape ; sh:targetClass ex:Staff ;
+                    sh:property [ sh:path ex:teaches ; sh:disjoint ex:studies ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:s1 a ex:Staff ; ex:teaches ex:c1 ; ex:studies ex:c2 .
+                ex:s2 a ex:Staff ; ex:teaches ex:c1, ex:c2 ; ex:studies ex:c2 ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/s2");
+        assert_eq!(
+            report.results[0].value.as_deref(),
+            Some("http://ex.org/c2")
+        );
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#DisjointConstraintComponent"
+        );
+    }
+
+    #[test]
+    fn less_than_constraints_order_values() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:EventShape a sh:NodeShape ; sh:targetClass ex:Event ;
+                    sh:property [ sh:path ex:start ; sh:lessThan ex:end ] ;
+                    sh:property [ sh:path ex:end ; sh:lessThanOrEquals ex:deadline ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:e1 a ex:Event ; ex:start 1 ; ex:end 2 ; ex:deadline 2 .
+                ex:e2 a ex:Event ; ex:start 3 ; ex:end 2 ; ex:deadline 2 .
+                ex:e3 a ex:Event ; ex:start 1 ; ex:end 2 ; ex:deadline 1 ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/e2");
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#LessThanConstraintComponent"
+        );
+        assert_eq!(report.results[1].focus_node, "http://ex.org/e3");
+        assert_eq!(
+            report.results[1].component,
+            "http://www.w3.org/ns/shacl#LessThanOrEqualsConstraintComponent"
+        );
+    }
+
+    #[test]
+    fn pattern_flags_case_insensitive() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:CodeShape a sh:NodeShape ; sh:targetClass ex:Code ;
+                    sh:property [ sh:path ex:code ; sh:pattern \"^[a-z]+$\" ; sh:flags \"i\" ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:c1 a ex:Code ; ex:code \"HELLO\" .
+                ex:c2 a ex:Code ; ex:code \"Hello123\" ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/c2");
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#PatternConstraintComponent"
         );
     }
 }
