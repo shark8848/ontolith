@@ -411,7 +411,7 @@ sudo -v# Ontolith 开发计划
 **R1 退出标准剩余项**
 
 - [ ] 多节点数据面（多进程 Raft / openraft，先补 ADR）
-- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 30/30）
+- [x] 完整 W3C 套件接入（vendored 官方 `w3c/rdf-tests` sparql11 + manifest 驱动 runner + `w3c11_profile.tsv` 492 条基线：127 PASS / 365 FAIL 欠账 profile 化防回归；2026-08-06）
 - [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
 - [ ] 发布流水线与回滚演练通过
 - [ ] R1 退出标准全表勾选

@@ -1,11 +1,11 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.18  
+版本: 0.1.19  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
-对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁 + 窗口化 SLO 门禁；安全加固 ADR-0003 已起草）；Git 当前头: `main` @ `cd098db`（COUNT+子查询+属性路径最小集 `+/*/|/^` 已收敛）；2026-08-06 增量：L0 序列化 Part II、L3 属性路径 `?`（W3C must-pass 25/25）+ RDF 序列化导出、L2 命名图六置换、L4 数据面同步、L5 审计哈希链、L6 前向链推理、L7 存储微基准与 CI bench/license 作业、**完整聚合（GROUP BY/HAVING + COUNT(DISTINCT)/SUM/AVG/MIN/MAX + 子查询聚合，W3C must-pass 27/27）**、**SPARQL Update（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE，W3C must-pass 30/30、skip=0）**、**天/周窗口 SLO 自动化（systemd timer 采集/日周评估 + 告警策略：成功率/连续失败/P95/尖峰）**、**管理面 TLS 终止（rustls 进程内终止 + `ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY` + `/admin/config` TLS 姿态证据 + 自签证书脚本；ADR-0003 转 Accepted）**、**R2 非 loopback TLS 强制门禁（非 loopback bind 无 TLS 拒绝启动）**；全量测试 205 通过
+对照代码快照: 2026-07-23（L0–L5 全量实现分批提交完成 + CI/合规烟雾 + W3C 子集门禁 required-lite + strict 观测轨 + 文件审计 + systemd 打包；W3C 子集扩容至 must-pass 24/24；管理平台已纳入主干：`ontolith-management-server` + ACL 分离 + runtime probe + local/CI smoke + SLO 阈值门禁 + 窗口化 SLO 门禁；安全加固 ADR-0003 已起草）；2026-08-06 增量：L0 序列化 Part II、L3 属性路径 `?`（W3C must-pass 25/25）+ RDF 序列化导出、L2 命名图六置换、L4 数据面同步、L5 审计哈希链、L6 前向链推理、L7 存储微基准与 CI bench/license 作业、**完整聚合（GROUP BY/HAVING + COUNT(DISTINCT)/SUM/AVG/MIN/MAX + 子查询聚合，W3C must-pass 27/27）**、**SPARQL Update（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE，W3C must-pass 30/30、skip=0）**、**天/周窗口 SLO 自动化（systemd timer 采集/日周评估 + 告警策略：成功率/连续失败/P95/尖峰）**、**管理面 TLS 终止（rustls 进程内终止 + `ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY` + `/admin/config` TLS 姿态证据 + 自签证书脚本；ADR-0003 转 Accepted）**、**R2 非 loopback TLS 强制门禁（非 loopback bind 无 TLS 拒绝启动）**、**完整 W3C 套件接入（vendored `w3c/rdf-tests` sparql11 941 文件/28 feature + manifest 驱动 runner：QueryEvaluation/UpdateEvaluation/PositiveSyntax/NegativeSyntax + SRX/SRJ/TSV/CSV/Turtle/ASK 结果比对 + profile 锁定 492 条基线，127 PASS/365 FAIL 作为合规欠账）**、**Turtle 数字字面量词法修复（`.` 不再作为分隔符，完整 INTEGER/DECIMAL/DOUBLE 文法 + `.5` 前导点小数，parser 16→17 测）**；全量测试待本波提交前验证
 
 ---
 
@@ -42,14 +42,14 @@
 | Phase 0 规划与治理 | 部分完成 | ~60% | 台账 + ADR/RFC 模板 + 依赖登记 + 计划互链；签批仍缺 |
 | Phase 1 核心模型与存储抽象 | 部分完成 | ~75% | L0/L1 文档化；ConsistencyLevel；存储契约固化；序列化 Part II（KO 二进制编解码） |
 | Phase 2 持久化与事务内核 | 部分完成 | ~85% | 内存六索引 + RocksDB 耐久；无真 MVCC / 纯 CF 扫描 |
-| Phase 3 查询引擎 | 部分完成 | ~96% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）+ SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+ 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 30/30）+ strict 观测轨 |
+| Phase 3 查询引擎 | 部分完成 | ~96% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）+ SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+ 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 30/30）+ strict 观测轨 + **完整 W3C 套件 manifest 基线（492 条，127 PASS/365 FAIL）** |
 | Phase 4 集群与一致性 MVP | 部分完成 | ~82% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API + 数据面同步接口（快照迁移入队/回执）；无多进程 Raft |
 | Phase 5 接入层与安全基线 | 部分完成 | ~90% | HTTP 全路由 + 文件审计（含哈希链）+ cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
 | Phase 6 推理与验证 | 部分完成 | ~15% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1 最小集）可用；SHACL 未开始 |
 | Phase 7 企业运维与发布 | 部分完成 | ~33% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业）+ license 审计 CI 作业；无发布/回滚 |
 | Phase 8 AI-Native 扩展 | 未开始 | 0% | — |
 | **分层内核 L0–L3** | **部分完成** | **~92–96%** | 语义+存储+查询主路径可用，完整聚合/Update/子查询/属性路径最小集（含 `?`）已纳入回归保护 |
-| **相对 R1 退出标准** | **进行中** | **~76–80%** | 内核+HTTP+集群+CI/烟雾合规 + W3C 子集 required-lite（30/30）；多节点数据面/W3C 全量/SLO 仍缺 |
+| **相对 R1 退出标准** | **进行中** | **~78–82%** | 内核+HTTP+集群+CI/烟雾合规 + W3C 子集 required-lite（30/30）+ 完整 W3C 套件 manifest 基线接入（492 条，127 PASS/365 FAIL 欠账已 profile 化）；多节点数据面/SLO 仍缺 |
 | **相对 R1–R4 全计划** | **进行中** | **~12–15%** | — |
 
 ### 架构分层完成度（实现视图）
@@ -59,7 +59,7 @@
 | L0 core | ~90% | KO/Canonical/Error/ConsistencyLevel/序列化 Part II（20 测） |
 | L1 rdf | ~80% | Triple/Quad/Dataset |
 | L2 storage/txn | ~85% | 内存+RocksDB |
-| L3 parser/query | ~96% | 完整核心，非仅 MVP；完整聚合 + SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+子查询（含聚合）+属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ RDF 序列化导出；W3C 子集 required-lite（30/30）+ strict 观测双轨 |
+| L3 parser/query | ~96% | 完整核心，非仅 MVP；完整聚合 + SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+子查询（含聚合）+属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ RDF 序列化导出；W3C 子集 required-lite（30/30）+ strict 观测双轨 + 完整 W3C 套件 manifest 基线 |
 | L4 cluster | ~82% | +session/partition/rebalance/commit + HTTP /cluster + 数据面同步（快照迁移/回执）；17 测 |
 | L5 server/security/obs | ~90% | 双后端、文件审计（哈希链）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
 | L6 reasoner | ~15% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1）；4 测 |
@@ -128,7 +128,7 @@
 | P3-02 | 规则优化基线 | 部分完成 | 55% | BGP 重排、Identity 消除、Filter 下推、POS/OSP 选路 | 代价模型/统计 |
 | P3-03 | Explain 输出 | 部分完成 | 85% | logical/physical/algebra + optimize 步骤 | HTTP Explain API |
 | P3-04 | 超时与取消 API | 部分完成 | 75% | timeout_ms + Arc\<AtomicBool\> cancel | 异步抢占/token |
-| P3-05 | MVP 标准符合性子集 | 部分完成 | 96% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 17 烟雾 + W3C 子集运行器（must-pass 30/30，known-gap xfail=0，unsupported skip=0）+ CI required-lite + strict observer + strict-promotion-readiness 自动信号 + `ci-local.sh` 全链路通过 | 观察主干连续 3 次 CI 全绿后评估 strict required |
+| P3-05 | MVP 标准符合性子集 | 部分完成 | 97% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 17 烟雾 + W3C 子集运行器（must-pass 30/30，known-gap xfail=0，unsupported skip=0）+ **完整 W3C 套件 manifest 驱动 runner（`w3c11_suite`，492 条基线，127 PASS/365 FAIL 欠账 profile 化防回归）** + CI required-lite + strict observer + strict-promotion-readiness 自动信号 + `ci-local.sh` 全链路通过 | 观察主干连续 3 次 CI 全绿后评估 strict required；按 profile 欠账逐项提 PASS |
 
 **阶段退出条件：** MVP profile 查询可跑通；Explain/超时/取消可用。
 
@@ -209,7 +209,7 @@
 | [~] SPARQL 查询基线 | 部分完成 | SELECT/ASK/CONSTRUCT 核心；非完整 1.1 |
 | [~] 单区域集群核心 | 部分完成 | 控制面可测+HTTP 演示；无多节点数据面 |
 | [~] 安全与审计基线 | 部分完成 | HTTP 鉴权+审计+JSONL 落盘；无 OIDC |
-| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 15 测 + W3C 子集（required-lite，must-pass 25/25，xfail=0，xpass=0，skip=1，Update 为 strict skip-exempt）+ strict observer（non-blocking）+ strict readiness 自动评估；无完整 W3C 套件 |
+| [~] 标准符合性门禁通过 | 部分完成 | CI + R1 烟雾 17 测 + W3C 子集（required-lite，must-pass 30/30，skip=0）+ strict observer（non-blocking）+ strict readiness 自动评估 + **完整 W3C 套件 manifest 基线（492 条，127 PASS/365 FAIL 已 profile 化防回归）**；PASS 份额提升仍在进行 |
 | [ ] 核心 SLO 基线达标 | 未完成 | 无基准 |
 | [~] 恢复演练通过 | 部分完成 | RocksDB reopen 单测；无演练手册 |
 | [ ] 回滚演练通过 | 未完成 | 无发布链路 |
@@ -265,7 +265,7 @@
 
 | 门禁/治理项 | 状态 | 证据 / 缺口 |
 |-------------|------|-------------|
-| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 15 + W3C 子集运行器（must-pass 25/25，known-gap: xfail 0 / xpass 0，unsupported skip 1，Update 为 strict skip-exempt）+ CI required-lite / strict observer；非完整 W3C 官方 |
+| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 17 + W3C 子集运行器（must-pass 30/30，skip=0）+ **完整 W3C 套件 manifest 驱动 runner（`w3c11_suite`，492 条基线：127 PASS / 365 FAIL，drift 防回归）** + CI required-lite / strict observer |
 | [~] 故障注入（选主/复制/恢复） | 部分完成 | `ontolith-cluster` 分区注入/愈合与复制路径单测（14 测） |
 | [ ] 幂等写入验证 | 未开始 | 部分事务单测不足替代 |
 | [~] 性能回归门禁 | 部分完成 | `storage_bench` 微基准（字典/写入提交/索引匹配）+ CI `bench` 冒烟作业；阈值断言未接 |
@@ -290,13 +290,13 @@
 | ontolith-storage | 内存六索引 + 命名图六置换 + RocksDB 耐久（reopen/abort/delete）+ codec + 命名图匹配（30 测） | `crates/ontolith-storage/src/infrastructure/**` |
 | ontolith-transaction | begin/commit/abort、超时清理、active 上限、metrics（7 测） | `crates/ontolith-transaction/src/infrastructure/mod.rs` |
 | ontolith-query | SELECT/ASK/CONSTRUCT、JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES、完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）、SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）、子查询基线、属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）、Explain/timeout（46 测） | `crates/ontolith-query/src/infrastructure/**` |
-| ontolith-parser | N-Triples/N-Quads/Turtle/TriG、流式事件、错误定位、Unsupported 格式、RDF 序列化导出（16 测） | `crates/ontolith-parser/src/infrastructure/**` |
+| ontolith-parser | N-Triples/N-Quads/Turtle/TriG、流式事件、错误定位、Unsupported 格式、RDF 序列化导出、Turtle 数字字面量完整文法（17 测） | `crates/ontolith-parser/src/infrastructure/**` |
 | ontolith-cluster | 选主、分区、复制、commit、rebalance、session sticky、数据面同步（17 测） | `crates/ontolith-cluster/src/infrastructure/mod.rs` |
 | ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）+ 哈希链验证/篡改检测（9 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
 | ontolith-observability | sink、导出、采样循环、Prometheus 文本（6 测） | `crates/ontolith-observability/src/**` |
 | ontolith-server | metrics、采样配置、HTTP query decode + 管理面 API/ACL/probe（15 测） | `crates/ontolith-server/src/{api,bootstrap,http,management}.rs` |
 | ontolith-reasoner | 前向链推理：rdfs5/6/7/8/9 + prp-inv1、`InferenceMode` 开关（4 测） | `crates/ontolith-reasoner/src/infrastructure/mod.rs` |
-| ontolith-compliance | R1 烟雾 17 + W3C 子集 profile 1（must-pass 30/30，skip=0） | `crates/ontolith-compliance/tests/**` |
+| ontolith-compliance | R1 烟雾 17 + W3C 子集 profile 1（must-pass 30/30，skip=0）+ 完整 W3C 套件 manifest runner（`w3c11_suite`，492 条基线 profile 锁定） | `crates/ontolith-compliance/tests/**` |
 
 ---
 
@@ -353,6 +353,7 @@
 | 2026-08-06 | Codex | docs：中英文开发计划同步勾选「天/周窗口 SLO 自动化与告警」项（PLAN-0001 §R1 退出标准 / P1）。 |
 | 2026-08-06 | Codex | L5：天/周窗口 SLO 自动化与告警策略——`collect-slo-sample.sh` 持久化 runtime_probe 样本（samples.jsonl）；`check-slo-window-history.sh` 窗口评估（成功率/P95/连续失败/延迟尖峰）+ `--self-test` 四用例 + reports/alerts 落盘；systemd user timers（5min 采集、每日 24h、每周 168h 评估）与安装脚本；接入 ci-local。 |
 | 2026-08-06 | Codex | L5：管理面 TLS 终止与 R2 门禁（ADR-0003 转 Accepted）——`TlsServerConfig`/`HttpServer::with_tls`（rustls 进程内终止，PEM 加载，close_notify 冲刷）；`ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY`；`enforce_tls_gate` 非 loopback bind 无 TLS 拒绝启动；`/admin/config` 暴露 `tls` 姿态；`gen-self-signed-cert.sh` + env 示例；server 16→21 测，全量测试 205 通过。 |
+| 2026-08-06 | Codex | L3：完整 W3C 套件接入——vendored 官方 `w3c/rdf-tests` sparql11（941 文件/28 feature，QueryEvaluation/UpdateEvaluation/PositiveSyntax/NegativeSyntax 四类）；manifest 驱动 runner `w3c11_suite.rs`（自有 Turtle 解析官方 manifest、SRX/SRJ/TSV/CSV + Turtle 图 + ASK 结果比对、超时/panic 护栏）；`w3c11_profile.tsv` 锁定 492 条基线（127 PASS / 365 FAIL，按 reason-code 分类），普通模式 drift 防回归、`ONTOLITH_W3C11_LEARN=1` 重生成；顺带修复 Turtle 数字字面量词法 bug（`.` 不再当分隔符，完整 INTEGER/DECIMAL/DOUBLE 文法 + `.5` 前导点），parser 16→17 测。 |
 
 ---
 
@@ -405,7 +406,7 @@
 **R1 退出标准剩余项**
 
 - [ ] 多节点数据面（多进程 Raft / openraft，先补 ADR）
-- [ ] 完整 W3C 套件接入（当前为 required-lite 子集 must-pass 30/30）
+- [x] 完整 W3C 套件接入（vendored `w3c/rdf-tests` sparql11 941 文件/28 feature + manifest 驱动 `w3c11_suite` runner + `w3c11_profile.tsv` 492 条基线：127 PASS / 365 FAIL 欠账 profile 化防回归；2026-08-06）
 - [x] 完整聚合（GROUP BY/HAVING + COUNT(DISTINCT)/SUM/AVG/MIN/MAX + 子查询聚合，W3C must-pass 27/27）
 - [x] SPARQL Update 基线（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE，W3C must-pass 30/30、skip=0）
 - [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）

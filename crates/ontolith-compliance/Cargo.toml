@@ -20,3 +20,11 @@ path = "tests/sparql_r1_smoke.rs"
 [[test]]
 name = "sparql_w3c_subset"
 path = "tests/sparql_w3c_subset.rs"
+
+[[test]]
+name = "w3c11_suite"
+path = "tests/w3c11_suite.rs"
+
+[dev-dependencies]
+quick-xml = "0.37"
+serde_json = "1"

@@ -1,7 +1,7 @@
 # L3 — Parser & Query Engine 完整功能说明
 
 文档 ID: IMPL-L3-0001  
-版本: 2.8.0  
+版本: 2.9.0  
 状态: Implemented (full L3 core, not MVP-only)  
 日期: 2026-07-22  
 对应 crate:
@@ -306,3 +306,4 @@ logical 含 `optimize:before->after`。
 | 2026-08-06 | 2.6.0 | 新增属性路径 `?`（zero-or-one）：解析（修饰符紧贴 IRI，避免与变量 `?x` 混淆）、执行（自身 ∪ 单步去重）、W3C 子集新增 must-pass 用例（25/25），+2 测 |
 | 2026-08-06 | 2.7.0 | 新增完整聚合：投影聚合表达式（COUNT/SUM/AVG/MIN/MAX、COUNT(DISTINCT)）解析、GROUP BY（变量或 `(expr AS ?alias)`）、HAVING（聚合调用重写为投影别名）、子查询聚合；执行器按组求值（SUM 整数保精、AVG 十进制、MIN/MAX 序比较）；query 32→39 测，W3C 子集 must-pass 25→27/27，全量测试 190 通过 |
 | 2026-08-06 | 2.8.0 | 新增 SPARQL Update：解析 INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE（LOAD/CLEAR/WITH 明确 Unsupported）；`UpdateOp` 域模型 + `QueryResult.affected`；`UpdateWriteService`/`UpdateQueryExecutor`（字典 IRI→NodeId 桥、单事务写、失败回滚）；server 接入写管线；query 39→46 测，W3C 子集 must-pass 27→30/30（skip=0），全量测试 199 通过 |
+| 2026-08-06 | 2.9.0 | 完整 W3C SPARQL 1.1 套件接入（vendored `w3c/rdf-tests` sparql11，941 文件/28 feature）：manifest 驱动 runner `ontolith-compliance/tests/w3c11_suite.rs` 执行 QueryEvaluation/UpdateEvaluation/PositiveSyntax/NegativeSyntax 四类，SRX/SRJ/TSV/CSV + Turtle 图 + ASK 结果比对；`w3c11_profile.tsv` 锁定 492 条基线（127 PASS/365 FAIL，reason-code 分类：parse-error 223 / data-format 52 / semantic 48 / accepted-invalid 17 / named-graph 16 / other 9），drift 防回归；修复 Turtle 数字字面量词法（`.` 不再作分隔符，完整 INTEGER/DECIMAL/DOUBLE 文法 + `.5`），parser 16→17 测 |

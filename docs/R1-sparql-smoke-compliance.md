@@ -1,7 +1,7 @@
 # R1 SPARQL Smoke Compliance Profile
 
 文档 ID: COMP-R1-0001  
-版本: 1.7.3  
+版本: 1.8.0  
 日期: 2026-08-06  
 Crate: [`ontolith-compliance`](../crates/ontolith-compliance)
 
@@ -73,7 +73,6 @@ Current unsupported:
 
 - Grouped/nested path forms beyond current minimal set
 - Advanced subquery forms beyond nested SELECT + LIMIT baseline
-- Full W3C manifest-driven suite
 - Performance / SLO gates
 
 ## CI gating mode
@@ -93,4 +92,36 @@ Current profile snapshot (v0, 2026-08-06):
 
 1. Keep subset within 20-40 cases while preserving explicit expected assertions per case.
 2. Require 3 consecutive `main` CI green runs (including strict observer pass) before promoting strict to required; readiness 由 CI 自动汇总信号提供。
-3. Move toward manifest-driven import of official W3C test artifacts.
+3. Manifest-driven import of official W3C test artifacts — **done**, see below.
+
+---
+
+## Full W3C SPARQL 1.1 suite (manifest-driven baseline)
+
+The official W3C suite is now vendored and wired as a regression baseline in
+addition to the curated smoke profile:
+
+- Location: `crates/ontolith-compliance/tests/w3c11/` (941 files / 28 feature
+  manifests, from `w3c/rdf-tests` `sparql/sparql11`).
+- Runner: `tests/w3c11_suite.rs` — manifest-driven
+  `QueryEvaluation` / `UpdateEvaluation` / `PositiveSyntax` / `NegativeSyntax`
+  with SRX/SRJ/TSV/CSV result comparison, Turtle graph comparison and ASK
+  boolean checks.
+- Profile lock: `tests/w3c11_profile.tsv` (492 cases). Normal mode fails on
+  drift; `ONTOLITH_W3C11_LEARN=1` regenerates the profile after implementing a
+  feature. See `tests/w3c11/README.md`.
+
+Current full-suite baseline (2026-08-06): **492 cases — 127 PASS / 365 FAIL**.
+The profile documents every known gap by reason code (`parse-error`,
+`data-format`, `semantic`, `accepted-invalid`, `named-graph`, …) and is the
+compliance backlog tracker.
+
+```bash
+cargo test -p ontolith-compliance --test w3c11_suite
+ONTOLITH_W3C11_LEARN=1 cargo test -p ontolith-compliance --test w3c11_suite  # after feature work
+```
+
+This closes the "full W3C suite import" gap in the R1 exit criteria: the
+official suite is now executed and tracked; the remaining work is raising the
+PASS share of the profile (aggregate gaps, expression functions, syntax
+coverage, …), not importing the artifacts.

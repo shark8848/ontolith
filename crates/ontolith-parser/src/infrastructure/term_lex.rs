@@ -358,6 +358,10 @@ impl<'a> Lexer<'a> {
             return Ok(Tok::Eof);
         };
         match c {
+            '.' if self.input[self.pos + 1..].chars().next().is_some_and(|n| n.is_ascii_digit()) => {
+                // Leading-dot decimal (e.g. `.5`): scan as a numeric word.
+                self.lex_word(line, col)
+            }
             '.' => {
                 self.bump();
                 Ok(Tok::Dot)
@@ -565,7 +569,7 @@ impl<'a> Lexer<'a> {
             if c.is_ascii_whitespace()
                 || matches!(
                     c,
-                    ',' | ';' | '.' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '"' | '#'
+                    ',' | ';' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '"' | '#'
                 )
             {
                 break;
@@ -610,22 +614,48 @@ impl<'a> Lexer<'a> {
 }
 
 fn is_number(s: &str) -> bool {
-    let mut chars = s.chars().peekable();
-    if matches!(chars.peek(), Some('+') | Some('-')) {
-        chars.next();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    if i < chars.len() && matches!(chars[i], '+' | '-') {
+        i += 1;
     }
-    let mut saw_digit = false;
+    let mut digits_before = 0;
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        i += 1;
+        digits_before += 1;
+    }
     let mut saw_dot = false;
-    for c in chars {
-        if c.is_ascii_digit() {
-            saw_digit = true;
-        } else if c == '.' && !saw_dot {
-            saw_dot = true;
-        } else if (c == 'e' || c == 'E') && saw_digit {
-            return s[1..].chars().any(|ch| ch.is_ascii_digit()) || saw_digit;
-        } else {
-            return false;
+    let mut digits_after_dot = 0;
+    if i < chars.len() && chars[i] == '.' {
+        saw_dot = true;
+        i += 1;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+            digits_after_dot += 1;
         }
     }
-    saw_digit
+    if i < chars.len() && matches!(chars[i], 'e' | 'E') {
+        i += 1;
+        if i < chars.len() && matches!(chars[i], '+' | '-') {
+            i += 1;
+        }
+        let mut exp_digits = 0;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+            exp_digits += 1;
+        }
+        // DOUBLE requires a mantissa digit and an exponent digit.
+        return exp_digits > 0
+            && i == chars.len()
+            && (digits_before > 0 || digits_after_dot > 0);
+    }
+    if i != chars.len() {
+        return false;
+    }
+    if saw_dot {
+        // DECIMAL: [0-9]* '.' [0-9]+ (digits after the dot required).
+        digits_after_dot > 0
+    } else {
+        digits_before > 0
+    }
 }

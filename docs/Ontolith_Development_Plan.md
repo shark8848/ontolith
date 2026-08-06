@@ -411,7 +411,7 @@ Mandatory artifacts per phase:
 **Remaining R1 exit criteria**
 
 - [ ] Multi-node data plane (multi-process Raft / openraft, ADR first)
-- [ ] Full W3C suite (currently required-lite subset must-pass 30/30)
+- [x] Full W3C suite integration (vendored official `w3c/rdf-tests` sparql11 + manifest-driven runner + `w3c11_profile.tsv` 492-case baseline: 127 PASS / 365 FAIL, gaps profile-locked; 2026-08-06)
 - [ ] Online rebalance and disaster-recovery drill runbook with evidence (P7-01 / P7-04)
 - [ ] Release pipeline and rollback drill pass
 - [ ] Tick all R1 exit criteria

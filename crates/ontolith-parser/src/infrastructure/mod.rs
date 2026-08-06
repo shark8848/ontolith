@@ -229,6 +229,44 @@ ex:list ex:items ( ex:a ex:b ex:c ) .
     }
 
     #[test]
+    fn parses_turtle_numeric_literals() {
+        let dict = InMemoryDictionary::new();
+        let input = r#"
+@prefix ex: <http://ex.org/> .
+ex:int ex:p 1, -2, +3 .
+ex:dec ex:p 1.0, .5 .
+ex:dbl ex:p 1.0E2, 2E-1, 1.5e3 .
+"#;
+        let out = parse_turtle_doc(input, &dict).expect("turtle numeric literals");
+        assert!(out.dataset.triple_count() >= 8);
+        let dec_subject = dict
+            .encode_node("http://ex.org/dec");
+        let decimals: Vec<_> = out
+            .dataset
+            .default_graph
+            .iter()
+            .filter(|t| t.subject == dec_subject)
+            .collect();
+        assert_eq!(decimals.len(), 2);
+        assert!(decimals.iter().all(|t| matches!(
+            t.object,
+            ontolith_rdf::domain::Term::Literal(ontolith_core::domain::LiteralValue::Decimal(_))
+        )));
+        let dbl_subject = dict.encode_node("http://ex.org/dbl");
+        let doubles: Vec<_> = out
+            .dataset
+            .default_graph
+            .iter()
+            .filter(|t| t.subject == dbl_subject)
+            .collect();
+        assert_eq!(doubles.len(), 3);
+        assert!(doubles.iter().all(|t| matches!(
+            t.object,
+            ontolith_rdf::domain::Term::Literal(ontolith_core::domain::LiteralValue::Decimal(_))
+        )));
+    }
+
+    #[test]
     fn parses_trig_named_graph() {
         let dict = InMemoryDictionary::new();
         let input = r#"
