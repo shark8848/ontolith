@@ -282,7 +282,9 @@ mod tests {
     use crate::domain::{Algebra, BoundValue, QueryRequest, TermPattern, TriplePattern};
     use ontolith_core::domain::{Iri, LiteralValue, NodeId};
     use ontolith_rdf::domain::{Quad, Term, Triple};
-    use ontolith_storage::application::{DictionaryCodec, QuadRepository, StorageEngine, TripleRepository};
+    use ontolith_storage::application::{
+        DictionaryCodec, QuadRepository, StorageEngine, TripleRepository,
+    };
     use ontolith_storage::infrastructure::{
         InMemoryDictionary, InMemoryQuadRepository, InMemoryStorageEngine, InMemoryTripleRepository,
     };
@@ -540,11 +542,17 @@ mod tests {
     fn update_clear_default_keeps_named_graphs() {
         let (engine, dict, repo) = seed_update();
         let g = Iri::new("http://ex.org/g1");
-        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g,
+            &[
+                ("http://ex.org/alice", "Alice"),
+                ("http://ex.org/bob", "Bob"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
-        let r = p
-            .execute(&QueryRequest::new("CLEAR DEFAULT"))
-            .unwrap();
+        let r = p.execute(&QueryRequest::new("CLEAR DEFAULT")).unwrap();
         assert_eq!(r.kind, crate::domain::QueryKind::Update);
         assert_eq!(r.affected, 2);
         assert_eq!(count_names(&p), 0);
@@ -556,8 +564,24 @@ mod tests {
         let (engine, dict, repo) = seed_update();
         let g1 = Iri::new("http://ex.org/g1");
         let g2 = Iri::new("http://ex.org/g2");
-        seed_named_graph(&engine, &dict, &g1, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
-        seed_named_graph(&engine, &dict, &g2, &[("http://ex.org/carol", "Carol"), ("http://ex.org/dave", "Dave")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g1,
+            &[
+                ("http://ex.org/alice", "Alice"),
+                ("http://ex.org/bob", "Bob"),
+            ],
+        );
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g2,
+            &[
+                ("http://ex.org/carol", "Carol"),
+                ("http://ex.org/dave", "Dave"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         let r = p.execute(&QueryRequest::new("CLEAR NAMED")).unwrap();
         assert_eq!(r.affected, 4);
@@ -571,8 +595,24 @@ mod tests {
         let (engine, dict, repo) = seed_update();
         let g1 = Iri::new("http://ex.org/g1");
         let g2 = Iri::new("http://ex.org/g2");
-        seed_named_graph(&engine, &dict, &g1, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
-        seed_named_graph(&engine, &dict, &g2, &[("http://ex.org/carol", "Carol"), ("http://ex.org/dave", "Dave")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g1,
+            &[
+                ("http://ex.org/alice", "Alice"),
+                ("http://ex.org/bob", "Bob"),
+            ],
+        );
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g2,
+            &[
+                ("http://ex.org/carol", "Carol"),
+                ("http://ex.org/dave", "Dave"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         let r = p
             .execute(&QueryRequest::new("CLEAR GRAPH <http://ex.org/g1>"))
@@ -587,7 +627,15 @@ mod tests {
     fn update_clear_all_and_drop_all() {
         let (engine, dict, repo) = seed_update();
         let g = Iri::new("http://ex.org/g1");
-        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g,
+            &[
+                ("http://ex.org/alice", "Alice"),
+                ("http://ex.org/bob", "Bob"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         let r = p.execute(&QueryRequest::new("CLEAR ALL")).unwrap();
         assert_eq!(r.affected, 4);
@@ -597,7 +645,15 @@ mod tests {
         // DROP GRAPH <missing> is an idempotent no-op; DROP NAMED clears quads.
         let (engine, dict, repo) = seed_update();
         let g = Iri::new("http://ex.org/g1");
-        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g,
+            &[
+                ("http://ex.org/alice", "Alice"),
+                ("http://ex.org/bob", "Bob"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         let r = p
             .execute(&QueryRequest::new("DROP GRAPH <http://ex.org/missing>"))
@@ -614,7 +670,15 @@ mod tests {
     fn update_load_copies_named_graph_to_default() {
         let (engine, dict, repo) = seed_update();
         let g = Iri::new("http://ex.org/src");
-        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/carol", "Carol"), ("http://ex.org/dave", "Dave")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g,
+            &[
+                ("http://ex.org/carol", "Carol"),
+                ("http://ex.org/dave", "Dave"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         let r = p
             .execute(&QueryRequest::new("LOAD <http://ex.org/src>"))
@@ -630,10 +694,20 @@ mod tests {
         let (engine, dict, repo) = seed_update();
         let src = Iri::new("http://ex.org/src");
         let dst = Iri::new("http://ex.org/dst");
-        seed_named_graph(&engine, &dict, &src, &[("http://ex.org/carol", "Carol"), ("http://ex.org/dave", "Dave")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &src,
+            &[
+                ("http://ex.org/carol", "Carol"),
+                ("http://ex.org/dave", "Dave"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         let r = p
-            .execute(&QueryRequest::new("LOAD <http://ex.org/src> INTO GRAPH <http://ex.org/dst>"))
+            .execute(&QueryRequest::new(
+                "LOAD <http://ex.org/src> INTO GRAPH <http://ex.org/dst>",
+            ))
             .unwrap();
         assert_eq!(r.affected, 2);
         assert_eq!(count_named_quads(&engine, &src), 2);
@@ -645,7 +719,15 @@ mod tests {
     fn update_with_delete_insert_targets_named_graph() {
         let (engine, dict, repo) = seed_update();
         let g = Iri::new("http://ex.org/g1");
-        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g,
+            &[
+                ("http://ex.org/alice", "Alice"),
+                ("http://ex.org/bob", "Bob"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         let r = p
             .execute(&QueryRequest::new(
@@ -679,7 +761,15 @@ mod tests {
     fn update_with_delete_where_removes_only_graph() {
         let (engine, dict, repo) = seed_update();
         let g = Iri::new("http://ex.org/g1");
-        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g,
+            &[
+                ("http://ex.org/alice", "Alice"),
+                ("http://ex.org/bob", "Bob"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         let r = p
             .execute(&QueryRequest::new(
@@ -695,7 +785,15 @@ mod tests {
     fn update_with_where_reads_target_graph() {
         let (engine, dict, repo) = seed_update();
         let g = Iri::new("http://ex.org/g1");
-        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g,
+            &[
+                ("http://ex.org/alice", "Alice"),
+                ("http://ex.org/bob", "Bob"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         // The WHERE matches only quads inside the WITH graph, so exactly two
         // insertions happen (alice/bob of g), not four.
@@ -720,7 +818,15 @@ mod tests {
     fn update_silent_forms_accepted() {
         let (engine, dict, repo) = seed_update();
         let g = Iri::new("http://ex.org/g1");
-        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        seed_named_graph(
+            &engine,
+            &dict,
+            &g,
+            &[
+                ("http://ex.org/alice", "Alice"),
+                ("http://ex.org/bob", "Bob"),
+            ],
+        );
         let p = update_pipeline(engine.clone(), dict, repo);
         let r = p
             .execute(&QueryRequest::new("LOAD SILENT <http://ex.org/g1>"))
@@ -786,20 +892,25 @@ mod tests {
             },
             bound_pred("urn:common2"),
         ];
-        let ordered = match super::optimize::optimize_algebra_with_stats(
-            Algebra::Bgp(patterns),
-            &stats,
-        ) {
-            Algebra::Bgp(p) => p,
-            other => panic!("expected Bgp, got {other:?}"),
-        };
+        let ordered =
+            match super::optimize::optimize_algebra_with_stats(Algebra::Bgp(patterns), &stats) {
+                Algebra::Bgp(p) => p,
+                other => panic!("expected Bgp, got {other:?}"),
+            };
         let sig = |t: &TermPattern| match t {
             TermPattern::Iri(i) => i.as_str().to_string(),
             _ => "?".into(),
         };
         let signatures: Vec<_> = ordered
             .iter()
-            .map(|p| format!("{}:{}:{}", sig(&p.subject), sig(&p.predicate), sig(&p.object)))
+            .map(|p| {
+                format!(
+                    "{}:{}:{}",
+                    sig(&p.subject),
+                    sig(&p.predicate),
+                    sig(&p.object)
+                )
+            })
             .collect();
         // Cheapest first, then the connecting pattern (binding propagation),
         // then the remaining selective patterns by cardinality.
@@ -842,7 +953,9 @@ mod tests {
             .plan(&QueryRequest::new("SELECT * WHERE { ?s ?p ?o }"))
             .unwrap();
         assert!(
-            plan.logical_steps.iter().any(|s| s.starts_with("optimize(cost)")),
+            plan.logical_steps
+                .iter()
+                .any(|s| s.starts_with("optimize(cost)")),
             "cost optimizer step missing"
         );
     }
@@ -1141,10 +1254,7 @@ mod tests {
         let p = pipeline(repo);
         let result = p
             .execute(
-                &QueryRequest::new(
-                    "SELECT * WHERE { ?s ?p ?o . ?s2 ?p2 ?o2 }",
-                )
-                .with_timeout(1),
+                &QueryRequest::new("SELECT * WHERE { ?s ?p ?o . ?s2 ?p2 ?o2 }").with_timeout(1),
             )
             .unwrap();
         assert!(result.timed_out, "expected preemption by deadline");
@@ -1844,6 +1954,75 @@ mod tests {
         assert_eq!(
             result.solutions[0].get("o"),
             Some(&BoundValue::Literal(LiteralValue::String("Alice".into())))
+        );
+    }
+
+    #[test]
+    fn function_string_operators() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT (UCASE(STR(?n)) AS ?u) WHERE { node:1 <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        assert_eq!(
+            r.solutions[0].get("u"),
+            Some(&BoundValue::Literal(LiteralValue::String("ALICE".into())))
+        );
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT (LCASE(\"AbC\") AS ?l) (STRLEN(\"abcd\") AS ?n) (CONCAT(\"ab\", \"cd\") AS ?c) WHERE { ?s ?p ?o } LIMIT 1",
+            ))
+            .unwrap();
+        assert_eq!(
+            r.solutions[0].get("l"),
+            Some(&BoundValue::Literal(LiteralValue::String("abc".into())))
+        );
+        assert_eq!(
+            r.solutions[0].get("n"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(4)))
+        );
+        assert_eq!(
+            r.solutions[0].get("c"),
+            Some(&BoundValue::Literal(LiteralValue::String("abcd".into())))
+        );
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT ?n WHERE { node:1 <http://ex.org/name> ?n FILTER(CONTAINS(?n, \"li\")) }",
+            ))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 1);
+    }
+
+    #[test]
+    fn function_numeric_conditional_and_list() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT (ABS(-5) AS ?a) (CEIL(1.2) AS ?c) (ROUND(2.5) AS ?r) (IF(1 = 1, 7, 8) AS ?i) (1 IN (1, 2) AS ?in) (2 NOT IN (1, 2) AS ?nin) WHERE { ?s ?p ?o } LIMIT 1",
+            ))
+            .unwrap();
+        assert_eq!(
+            r.solutions[0].get("a"),
+            Some(&BoundValue::Literal(LiteralValue::Decimal(5.0)))
+        );
+        assert_eq!(
+            r.solutions[0].get("c"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(2)))
+        );
+        assert_eq!(
+            r.solutions[0].get("i"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(7)))
+        );
+        assert_eq!(
+            r.solutions[0].get("in"),
+            Some(&BoundValue::Literal(LiteralValue::Boolean(true)))
+        );
+        assert_eq!(
+            r.solutions[0].get("nin"),
+            Some(&BoundValue::Literal(LiteralValue::Boolean(false)))
         );
     }
 }

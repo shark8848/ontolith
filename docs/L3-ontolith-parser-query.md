@@ -3,7 +3,7 @@
 文档 ID: IMPL-L3-0001  
 版本: 2.9.0  
 状态: Implemented (full L3 core, not MVP-only)  
-日期: 2026-07-22  
+日期: 2026-08-07  
 对应 crate:
 
 - `crates/ontolith-parser`
@@ -55,6 +55,7 @@ SPARQL / RDF text
 | SPARQL Update 高级形态（CLEAR/DROP 图作用域、WITH 图作用域 DELETE·INSERT…WHERE、LOAD 本地图复制） / DESCRIBE 执行 | ✅（LOAD 为本地命名图复制子集，远程 HTTP 抓取未实现） |
 | 属性路径扩展（分组/嵌套更完整 1.1 语法） | ❌ 后续增强 |
 | 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合） | ✅ |
+| 内置函数子集 + SELECT 表达式投影 `(expr AS ?alias)` + 算术（`+ - * /`、一元负号） | ✅（函数：STR/UCASE/LCASE/STRLEN/CONCAT/SUBSTR/CONTAINS/STRSTARTS/STRENDS/STRAFTER/STRBEFORE/LANG/DATATYPE/IRI/URI/ABS/CEIL/FLOOR/ROUND/ISNUMERIC/IF/COALESCE/IN/NOT IN） |
 | SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE） | ✅ |
 | 高级子查询（相关子查询等） / EXISTS / 服务联邦 | ❌ 后续增强 |
 | 流式 Result 协议（网络层） | ❌ 属 L5 接入层 |
@@ -315,3 +316,4 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 | 2026-08-07 | 2.11.0 | 新增代价模型/统计：`QueryStatistics` 契约（triple/subject/predicate/object 计数 + 均匀选择性 `pattern_selectivity`）、`EngineQueryStatistics`（引擎增量统计）、`CostBasedOptimizer`（贪心 join 序 + 绑定传播，语义保持）；`update_pipeline` 与新增 `cost_pipeline` 走代价优化；query 55→58 测，W3C 套件基线无漂移 |
 | 2026-08-07 | 2.12.0 | Explain 增成本信息：`QueryExplain`/`QueryPlan` 新增 `estimated_rows`（主导 BGP 乘积×总数）与 `pattern_costs`（逐模式 selectivity/estimated_rows，代价优化器填充）；HTTP `/explain` JSON 输出两字段；query 58→59 测，server explain HTTP 测试 +1（20 测） |
 | 2026-08-07 | 2.13.0 | 异步抢占 token：`PreemptionToken`（deadline + cancel 标志，`reason()` 区分 Timeout/Cancelled，`preempt()` 可跨线程触发）；执行器轮询粒度细化到 BGP 候选/join 行/FILTER/EXTEND/VALUES 行，Update 抢占返回 `timed_out`/`cancelled` 标志且不落写；query 59→63 测 |
+| 2026-08-07 | 2.14.0 | 新增内置函数子集与表达式投影：`Expression::Function`（STR/UCASE/LCASE/STRLEN/CONCAT/SUBSTR/CONTAINS/STRSTARTS/STRENDS/STRAFTER/STRBEFORE/LANG/DATATYPE/IRI/URI/ABS/CEIL/FLOOR/ROUND/ISNUMERIC/IF/COALESCE/IN/NOT IN）+ 一元负号与二进制算术（`Arith`：`+ - * /`，整数保精、除法十进制）+ SELECT 投影 `(expr AS ?alias)`（执行器 eval 前剥离 Project 层，按别名绑定后裁剪）+ 投影变量唯一性检查（`syn-bad-03` 类重复别名拒绝）+ BIND 变量与同组已绑定变量冲突检查（`syntax-BINDscope6/7` 拒绝）+ 数字词法吸收小数/指数（`1.5`/`2e3`）+ 表达式变量收集（BIND 作用域）；query 63→65 测，W3C 套件 169→192 PASS（functions 71 项 parse-error 全解除：13 PASS、余 62 semantic；project-expression 4 PASS；syntax oneof/BINDscope/select-expr 转正），drift=0 |

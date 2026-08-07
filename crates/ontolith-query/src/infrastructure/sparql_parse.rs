@@ -6,11 +6,13 @@
 
 use crate::domain::{
     AggregateFunction, AggregateSpec, Algebra, Expression, GraphTarget, OrderKey, PathExpression,
-    QueryKind, QueryPlan, QueryPlanId, QueryRequest, TermPattern, TriplePattern, UpdateOp,
+    ProjectionExpr, QueryKind, QueryPlan, QueryPlanId, QueryRequest, TermPattern, TriplePattern,
+    UpdateOp,
 };
 use ontolith_core::domain::{Iri, LiteralValue};
 use ontolith_core::error::OntolithError;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 pub fn plan_query(request: &QueryRequest) -> Result<QueryPlan, OntolithError> {
     let text = request.query.0.as_str();
@@ -100,6 +102,7 @@ impl<'a> SparqlParser<'a> {
                 construct_template: Vec::new(),
                 estimated_rows: None,
                 pattern_costs: Vec::new(),
+                projection_exprs: Vec::new(),
             });
         }
 
@@ -117,6 +120,7 @@ impl<'a> SparqlParser<'a> {
                 construct_template: Vec::new(),
                 estimated_rows: None,
                 pattern_costs: Vec::new(),
+                projection_exprs: Vec::new(),
             });
         }
 
@@ -124,6 +128,7 @@ impl<'a> SparqlParser<'a> {
         let mut select_vars: Vec<String> = Vec::new();
         let mut plain_vars: Vec<String> = Vec::new();
         let mut aggregates: Vec<AggregateSpec> = Vec::new();
+        let mut projection_exprs: Vec<ProjectionExpr> = Vec::new();
         let mut star_projection = false;
         let mut construct_template = Vec::new();
 
@@ -143,18 +148,58 @@ impl<'a> SparqlParser<'a> {
                     self.skip();
                     if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
                         let v = self.parse_var_name()?;
+                        if select_vars.contains(&v) {
+                            return Err(self.err(format!("duplicate projected variable ?{v}")));
+                        }
                         select_vars.push(v.clone());
                         plain_vars.push(v);
                     } else if self.peek_char() == Some('(') {
-                        let spec = self.parse_aggregate_spec()?;
-                        select_vars.push(spec.output.clone());
-                        aggregates.push(spec);
+                        // Peek past '(' to distinguish aggregate specs from
+                        // generic projection expressions `(expr AS ?alias)`.
+                        let save = self.checkpoint();
+                        self.bump(); // '('
+                        self.skip();
+                        let is_aggregate = self.looking_at_keyword("COUNT")
+                            || self.looking_at_keyword("SUM")
+                            || self.looking_at_keyword("AVG")
+                            || self.looking_at_keyword("MIN")
+                            || self.looking_at_keyword("MAX");
+                        self.restore(save);
+                        if is_aggregate {
+                            let spec = self.parse_aggregate_spec()?;
+                            if select_vars.contains(&spec.output) {
+                                return Err(self.err(format!(
+                                    "duplicate projected variable ?{}",
+                                    spec.output
+                                )));
+                            }
+                            select_vars.push(spec.output.clone());
+                            aggregates.push(spec);
+                        } else {
+                            self.bump(); // '('
+                            self.skip();
+                            let expression = self.parse_expression()?;
+                            self.skip();
+                            self.expect_keyword("AS")?;
+                            self.skip();
+                            let alias = self.parse_var_name()?;
+                            self.skip();
+                            self.expect_char(')')?;
+                            if select_vars.contains(&alias) {
+                                return Err(
+                                    self.err(format!("duplicate projected variable ?{alias}"))
+                                );
+                            }
+                            select_vars.push(alias.clone());
+                            projection_exprs.push(ProjectionExpr { expression, alias });
+                        }
                     } else {
                         break;
                     }
                 }
                 if select_vars.is_empty()
                     && aggregates.is_empty()
+                    && projection_exprs.is_empty()
                     && self.looking_at_keyword("WHERE")
                 {
                     // SELECT WHERE without vars → *
@@ -167,6 +212,10 @@ impl<'a> SparqlParser<'a> {
                 if !aggregates.is_empty() {
                     self.logical
                         .push(format!("aggregates:{}", aggregates.len()));
+                }
+                if !projection_exprs.is_empty() {
+                    self.logical
+                        .push(format!("project_exprs:{}", projection_exprs.len()));
                 }
             }
         } else if kind == QueryKind::Construct {
@@ -401,6 +450,7 @@ impl<'a> SparqlParser<'a> {
             construct_template,
             estimated_rows: None,
             pattern_costs: Vec::new(),
+            projection_exprs,
         })
     }
 
@@ -739,6 +789,11 @@ impl<'a> SparqlParser<'a> {
                 let var = self.parse_var_name()?;
                 self.skip();
                 self.expect_char(')')?;
+                if bindings_in_algebra(&acc).contains(&var) {
+                    return Err(self.err(format!(
+                        "BIND variable ?{var} is already bound in this group"
+                    )));
+                }
                 acc = Algebra::Extend {
                     variable: var,
                     expression: expr,
@@ -1253,9 +1308,21 @@ impl<'a> SparqlParser<'a> {
             return Ok(TermPattern::Literal(self.parse_string_literal()?));
         }
         // number / boolean / node:ID / prefixed name
-        let word = self.parse_word();
+        let mut word = self.parse_word();
         if word.is_empty() {
             return Err(self.err("expected term"));
+        }
+        // Absorb decimal fraction / exponent after an integer word:
+        // `1.5`, `2e3`, `1.5e-2`.
+        if is_integer(&word) && matches!(self.peek_char(), Some('.') | Some('e') | Some('E')) {
+            while let Some(c) = self.peek_char() {
+                if c == '.' || c.is_ascii_digit() || c == 'e' || c == 'E' || c == '+' || c == '-' {
+                    self.bump();
+                    word.push(c);
+                } else {
+                    break;
+                }
+            }
         }
         if let Some(rest) = word.strip_prefix("node:") {
             let id = rest
@@ -1324,47 +1391,137 @@ impl<'a> SparqlParser<'a> {
     }
 
     fn parse_relational(&mut self) -> Result<Expression, OntolithError> {
-        let left = self.parse_unary()?;
+        let left = self.parse_additive()?;
         self.skip();
         if self.eat_operator("=") {
             self.skip();
             Ok(Expression::Equal(
                 Box::new(left),
-                Box::new(self.parse_unary()?),
+                Box::new(self.parse_additive()?),
             ))
         } else if self.eat_operator("!=") {
             self.skip();
             Ok(Expression::NotEqual(
                 Box::new(left),
-                Box::new(self.parse_unary()?),
+                Box::new(self.parse_additive()?),
             ))
         } else if self.eat_operator("<=") {
             self.skip();
             Ok(Expression::LessEq(
                 Box::new(left),
-                Box::new(self.parse_unary()?),
+                Box::new(self.parse_additive()?),
             ))
         } else if self.eat_operator(">=") {
             self.skip();
             Ok(Expression::GreaterEq(
                 Box::new(left),
-                Box::new(self.parse_unary()?),
+                Box::new(self.parse_additive()?),
             ))
         } else if self.eat_operator("<") {
             self.skip();
             Ok(Expression::Less(
                 Box::new(left),
-                Box::new(self.parse_unary()?),
+                Box::new(self.parse_additive()?),
             ))
         } else if self.eat_operator(">") {
             self.skip();
             Ok(Expression::Greater(
                 Box::new(left),
-                Box::new(self.parse_unary()?),
+                Box::new(self.parse_additive()?),
             ))
+        } else if self.eat_keyword("IN") {
+            self.skip();
+            let mut args = vec![left];
+            self.expect_char('(')?;
+            self.skip();
+            if self.peek_char() != Some(')') {
+                loop {
+                    args.push(self.parse_expression()?);
+                    self.skip();
+                    if self.eat_operator(",") {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            self.expect_char(')')?;
+            Ok(Expression::Function {
+                name: "IN".into(),
+                args,
+            })
+        } else if self.eat_keyword("NOT") {
+            self.skip();
+            self.expect_keyword("IN")?;
+            self.skip();
+            let mut args = vec![left];
+            self.expect_char('(')?;
+            self.skip();
+            if self.peek_char() != Some(')') {
+                loop {
+                    args.push(self.parse_expression()?);
+                    self.skip();
+                    if self.eat_operator(",") {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            self.expect_char(')')?;
+            Ok(Expression::Function {
+                name: "NOT IN".into(),
+                args,
+            })
         } else {
             Ok(left)
         }
+    }
+
+    fn parse_additive(&mut self) -> Result<Expression, OntolithError> {
+        let mut left = self.parse_multiplicative()?;
+        self.skip();
+        loop {
+            let op = if self.eat_operator("+") {
+                Some('+')
+            } else if self.eat_operator("-") {
+                Some('-')
+            } else {
+                None
+            };
+            let Some(op) = op else { break };
+            self.skip();
+            let right = self.parse_multiplicative()?;
+            left = Expression::Arith {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+            self.skip();
+        }
+        Ok(left)
+    }
+
+    fn parse_multiplicative(&mut self) -> Result<Expression, OntolithError> {
+        let mut left = self.parse_unary()?;
+        self.skip();
+        loop {
+            let op = if self.eat_operator("*") {
+                Some('*')
+            } else if self.eat_operator("/") {
+                Some('/')
+            } else {
+                None
+            };
+            let Some(op) = op else { break };
+            self.skip();
+            let right = self.parse_unary()?;
+            left = Expression::Arith {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+            self.skip();
+        }
+        Ok(left)
     }
 
     fn parse_unary(&mut self) -> Result<Expression, OntolithError> {
@@ -1372,6 +1529,11 @@ impl<'a> SparqlParser<'a> {
         if self.eat_operator("!") || self.eat_keyword("NOT") {
             self.skip();
             return Ok(Expression::Not(Box::new(self.parse_unary()?)));
+        }
+        if self.peek_char() == Some('-') || self.peek_char() == Some('+') {
+            self.bump();
+            self.skip();
+            return Ok(Expression::Negate(Box::new(self.parse_unary()?)));
         }
         if self.eat_keyword("BOUND") {
             self.skip();
@@ -1416,6 +1578,29 @@ impl<'a> SparqlParser<'a> {
             || self.looking_at_keyword("MAX")
         {
             return Ok(Expression::Aggregate(self.parse_aggregate_call()?));
+        }
+        // Built-in function call: bare name immediately followed by `(`.
+        if let Some(name) = self.peek_bare_function_name() {
+            self.eat_bare_name();
+            self.skip();
+            self.expect_char('(')?;
+            self.skip();
+            let mut args = Vec::new();
+            if self.peek_char() != Some(')') {
+                loop {
+                    args.push(self.parse_expression()?);
+                    self.skip();
+                    if self.eat_operator(",") {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            self.expect_char(')')?;
+            return Ok(Expression::Function {
+                name: name.to_ascii_uppercase(),
+                args,
+            });
         }
         if self.peek_char() == Some('(') {
             self.bump();
@@ -1565,6 +1750,61 @@ impl<'a> SparqlParser<'a> {
             return Err(self.err("empty variable name"));
         }
         Ok(self.input[start..self.pos].to_owned())
+    }
+
+    /// Peek at a bare (non-prefixed) identifier followed by `(` — a built-in
+    /// function call. Returns `None` when the next token is not a function.
+    fn peek_bare_function_name(&self) -> Option<String> {
+        let mut pos = self.pos;
+        while let Some(c) = self.input[pos..].chars().next() {
+            if c.is_whitespace() {
+                pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let mut name = String::new();
+        match self.input[pos..].chars().next()? {
+            c if c.is_ascii_alphabetic() => {
+                name.push(c);
+                pos += c.len_utf8();
+            }
+            _ => return None,
+        }
+        while let Some(c) = self.input[pos..].chars().next() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                name.push(c);
+                pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        // Skip whitespace between the name and `(`.
+        let mut rest = &self.input[pos..];
+        while let Some(c) = rest.chars().next() {
+            if c.is_whitespace() {
+                pos += c.len_utf8();
+                rest = &self.input[pos..];
+            } else {
+                break;
+            }
+        }
+        if rest.starts_with('(') {
+            Some(name)
+        } else {
+            None
+        }
+    }
+
+    fn eat_bare_name(&mut self) {
+        self.skip();
+        while let Some(c) = self.peek_char() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                self.bump();
+            } else {
+                break;
+            }
+        }
     }
 
     fn parse_blank_label(&mut self) -> Result<String, OntolithError> {
@@ -2045,5 +2285,124 @@ fn rewrite_having_aggregates(
             *e, aggregates,
         )?))),
         other => Ok(other),
+    }
+}
+
+/// Variables already bound by an algebra subtree (for BIND scope checks).
+fn bindings_in_algebra(algebra: &Algebra) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_algebra_vars(algebra, &mut out);
+    out
+}
+
+fn collect_algebra_vars(algebra: &Algebra, out: &mut BTreeSet<String>) {
+    match algebra {
+        Algebra::Identity => {}
+        Algebra::Bgp(patterns) => {
+            for p in patterns {
+                for t in [&p.subject, &p.predicate, &p.object] {
+                    if let Some(v) = t.as_variable() {
+                        out.insert(v.to_owned());
+                    }
+                }
+            }
+        }
+        Algebra::Join { left, right } => {
+            collect_algebra_vars(left, out);
+            collect_algebra_vars(right, out);
+        }
+        Algebra::LeftJoin {
+            left,
+            right,
+            condition,
+        } => {
+            collect_algebra_vars(left, out);
+            collect_algebra_vars(right, out);
+            if let Some(expr) = condition {
+                collect_expr_vars(expr, out);
+            }
+        }
+        Algebra::Union { left, right } => {
+            collect_algebra_vars(left, out);
+            collect_algebra_vars(right, out);
+        }
+        Algebra::Filter { expression, input } => {
+            collect_expr_vars(expression, out);
+            collect_algebra_vars(input, out);
+        }
+        Algebra::Extend {
+            variable,
+            expression,
+            input,
+        } => {
+            out.insert(variable.clone());
+            collect_expr_vars(expression, out);
+            collect_algebra_vars(input, out);
+        }
+        Algebra::Values {
+            variables,
+            bindings,
+            ..
+        } => {
+            out.extend(variables.iter().cloned());
+            for row in bindings {
+                for t in row {
+                    if let Some(v) = t.as_ref().and_then(|t| t.as_variable()) {
+                        out.insert(v.to_owned());
+                    }
+                }
+            }
+        }
+        Algebra::Distinct { input }
+        | Algebra::Project { input, .. }
+        | Algebra::OrderBy { input, .. }
+        | Algebra::Slice { input, .. }
+        | Algebra::Aggregate { input, .. } => collect_algebra_vars(input, out),
+        Algebra::Path {
+            subject, object, ..
+        } => {
+            if let Some(v) = subject.as_variable() {
+                out.insert(v.to_owned());
+            }
+            if let Some(v) = object.as_variable() {
+                out.insert(v.to_owned());
+            }
+        }
+    }
+}
+
+fn collect_expr_vars(expr: &Expression, out: &mut BTreeSet<String>) {
+    match expr {
+        Expression::Variable(v) => {
+            out.insert(v.clone());
+        }
+        Expression::Bound(v) => {
+            out.insert(v.clone());
+        }
+        Expression::Iri(_) | Expression::Literal(_) | Expression::Aggregate(_) => {}
+        Expression::IsIri(e)
+        | Expression::IsLiteral(e)
+        | Expression::IsBlank(e)
+        | Expression::Not(e)
+        | Expression::Negate(e) => collect_expr_vars(e, out),
+        Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::Equal(a, b)
+        | Expression::NotEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessEq(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterEq(a, b)
+        | Expression::Arith {
+            left: a, right: b, ..
+        } => {
+            collect_expr_vars(a, out);
+            collect_expr_vars(b, out);
+        }
+        Expression::Function { args, .. } => {
+            for a in args {
+                collect_expr_vars(a, out);
+            }
+        }
     }
 }

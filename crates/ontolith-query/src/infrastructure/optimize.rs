@@ -462,7 +462,12 @@ fn pattern_signature(p: &TriplePattern) -> String {
         TermPattern::Node(n) => format!("node:{}", n.get()),
         TermPattern::Literal(l) => format!("{l:?}"),
     };
-    format!("{} {} {}", sig(&p.subject), sig(&p.predicate), sig(&p.object))
+    format!(
+        "{} {} {}",
+        sig(&p.subject),
+        sig(&p.predicate),
+        sig(&p.object)
+    )
 }
 
 fn push_filters(algebra: Algebra) -> Algebra {

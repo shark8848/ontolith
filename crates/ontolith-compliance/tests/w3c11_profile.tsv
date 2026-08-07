@@ -10,7 +10,7 @@ add	ADD 7	FAIL	semantic
 add	ADD 8	FAIL	semantic
 aggregates	AVG	PASS	
 aggregates	AVG DISTINCT with GROUP BY	FAIL	parse-error
-aggregates	AVG with GROUP BY	FAIL	parse-error
+aggregates	AVG with GROUP BY	FAIL	semantic
 aggregates	AVG with empty group (value defined to be 0)	FAIL	data-format
 aggregates	COUNT 1	PASS	
 aggregates	COUNT 10	PASS	
@@ -30,8 +30,8 @@ aggregates	COUNT(DISTINCT *) with GROUP BY	PASS
 aggregates	COUNT: no GROUP BY inside of GRAPH	FAIL	named-graph
 aggregates	COUNT: no match, no group	FAIL	data-format
 aggregates	COUNT: no match, with group	FAIL	data-format
-aggregates	Error in AVG	FAIL	parse-error
-aggregates	GROUP BY with a built-in function	FAIL	parse-error
+aggregates	Error in AVG	FAIL	semantic
+aggregates	GROUP BY with a built-in function	FAIL	semantic
 aggregates	GROUP BY with a function	FAIL	parse-error
 aggregates	GROUP_CONCAT 1	FAIL	parse-error
 aggregates	GROUP_CONCAT 2	FAIL	parse-error
@@ -68,13 +68,13 @@ basic-update	Simple insert data 1	FAIL	data-format
 basic-update	Simple insert data named 1	FAIL	data-format
 basic-update	Simple insert data named 2	FAIL	data-format
 basic-update	Simple insert data named 3	FAIL	data-format
-bind	bind01 - BIND	FAIL	parse-error
-bind	bind02 - BIND	FAIL	parse-error
-bind	bind03 - BIND	FAIL	parse-error
+bind	bind01 - BIND	PASS	
+bind	bind02 - BIND	PASS	
+bind	bind03 - BIND	PASS	
 bind	bind04 - BIND	PASS	
-bind	bind05 - BIND	FAIL	parse-error
-bind	bind06 - BIND	FAIL	parse-error
-bind	bind07 - BIND	FAIL	parse-error
+bind	bind05 - BIND	PASS	
+bind	bind06 - BIND	PASS	
+bind	bind07 - BIND	PASS	
 bind	bind08 - BIND	FAIL	parse-error
 bind	bind10 - BIND scoping - Variable in filter not in scope	PASS	
 bind	bind11 - BIND scoping - Variable in filter in scope	PASS	
@@ -156,7 +156,7 @@ delete-insert	DELETE INSERT 7	PASS
 delete-insert	DELETE INSERT 7b	PASS	
 delete-insert	DELETE INSERT 8	FAIL	accepted-invalid
 delete-insert	DELETE INSERT 9	FAIL	accepted-invalid
-delete-insert	Halloween Problem: A delete/insert operation should not be able to read its own writes	FAIL	parse-error
+delete-insert	Halloween Problem: A delete/insert operation should not be able to read its own writes	PASS	
 delete-where	Graph-specific DELETE WHERE 1	PASS	
 delete-where	Graph-specific DELETE WHERE 2	FAIL	parse-error
 delete-where	Simple DELETE WHERE 1	FAIL	semantic
@@ -173,84 +173,84 @@ exists	Exists within graph pattern	FAIL	named-graph
 exists	GRAPH variable inside of EXISTS is bound to external variable	FAIL	named-graph
 exists	Nested negative exists in positive exists	FAIL	parse-error
 exists	Nested positive exists	FAIL	parse-error
-functions	ABS()	FAIL	parse-error
-functions	BNODE()	FAIL	parse-error
-functions	BNODE(str)	FAIL	parse-error
-functions	CEIL()	FAIL	parse-error
-functions	COALESCE()	FAIL	parse-error
-functions	COALESCE() without arguments	FAIL	parse-error
-functions	CONCAT()	FAIL	parse-error
-functions	CONCAT() 2	FAIL	parse-error
-functions	CONCAT() with a single parameter	FAIL	parse-error
-functions	CONCAT() without parameter	FAIL	parse-error
-functions	CONTAINS()	FAIL	parse-error
-functions	DAY()	FAIL	parse-error
-functions	ENCODE_FOR_URI()	FAIL	parse-error
-functions	ENCODE_FOR_URI() on non-BMP unicode strings	FAIL	parse-error
-functions	FLOOR()	FAIL	parse-error
-functions	HOURS()	FAIL	parse-error
-functions	IF()	FAIL	parse-error
-functions	IF() error propogation	FAIL	parse-error
-functions	IN 1	FAIL	parse-error
-functions	IN 2	FAIL	parse-error
-functions	IRI()/URI()	FAIL	parse-error
-functions	IRI()/URI() when the input is an IRI	FAIL	parse-error
-functions	LCASE()	FAIL	parse-error
-functions	LCASE() on non-BMP unicode strings	FAIL	parse-error
-functions	MD5()	FAIL	parse-error
-functions	MD5() over Unicode data	FAIL	parse-error
-functions	MINUTES()	FAIL	parse-error
-functions	MONTH()	FAIL	parse-error
-functions	NOT IN 1	FAIL	parse-error
-functions	NOT IN 2	FAIL	parse-error
-functions	NOW()	FAIL	parse-error
-functions	RAND()	FAIL	parse-error
-functions	REPLACE()	FAIL	parse-error
-functions	REPLACE() with captured substring	FAIL	parse-error
-functions	REPLACE() with overlapping pattern	FAIL	parse-error
+functions	ABS()	FAIL	semantic
+functions	BNODE()	FAIL	semantic
+functions	BNODE(str)	FAIL	semantic
+functions	CEIL()	FAIL	semantic
+functions	COALESCE()	FAIL	semantic
+functions	COALESCE() without arguments	PASS	
+functions	CONCAT()	FAIL	semantic
+functions	CONCAT() 2	FAIL	semantic
+functions	CONCAT() with a single parameter	FAIL	semantic
+functions	CONCAT() without parameter	PASS	
+functions	CONTAINS()	FAIL	semantic
+functions	DAY()	FAIL	semantic
+functions	ENCODE_FOR_URI()	FAIL	semantic
+functions	ENCODE_FOR_URI() on non-BMP unicode strings	FAIL	semantic
+functions	FLOOR()	FAIL	semantic
+functions	HOURS()	FAIL	semantic
+functions	IF()	FAIL	semantic
+functions	IF() error propogation	PASS	
+functions	IN 1	PASS	
+functions	IN 2	PASS	
+functions	IRI()/URI()	FAIL	semantic
+functions	IRI()/URI() when the input is an IRI	FAIL	other
+functions	LCASE()	FAIL	semantic
+functions	LCASE() on non-BMP unicode strings	PASS	
+functions	MD5()	FAIL	semantic
+functions	MD5() over Unicode data	FAIL	semantic
+functions	MINUTES()	FAIL	semantic
+functions	MONTH()	FAIL	semantic
+functions	NOT IN 1	PASS	
+functions	NOT IN 2	PASS	
+functions	NOW()	FAIL	semantic
+functions	RAND()	FAIL	semantic
+functions	REPLACE()	FAIL	semantic
+functions	REPLACE() with captured substring	FAIL	semantic
+functions	REPLACE() with overlapping pattern	FAIL	semantic
 functions	REPLACE() with the 'i' option	FAIL	data-format
-functions	ROUND()	FAIL	parse-error
-functions	SECONDS()	FAIL	parse-error
-functions	SHA1()	FAIL	parse-error
-functions	SHA1() on Unicode data	FAIL	parse-error
-functions	SHA256()	FAIL	parse-error
-functions	SHA256() on Unicode data	FAIL	parse-error
-functions	SHA384()	FAIL	parse-error
-functions	SHA384() on Unicode data	FAIL	parse-error
-functions	SHA512()	FAIL	parse-error
-functions	SHA512() on Unicode data	FAIL	parse-error
-functions	STRAFTER()	FAIL	parse-error
-functions	STRAFTER() datatyping	FAIL	parse-error
-functions	STRBEFORE()	FAIL	parse-error
-functions	STRBEFORE() datatyping	FAIL	parse-error
-functions	STRDT()	FAIL	parse-error
-functions	STRDT() TypeErrors (updated for RDF 1.1)	FAIL	parse-error
-functions	STRDT(STR())	FAIL	parse-error
-functions	STRENDS()	FAIL	parse-error
-functions	STRLANG()	FAIL	parse-error
-functions	STRLANG() TypeErrors (updated for RDF 1.1)	FAIL	parse-error
-functions	STRLANG(STR())	FAIL	parse-error
-functions	STRLEN()	FAIL	parse-error
-functions	STRLEN() on non-BMP unicode strings	FAIL	parse-error
-functions	STRSTARTS()	FAIL	parse-error
+functions	ROUND()	FAIL	semantic
+functions	SECONDS()	FAIL	semantic
+functions	SHA1()	FAIL	semantic
+functions	SHA1() on Unicode data	FAIL	semantic
+functions	SHA256()	FAIL	semantic
+functions	SHA256() on Unicode data	FAIL	semantic
+functions	SHA384()	FAIL	semantic
+functions	SHA384() on Unicode data	FAIL	semantic
+functions	SHA512()	FAIL	semantic
+functions	SHA512() on Unicode data	FAIL	semantic
+functions	STRAFTER()	FAIL	semantic
+functions	STRAFTER() datatyping	FAIL	semantic
+functions	STRBEFORE()	FAIL	semantic
+functions	STRBEFORE() datatyping	FAIL	semantic
+functions	STRDT()	FAIL	semantic
+functions	STRDT() TypeErrors (updated for RDF 1.1)	FAIL	semantic
+functions	STRDT(STR())	FAIL	semantic
+functions	STRENDS()	PASS	
+functions	STRLANG()	FAIL	semantic
+functions	STRLANG() TypeErrors (updated for RDF 1.1)	FAIL	semantic
+functions	STRLANG(STR())	FAIL	semantic
+functions	STRLEN()	FAIL	semantic
+functions	STRLEN() on non-BMP unicode strings	PASS	
+functions	STRSTARTS()	PASS	
 functions	STRUUID() pattern match	FAIL	data-format
-functions	SUBSTR() (2-argument)	FAIL	parse-error
-functions	SUBSTR() (2-argument) on non-BMP unicode strings	FAIL	parse-error
-functions	SUBSTR() (3-argument)	FAIL	parse-error
-functions	SUBSTR() (3-argument) on non-BMP unicode strings	FAIL	parse-error
-functions	TIMEZONE()	FAIL	parse-error
-functions	TZ()	FAIL	parse-error
-functions	UCASE()	FAIL	parse-error
-functions	UCASE() on non-BMP unicode strings	FAIL	parse-error
+functions	SUBSTR() (2-argument)	FAIL	semantic
+functions	SUBSTR() (2-argument) on non-BMP unicode strings	PASS	
+functions	SUBSTR() (3-argument)	FAIL	semantic
+functions	SUBSTR() (3-argument) on non-BMP unicode strings	PASS	
+functions	TIMEZONE()	FAIL	semantic
+functions	TZ()	FAIL	semantic
+functions	UCASE()	FAIL	semantic
+functions	UCASE() on non-BMP unicode strings	PASS	
 functions	UUID() pattern match	FAIL	data-format
 functions	UUID() per binding	FAIL	data-format
-functions	YEAR()	FAIL	parse-error
-functions	isNumeric()	FAIL	parse-error
+functions	YEAR()	FAIL	semantic
+functions	isNumeric()	PASS	
 functions	plus-1-corrected	FAIL	parse-error
 functions	plus-2-corrected	FAIL	parse-error
 grouping	Group-1	PASS	
-grouping	Group-3	FAIL	parse-error
-grouping	Group-4	FAIL	parse-error
+grouping	Group-3	FAIL	semantic
+grouping	Group-4	FAIL	semantic
 grouping	Group-5	PASS	
 grouping	Group-6	PASS	
 grouping	Group-7	PASS	
@@ -276,13 +276,13 @@ negation	Subsets by exclusion (NOT EXISTS)	FAIL	parse-error
 negation	Subtraction with MINUS from a fully bound minuend	FAIL	parse-error
 negation	Subtraction with MINUS from a partially bound minuend	FAIL	parse-error
 negation	outer GRAPH operator does not affect MINUS disjointness	FAIL	named-graph
-project-expression	Expression has undefined variable	FAIL	parse-error
-project-expression	Expression has variable that may be unbound	FAIL	parse-error
-project-expression	Expression is equality	FAIL	parse-error
-project-expression	Expression may return no value	FAIL	parse-error
-project-expression	Expression raise an error	FAIL	parse-error
-project-expression	Reuse a project expression variable in order by	FAIL	parse-error
-project-expression	Reuse a project expression variable in select	FAIL	parse-error
+project-expression	Expression has undefined variable	PASS	
+project-expression	Expression has variable that may be unbound	PASS	
+project-expression	Expression is equality	PASS	
+project-expression	Expression may return no value	PASS	
+project-expression	Expression raise an error	PASS	
+project-expression	Reuse a project expression variable in order by	PASS	
+project-expression	Reuse a project expression variable in select	PASS	
 property-path	(pp01) Simple path	PASS	
 property-path	(pp02) Star path	FAIL	parse-error
 property-path	(pp03) Simple path with loop	PASS	
@@ -370,14 +370,14 @@ syntax-query	syn-pname-07	PASS
 syntax-query	syn-pname-08	PASS	
 syntax-query	syn-pname-09	FAIL	parse-error
 syntax-query	syn-pp-in-collection	FAIL	parse-error
-syntax-query	syntax-BINDscope1.rq	FAIL	parse-error
-syntax-query	syntax-BINDscope2.rq	FAIL	parse-error
-syntax-query	syntax-BINDscope3.rq	FAIL	parse-error
+syntax-query	syntax-BINDscope1.rq	PASS	
+syntax-query	syntax-BINDscope2.rq	PASS	
+syntax-query	syntax-BINDscope3.rq	PASS	
 syntax-query	syntax-BINDscope4.rq	PASS	
 syntax-query	syntax-BINDscope5.rq	PASS	
 syntax-query	syntax-BINDscope6.rq	PASS	
 syntax-query	syntax-BINDscope7.rq	PASS	
-syntax-query	syntax-BINDscope8.rq	FAIL	accepted-invalid
+syntax-query	syntax-BINDscope8.rq	PASS	
 syntax-query	syntax-SELECTscope1.rq	FAIL	parse-error
 syntax-query	syntax-SELECTscope2	PASS	
 syntax-query	syntax-SELECTscope3.rq	FAIL	parse-error
@@ -393,11 +393,11 @@ syntax-query	syntax-aggregate-09.rq	PASS
 syntax-query	syntax-aggregate-10.rq	FAIL	parse-error
 syntax-query	syntax-aggregate-11.rq	PASS	
 syntax-query	syntax-aggregate-12.rq	FAIL	parse-error
-syntax-query	syntax-aggregate-13.rq	FAIL	parse-error
+syntax-query	syntax-aggregate-13.rq	PASS	
 syntax-query	syntax-aggregate-14.rq	FAIL	parse-error
 syntax-query	syntax-aggregate-15.rq	FAIL	parse-error
-syntax-query	syntax-bind-02.rq	FAIL	parse-error
-syntax-query	syntax-bindingBINDscopes-01.rq	FAIL	parse-error
+syntax-query	syntax-bind-02.rq	PASS	
+syntax-query	syntax-bindingBINDscopes-01.rq	PASS	
 syntax-query	syntax-bindings-02a.rq with VALUES clause	PASS	
 syntax-query	syntax-bindings-03a.rq with VALUES clause	PASS	
 syntax-query	syntax-bindings-05a.rq with VALUES clause	PASS	
@@ -411,13 +411,13 @@ syntax-query	syntax-minus-01.rq	FAIL	parse-error
 syntax-query	syntax-not-exists-01.rq	FAIL	parse-error
 syntax-query	syntax-not-exists-02.rq	FAIL	parse-error
 syntax-query	syntax-not-exists-03.rq	FAIL	parse-error
-syntax-query	syntax-oneof-01.rq	FAIL	parse-error
-syntax-query	syntax-oneof-02.rq	FAIL	parse-error
+syntax-query	syntax-oneof-01.rq	PASS	
+syntax-query	syntax-oneof-02.rq	PASS	
 syntax-query	syntax-oneof-03.rq	FAIL	parse-error
 syntax-query	syntax-propertyPaths-01.rq	FAIL	parse-error
-syntax-query	syntax-select-expr-01.rq	FAIL	parse-error
-syntax-query	syntax-select-expr-02.rq	FAIL	parse-error
-syntax-query	syntax-select-expr-03.rq	FAIL	parse-error
+syntax-query	syntax-select-expr-01.rq	PASS	
+syntax-query	syntax-select-expr-02.rq	PASS	
+syntax-query	syntax-select-expr-03.rq	PASS	
 syntax-query	syntax-select-expr-04.rq	FAIL	parse-error
 syntax-query	syntax-select-expr-05.rq	PASS	
 syntax-query	syntax-subquery-01.rq	PASS	

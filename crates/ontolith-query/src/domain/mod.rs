@@ -85,6 +85,20 @@ pub enum Expression {
     LessEq(Box<Expression>, Box<Expression>),
     Greater(Box<Expression>, Box<Expression>),
     GreaterEq(Box<Expression>, Box<Expression>),
+    /// Binary arithmetic (P3-05): `+ - * /` with SPARQL numeric semantics.
+    Arith {
+        op: char,
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
+    /// Unary numeric negation (P3-05): `-5`, `-?x`, `-(a + b)`.
+    Negate(Box<Expression>),
+    /// Built-in function call (P3-05): name is normalized to uppercase,
+    /// e.g. `STR`, `CONCAT`, `IF`, `COALESCE`, `IN`.
+    Function {
+        name: String,
+        args: Vec<Expression>,
+    },
     /// Aggregate function call — only valid inside HAVING; resolved to the
     /// matching projection alias before execution.
     Aggregate(AggregateFunction),
@@ -147,7 +161,11 @@ pub enum UpdateOp {
     /// `LOAD [SILENT] <source> [INTO GRAPH <target>]` — offline subset: the
     /// source is a named graph already present in the store and its contents
     /// are copied into the default graph (or into `target`).
-    Load { silent: bool, source: Iri, into: Option<Iri> },
+    Load {
+        silent: bool,
+        source: Iri,
+        into: Option<Iri>,
+    },
 }
 
 /// Graph scope for `CLEAR` / `DROP`.
@@ -257,6 +275,15 @@ pub struct QueryPlan {
     pub estimated_rows: Option<u64>,
     /// Per-pattern cost estimates (filled by the cost optimizer).
     pub pattern_costs: Vec<PatternCost>,
+    /// SELECT projection expressions `(expr AS ?alias)` (non-aggregate).
+    pub projection_exprs: Vec<ProjectionExpr>,
+}
+
+/// One `(expr AS ?alias)` SELECT projection item.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectionExpr {
+    pub expression: Expression,
+    pub alias: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -549,10 +576,7 @@ impl PreemptionToken {
         if self.cancel.load(Ordering::Relaxed) {
             return Some(PreemptionReason::Cancelled);
         }
-        if self
-            .deadline
-            .is_some_and(|d| Instant::now() >= d)
-        {
+        if self.deadline.is_some_and(|d| Instant::now() >= d) {
             return Some(PreemptionReason::Timeout);
         }
         None

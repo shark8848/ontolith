@@ -20,9 +20,8 @@ use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_transaction::domain::TxnId;
 use rocksdb::{
-    backup::BackupEngine, backup::BackupEngineOptions, backup::RestoreOptions,
     ColumnFamilyDescriptor, DB, Direction, Env, IteratorMode, Options, WriteBatch as RocksBatch,
-    WriteOptions,
+    WriteOptions, backup::BackupEngine, backup::BackupEngineOptions, backup::RestoreOptions,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};

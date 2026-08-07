@@ -2,8 +2,8 @@
 
 use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
-    AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, PathExpression, QueryKind,
-    GraphTarget, PreemptionReason, PreemptionToken, QueryPlan, QueryRequest, QueryResult, Solution,
+    AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, GraphTarget, PathExpression,
+    PreemptionReason, PreemptionToken, QueryKind, QueryPlan, QueryRequest, QueryResult, Solution,
     TermPattern, TriplePattern, UpdateOp,
 };
 use ontolith_core::domain::{Iri, LiteralValue, NodeId};
@@ -59,7 +59,15 @@ impl AlgebraExecutor {
             token: &token,
         };
 
-        let mut solutions = match eval_algebra(&plan.algebra, &ctx) {
+        // Projection expressions must see every variable bound by the WHERE
+        // clause, so drop the SELECT Project layer before evaluation; the
+        // Select arm below re-applies the projection.
+        let eval_target = if plan.kind == QueryKind::Select && !plan.projection_exprs.is_empty() {
+            strip_select_projection(&plan.algebra)
+        } else {
+            plan.algebra.clone()
+        };
+        let mut solutions = match eval_algebra(&eval_target, &ctx) {
             Ok(s) => s,
             Err(OntolithError::InvalidState("query timed out")) => {
                 return Ok(QueryResult {
@@ -119,6 +127,17 @@ impl AlgebraExecutor {
                 let mut variables = select_variables(&plan.algebra);
                 if variables.is_empty() {
                     variables = collect_vars_from_solutions(&solutions);
+                }
+                // Evaluate SELECT projection expressions `(expr AS ?alias)` per
+                // solution before trimming non-projected bindings.
+                if !plan.projection_exprs.is_empty() {
+                    for s in &mut solutions {
+                        for pe in &plan.projection_exprs {
+                            if let Some(v) = eval_expr_value(&pe.expression, s) {
+                                s.insert(pe.alias.clone(), v);
+                            }
+                        }
+                    }
                 }
                 if !variables.is_empty() {
                     for s in &mut solutions {
@@ -197,176 +216,181 @@ pub fn execute_update(
     let mut affected: u64 = 0;
     let mut staged = false;
 
-    let result = (|| -> Result<(), OntolithError> {
-        for op in &plan.update_ops {
-            match op {
-                UpdateOp::InsertData(patterns) => {
-                    let triples = concrete_update_triples(patterns, read)?;
-                    let ops: Vec<_> = triples
-                        .iter()
-                        .map(|t| WriteOperation::PutTriple(t.clone()))
-                        .collect();
-                    if !ops.is_empty() {
-                        write.apply_write_batch(txn_id, ops)?;
-                        staged = true;
-                    }
-                    affected += triples.len() as u64;
-                }
-                UpdateOp::DeleteData(patterns) => {
-                    let triples = concrete_update_triples(patterns, read)?;
-                    let ops: Vec<_> = triples
-                        .iter()
-                        .map(|t| WriteOperation::DeleteTriple(t.clone()))
-                        .collect();
-                    if !ops.is_empty() {
-                        write.apply_write_batch(txn_id, ops)?;
-                        staged = true;
-                    }
-                    affected += triples.len() as u64;
-                }
-                UpdateOp::DeleteInsert {
-                    graph,
-                    delete,
-                    insert,
-                    where_pattern,
-                } => {
-                    let scoped = graph.as_ref().map(|g| GraphScopedRead::new(read, write, g));
-                    let op_read: &dyn QueryReadService =
-                        scoped.as_ref().map(|s| s as &dyn QueryReadService).unwrap_or(read);
-                    let op_ctx = ExecCtx {
-                        read: op_read,
-                        txn_id: Some(txn_id),
-                        token: &token,
-                    };
-                    let solutions = eval_algebra(where_pattern, &op_ctx)?;
-                    let mut ops = Vec::new();
-                    let mut seen = HashSet::new();
-                    for sol in &solutions {
-                        for t in materialize_update_triples(delete, sol, op_read)? {
-                            let key = match graph {
-                                Some(_) => format!("g|{}", triple_key(&t)),
-                                None => triple_key(&t),
-                            };
-                            if seen.insert(key) {
-                                ops.push(match graph {
-                                    Some(g) => {
-                                        WriteOperation::DeleteQuad(Quad::in_named_graph(t, g.clone()))
-                                    }
-                                    None => WriteOperation::DeleteTriple(t),
-                                });
-                            }
+    let result =
+        (|| -> Result<(), OntolithError> {
+            for op in &plan.update_ops {
+                match op {
+                    UpdateOp::InsertData(patterns) => {
+                        let triples = concrete_update_triples(patterns, read)?;
+                        let ops: Vec<_> = triples
+                            .iter()
+                            .map(|t| WriteOperation::PutTriple(t.clone()))
+                            .collect();
+                        if !ops.is_empty() {
+                            write.apply_write_batch(txn_id, ops)?;
+                            staged = true;
                         }
-                        for t in materialize_update_triples(insert, sol, op_read)? {
-                            ops.push(match graph {
-                                Some(g) => {
-                                    WriteOperation::PutQuad(Quad::in_named_graph(t, g.clone()))
+                        affected += triples.len() as u64;
+                    }
+                    UpdateOp::DeleteData(patterns) => {
+                        let triples = concrete_update_triples(patterns, read)?;
+                        let ops: Vec<_> = triples
+                            .iter()
+                            .map(|t| WriteOperation::DeleteTriple(t.clone()))
+                            .collect();
+                        if !ops.is_empty() {
+                            write.apply_write_batch(txn_id, ops)?;
+                            staged = true;
+                        }
+                        affected += triples.len() as u64;
+                    }
+                    UpdateOp::DeleteInsert {
+                        graph,
+                        delete,
+                        insert,
+                        where_pattern,
+                    } => {
+                        let scoped = graph.as_ref().map(|g| GraphScopedRead::new(read, write, g));
+                        let op_read: &dyn QueryReadService = scoped
+                            .as_ref()
+                            .map(|s| s as &dyn QueryReadService)
+                            .unwrap_or(read);
+                        let op_ctx = ExecCtx {
+                            read: op_read,
+                            txn_id: Some(txn_id),
+                            token: &token,
+                        };
+                        let solutions = eval_algebra(where_pattern, &op_ctx)?;
+                        let mut ops = Vec::new();
+                        let mut seen = HashSet::new();
+                        for sol in &solutions {
+                            for t in materialize_update_triples(delete, sol, op_read)? {
+                                let key = match graph {
+                                    Some(_) => format!("g|{}", triple_key(&t)),
+                                    None => triple_key(&t),
+                                };
+                                if seen.insert(key) {
+                                    ops.push(match graph {
+                                        Some(g) => WriteOperation::DeleteQuad(
+                                            Quad::in_named_graph(t, g.clone()),
+                                        ),
+                                        None => WriteOperation::DeleteTriple(t),
+                                    });
                                 }
-                                None => WriteOperation::PutTriple(t),
-                            });
-                        }
-                    }
-                    if !ops.is_empty() {
-                        affected += ops.len() as u64;
-                        write.apply_write_batch(txn_id, ops)?;
-                        staged = true;
-                    }
-                }
-                UpdateOp::DeleteWhere { graph, patterns } => {
-                    let scoped = graph.as_ref().map(|g| GraphScopedRead::new(read, write, g));
-                    let op_read: &dyn QueryReadService =
-                        scoped.as_ref().map(|s| s as &dyn QueryReadService).unwrap_or(read);
-                    let op_ctx = ExecCtx {
-                        read: op_read,
-                        txn_id: Some(txn_id),
-                        token: &token,
-                    };
-                    let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &op_ctx)?;
-                    let mut ops = Vec::new();
-                    let mut seen = HashSet::new();
-                    for sol in &solutions {
-                        for t in materialize_update_triples(patterns, sol, op_read)? {
-                            let key = match graph {
-                                Some(_) => format!("g|{}", triple_key(&t)),
-                                None => triple_key(&t),
-                            };
-                            if seen.insert(key) {
+                            }
+                            for t in materialize_update_triples(insert, sol, op_read)? {
                                 ops.push(match graph {
                                     Some(g) => {
-                                        WriteOperation::DeleteQuad(Quad::in_named_graph(t, g.clone()))
+                                        WriteOperation::PutQuad(Quad::in_named_graph(t, g.clone()))
                                     }
-                                    None => WriteOperation::DeleteTriple(t),
+                                    None => WriteOperation::PutTriple(t),
                                 });
                             }
                         }
+                        if !ops.is_empty() {
+                            affected += ops.len() as u64;
+                            write.apply_write_batch(txn_id, ops)?;
+                            staged = true;
+                        }
                     }
-                    if !ops.is_empty() {
-                        affected += ops.len() as u64;
-                        write.apply_write_batch(txn_id, ops)?;
-                        staged = true;
+                    UpdateOp::DeleteWhere { graph, patterns } => {
+                        let scoped = graph.as_ref().map(|g| GraphScopedRead::new(read, write, g));
+                        let op_read: &dyn QueryReadService = scoped
+                            .as_ref()
+                            .map(|s| s as &dyn QueryReadService)
+                            .unwrap_or(read);
+                        let op_ctx = ExecCtx {
+                            read: op_read,
+                            txn_id: Some(txn_id),
+                            token: &token,
+                        };
+                        let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &op_ctx)?;
+                        let mut ops = Vec::new();
+                        let mut seen = HashSet::new();
+                        for sol in &solutions {
+                            for t in materialize_update_triples(patterns, sol, op_read)? {
+                                let key = match graph {
+                                    Some(_) => format!("g|{}", triple_key(&t)),
+                                    None => triple_key(&t),
+                                };
+                                if seen.insert(key) {
+                                    ops.push(match graph {
+                                        Some(g) => WriteOperation::DeleteQuad(
+                                            Quad::in_named_graph(t, g.clone()),
+                                        ),
+                                        None => WriteOperation::DeleteTriple(t),
+                                    });
+                                }
+                            }
+                        }
+                        if !ops.is_empty() {
+                            affected += ops.len() as u64;
+                            write.apply_write_batch(txn_id, ops)?;
+                            staged = true;
+                        }
+                    }
+                    UpdateOp::Clear { target, .. } | UpdateOp::Drop { target, .. } => {
+                        let mut ops = Vec::new();
+                        match target {
+                            GraphTarget::Default => {
+                                for t in write.default_graph_triples(Some(txn_id)) {
+                                    ops.push(WriteOperation::DeleteTriple(t));
+                                }
+                            }
+                            GraphTarget::Graph(g) => {
+                                for q in write.quads_in_graph(g, Some(txn_id)) {
+                                    ops.push(WriteOperation::DeleteQuad(q));
+                                }
+                            }
+                            GraphTarget::Named => {
+                                for q in write.named_graph_quads() {
+                                    ops.push(WriteOperation::DeleteQuad(q));
+                                }
+                            }
+                            GraphTarget::All => {
+                                for t in write.default_graph_triples(Some(txn_id)) {
+                                    ops.push(WriteOperation::DeleteTriple(t));
+                                }
+                                for q in write.named_graph_quads() {
+                                    ops.push(WriteOperation::DeleteQuad(q));
+                                }
+                            }
+                        }
+                        if !ops.is_empty() {
+                            affected += ops.len() as u64;
+                            write.apply_write_batch(txn_id, ops)?;
+                            staged = true;
+                        }
+                    }
+                    UpdateOp::Load { source, into, .. } => {
+                        let quads = write.quads_in_graph(source, Some(txn_id));
+                        let mut ops = Vec::new();
+                        match into {
+                            Some(g) => {
+                                for q in quads {
+                                    ops.push(WriteOperation::PutQuad(Quad::in_named_graph(
+                                        q.triple,
+                                        g.clone(),
+                                    )));
+                                }
+                            }
+                            None => {
+                                for q in quads {
+                                    ops.push(WriteOperation::PutTriple(q.triple));
+                                }
+                            }
+                        }
+                        if !ops.is_empty() {
+                            affected += ops.len() as u64;
+                            write.apply_write_batch(txn_id, ops)?;
+                            staged = true;
+                        }
                     }
                 }
-                UpdateOp::Clear { target, .. } | UpdateOp::Drop { target, .. } => {
-                    let mut ops = Vec::new();
-                    match target {
-                        GraphTarget::Default => {
-                            for t in write.default_graph_triples(Some(txn_id)) {
-                                ops.push(WriteOperation::DeleteTriple(t));
-                            }
-                        }
-                        GraphTarget::Graph(g) => {
-                            for q in write.quads_in_graph(g, Some(txn_id)) {
-                                ops.push(WriteOperation::DeleteQuad(q));
-                            }
-                        }
-                        GraphTarget::Named => {
-                            for q in write.named_graph_quads() {
-                                ops.push(WriteOperation::DeleteQuad(q));
-                            }
-                        }
-                        GraphTarget::All => {
-                            for t in write.default_graph_triples(Some(txn_id)) {
-                                ops.push(WriteOperation::DeleteTriple(t));
-                            }
-                            for q in write.named_graph_quads() {
-                                ops.push(WriteOperation::DeleteQuad(q));
-                            }
-                        }
-                    }
-                    if !ops.is_empty() {
-                        affected += ops.len() as u64;
-                        write.apply_write_batch(txn_id, ops)?;
-                        staged = true;
-                    }
-                }
-                UpdateOp::Load { source, into, .. } => {
-                    let quads = write.quads_in_graph(source, Some(txn_id));
-                    let mut ops = Vec::new();
-                    match into {
-                        Some(g) => {
-                            for q in quads {
-                                ops.push(WriteOperation::PutQuad(Quad::in_named_graph(
-                                    q.triple,
-                                    g.clone(),
-                                )));
-                            }
-                        }
-                        None => {
-                            for q in quads {
-                                ops.push(WriteOperation::PutTriple(q.triple));
-                            }
-                        }
-                    }
-                    if !ops.is_empty() {
-                        affected += ops.len() as u64;
-                        write.apply_write_batch(txn_id, ops)?;
-                        staged = true;
-                    }
-                }
+                ctx.check()?;
             }
-            ctx.check()?;
-        }
-        Ok(())
-    })();
+            Ok(())
+        })();
 
     let (timed_out, cancelled) = match result {
         Ok(()) => {
@@ -380,12 +404,8 @@ pub fn execute_update(
                 let _ = write.abort(txn_id);
             }
             match &e {
-                OntolithError::InvalidState(s) if *s == "query timed out" => {
-                    (true, false)
-                }
-                OntolithError::InvalidState(s) if *s == "query cancelled" => {
-                    (false, true)
-                }
+                OntolithError::InvalidState(s) if *s == "query timed out" => (true, false),
+                OntolithError::InvalidState(s) if *s == "query cancelled" => (false, true),
                 _ => return Err(e),
             }
         }
@@ -1380,6 +1400,34 @@ fn eval_expr_bool(expr: &Expression, sol: &Solution) -> Option<bool> {
         Expression::GreaterEq(a, b) => {
             Some(compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? >= 0)
         }
+        Expression::Negate(e) => match eval_expr_value(e, sol)? {
+            BoundValue::Literal(LiteralValue::Integer(n)) => Some(n != 0),
+            BoundValue::Literal(LiteralValue::Decimal(f)) => Some(f != 0.0),
+            _ => None,
+        },
+        Expression::Arith { op, left, right } => {
+            let l = eval_expr_value(left, sol)?;
+            let r = eval_expr_value(right, sol)?;
+            let ln = bound_as_f64(&l)?;
+            let rn = bound_as_f64(&r)?;
+            let v = match op {
+                '+' => ln + rn,
+                '-' => ln - rn,
+                '*' => ln * rn,
+                '/' => {
+                    if rn == 0.0 {
+                        return None;
+                    }
+                    ln / rn
+                }
+                _ => return None,
+            };
+            Some(v != 0.0)
+        }
+        Expression::Function { .. } => match eval_expr_value(expr, sol)? {
+            BoundValue::Literal(LiteralValue::Boolean(b)) => Some(b),
+            _ => None,
+        },
         Expression::IsIri(e) => Some(matches!(eval_expr_value(e, sol)?, BoundValue::Iri(_))),
         Expression::IsLiteral(e) => {
             Some(matches!(eval_expr_value(e, sol)?, BoundValue::Literal(_)))
@@ -1441,9 +1489,179 @@ fn eval_expr_value(expr: &Expression, sol: &Solution) -> Option<BoundValue> {
         Expression::GreaterEq(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
             compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? >= 0,
         ))),
+        Expression::Negate(e) => match eval_expr_value(e, sol)? {
+            BoundValue::Literal(LiteralValue::Integer(n)) => {
+                Some(BoundValue::Literal(LiteralValue::Integer(-n)))
+            }
+            BoundValue::Literal(LiteralValue::Decimal(f)) => {
+                Some(BoundValue::Literal(LiteralValue::Decimal(-f)))
+            }
+            _ => None,
+        },
+        Expression::Arith { op, left, right } => {
+            let l = eval_expr_value(left, sol)?;
+            let r = eval_expr_value(right, sol)?;
+            let ln = bound_as_f64(&l)?;
+            let rn = bound_as_f64(&r)?;
+            let v = match op {
+                '+' => ln + rn,
+                '-' => ln - rn,
+                '*' => ln * rn,
+                '/' => {
+                    if rn == 0.0 {
+                        return None;
+                    }
+                    ln / rn
+                }
+                _ => return None,
+            };
+            Some(match (l, r) {
+                (
+                    BoundValue::Literal(LiteralValue::Integer(_)),
+                    BoundValue::Literal(LiteralValue::Integer(_)),
+                ) if *op != '/' => BoundValue::Literal(LiteralValue::Integer(v as i64)),
+                _ => BoundValue::Literal(LiteralValue::Decimal(v)),
+            })
+        }
+        Expression::Function { name, args } => eval_function(name, args, sol),
         // Aggregates are only valid in HAVING and are rewritten to their
         // projection alias before execution; a stray call is an error.
         Expression::Aggregate(_) => None,
+    }
+}
+
+/// Built-in SPARQL function subset over the compact literal model (P3-05).
+fn eval_function(name: &str, args: &[Expression], sol: &Solution) -> Option<BoundValue> {
+    let arg = |i: usize| eval_expr_value(args.get(i)?, sol);
+    let string_of = |bv: &BoundValue| -> Option<String> {
+        match bv {
+            BoundValue::Literal(l) => Some(l.lexical_form()),
+            BoundValue::Iri(i) => Some(i.as_str().to_owned()),
+            _ => None,
+        }
+    };
+    let string = |i: usize| string_of(&arg(i)?);
+    let int_of = |bv: &BoundValue| -> Option<i64> {
+        match bv {
+            BoundValue::Literal(LiteralValue::Integer(n)) => Some(*n),
+            BoundValue::Literal(LiteralValue::Decimal(f)) if f.fract() == 0.0 => Some(*f as i64),
+            _ => None,
+        }
+    };
+    let num_of = |bv: &BoundValue| -> Option<f64> {
+        match bv {
+            BoundValue::Literal(LiteralValue::Integer(n)) => Some(*n as f64),
+            BoundValue::Literal(LiteralValue::Decimal(f)) => Some(*f),
+            _ => None,
+        }
+    };
+    let bool = |b: bool| BoundValue::Literal(LiteralValue::Boolean(b));
+    let strlit = |s: String| BoundValue::Literal(LiteralValue::String(s));
+
+    match name {
+        "STR" => match arg(0)? {
+            BoundValue::Iri(i) => Some(strlit(i.as_str().to_owned())),
+            BoundValue::Literal(l) => Some(strlit(l.lexical_form())),
+            _ => None,
+        },
+        "UCASE" => Some(strlit(string(0)?.to_uppercase())),
+        "LCASE" => Some(strlit(string(0)?.to_lowercase())),
+        "STRLEN" => Some(BoundValue::Literal(LiteralValue::Integer(
+            string(0)?.chars().count() as i64,
+        ))),
+        "CONCAT" => {
+            let mut out = String::new();
+            for i in 0..args.len() {
+                out.push_str(&string(i)?);
+            }
+            Some(strlit(out))
+        }
+        "SUBSTR" => {
+            let s = string(0)?;
+            let start = int_of(&arg(1)?)?;
+            let chars: Vec<char> = s.chars().collect();
+            let from = (start.max(1) as usize - 1).min(chars.len());
+            let out: String = if args.len() >= 3 {
+                let len = int_of(&arg(2)?)?.max(0) as usize;
+                chars.iter().skip(from).take(len).collect()
+            } else {
+                chars.iter().skip(from).collect()
+            };
+            Some(strlit(out))
+        }
+        "CONTAINS" => Some(bool(string(0)?.contains(&string(1)?))),
+        "STRSTARTS" => Some(bool(string(0)?.starts_with(&string(1)?))),
+        "STRENDS" => Some(bool(string(0)?.ends_with(&string(1)?))),
+        "STRAFTER" => {
+            let s = string(0)?;
+            let needle = string(1)?;
+            match s.find(&needle) {
+                Some(idx) => Some(strlit(s[idx + needle.len()..].to_owned())),
+                None => Some(strlit(String::new())),
+            }
+        }
+        "STRBEFORE" => {
+            let s = string(0)?;
+            let needle = string(1)?;
+            match s.find(&needle) {
+                Some(idx) => Some(strlit(s[..idx].to_owned())),
+                None => Some(strlit(String::new())),
+            }
+        }
+        "LANG" => Some(strlit(String::new())),
+        "DATATYPE" => match arg(0)? {
+            BoundValue::Literal(l) => Some(BoundValue::Iri(l.xsd_datatype_iri())),
+            _ => None,
+        },
+        "IRI" | "URI" => Some(BoundValue::Iri(Iri::new(string(0)?))),
+        "ABS" => match num_of(&arg(0)?) {
+            Some(f) if f >= 0.0 => Some(BoundValue::Literal(LiteralValue::Decimal(f))),
+            Some(f) => Some(BoundValue::Literal(LiteralValue::Decimal(-f))),
+            None => None,
+        },
+        "CEIL" => Some(BoundValue::Literal(LiteralValue::Integer(
+            num_of(&arg(0)?)?.ceil() as i64,
+        ))),
+        "FLOOR" => Some(BoundValue::Literal(LiteralValue::Integer(
+            num_of(&arg(0)?)?.floor() as i64,
+        ))),
+        "ROUND" => Some(BoundValue::Literal(LiteralValue::Integer(
+            num_of(&arg(0)?)?.round() as i64,
+        ))),
+        "ISNUMERIC" => Some(bool(matches!(
+            arg(0)?,
+            BoundValue::Literal(LiteralValue::Integer(_) | LiteralValue::Decimal(_))
+        ))),
+        "IF" => {
+            let cond = eval_expr_bool(&args[0], sol)?;
+            if cond {
+                eval_expr_value(args.get(1)?, sol)
+            } else {
+                eval_expr_value(args.get(2)?, sol)
+            }
+        }
+        "COALESCE" => {
+            for a in args {
+                if let Some(v) = eval_expr_value(a, sol) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        "IN" | "NOT IN" => {
+            let needle = eval_expr_value(args.first()?, sol)?;
+            let mut found = false;
+            for a in args.iter().skip(1) {
+                if let Some(v) = eval_expr_value(a, sol)
+                    && v == needle
+                {
+                    found = true;
+                    break;
+                }
+            }
+            Some(bool(if name == "IN" { found } else { !found }))
+        }
+        _ => None,
     }
 }
 
@@ -1478,6 +1696,15 @@ fn compare_values(a: &BoundValue, b: &BoundValue) -> Option<i8> {
             std::cmp::Ordering::Equal => 0,
             std::cmp::Ordering::Greater => 1,
         }),
+        _ => None,
+    }
+}
+
+/// Numeric value of a bound literal for arithmetic (SPARQL numeric promotion).
+fn bound_as_f64(bv: &BoundValue) -> Option<f64> {
+    match bv {
+        BoundValue::Literal(LiteralValue::Integer(n)) => Some(*n as f64),
+        BoundValue::Literal(LiteralValue::Decimal(f)) => Some(*f),
         _ => None,
     }
 }
@@ -1534,6 +1761,31 @@ fn select_variables(algebra: &Algebra) -> Vec<String> {
             vars.into_iter().collect()
         }
         _ => Vec::new(),
+    }
+}
+
+/// Strips SELECT `Project` layers (through Slice/Distinct/OrderBy) so that
+/// projection expressions can reference variables trimmed by the projection.
+fn strip_select_projection(algebra: &Algebra) -> Algebra {
+    match algebra {
+        Algebra::Project { input, .. } => strip_select_projection(input),
+        Algebra::Slice {
+            offset,
+            limit,
+            input,
+        } => Algebra::Slice {
+            offset: *offset,
+            limit: *limit,
+            input: Box::new(strip_select_projection(input)),
+        },
+        Algebra::Distinct { input } => Algebra::Distinct {
+            input: Box::new(strip_select_projection(input)),
+        },
+        Algebra::OrderBy { keys, input } => Algebra::OrderBy {
+            keys: keys.clone(),
+            input: Box::new(strip_select_projection(input)),
+        },
+        other => other.clone(),
     }
 }
 
