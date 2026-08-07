@@ -20,7 +20,7 @@ use ontolith_transaction::domain::TxnId;
 use rocksdb::{
     ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options, WriteBatch as RocksBatch,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -34,10 +34,13 @@ const CF_WAL: &str = "wal";
 const CF_SPO_INDEX: &str = "spo_index";
 const CF_POS_INDEX: &str = "pos_index";
 const CF_OSP_INDEX: &str = "osp_index";
+const CF_VERSIONS: &str = "versions";
+const CF_VERSIONS_QUADS: &str = "versions_quads";
 
 const META_NEXT_NODE: &[u8] = b"next_node_id";
 const META_WAL_SEQ: &[u8] = b"wal_seq";
 const META_DICT_EPOCH: &[u8] = b"dict_epoch";
+const META_NEXT_VERSION: &[u8] = b"next_version";
 
 struct EngineState {
     pending_writes: HashMap<TxnId, Vec<WriteOperation>>,
@@ -53,6 +56,16 @@ pub struct RocksDbStorageEngine {
     next_node_id: AtomicU64,
     dict_epoch: AtomicU64,
     wal_seq: AtomicU64,
+    /// Next MVCC commit sequence (monotonic, includes pruned versions).
+    next_version: AtomicU64,
+    /// Committed versions materialized in the `versions` CFs (genesis `0` is
+    /// implicit and never stored).
+    retained_versions: Mutex<BTreeSet<u64>>,
+    pruned_versions_count: AtomicU64,
+    /// Outstanding snapshots: snapshot id → pinned committed version.
+    pinned_snapshots: Mutex<HashMap<u64, u64>>,
+    /// Auto-prune retention applied after each commit/delete (default 16).
+    version_retention: usize,
     staged_batches_count: AtomicU64,
     failed_stage_batches_count: AtomicU64,
     committed_txn_count: AtomicU64,
@@ -80,6 +93,8 @@ impl RocksDbStorageEngine {
             CF_SPO_INDEX,
             CF_POS_INDEX,
             CF_OSP_INDEX,
+            CF_VERSIONS,
+            CF_VERSIONS_QUADS,
         ]
         .into_iter()
         .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
@@ -99,14 +114,21 @@ impl RocksDbStorageEngine {
             next_node_id: AtomicU64::new(1),
             dict_epoch: AtomicU64::new(0),
             wal_seq: AtomicU64::new(0),
+            next_version: AtomicU64::new(1),
+            retained_versions: Mutex::new(BTreeSet::new()),
+            pruned_versions_count: AtomicU64::new(0),
+            pinned_snapshots: Mutex::new(HashMap::new()),
+            version_retention: 16,
             staged_batches_count: AtomicU64::new(0),
             failed_stage_batches_count: AtomicU64::new(0),
             committed_txn_count: AtomicU64::new(0),
             failed_commit_txn_count: AtomicU64::new(0),
             aborted_txn_count: AtomicU64::new(0),
         };
-        engine.load_meta()?;
         engine.ensure_index_column_families()?;
+        engine.ensure_version_chain()?;
+        engine.load_meta()?;
+        engine.load_retained_versions()?;
         Ok(engine)
     }
 
@@ -130,6 +152,9 @@ impl RocksDbStorageEngine {
         }
         if let Some(v) = self.db.get_cf(cf, META_DICT_EPOCH).map_err(rocks_err)? {
             self.dict_epoch.store(decode_u64(&v)?, Ordering::SeqCst);
+        }
+        if let Some(v) = self.db.get_cf(cf, META_NEXT_VERSION).map_err(rocks_err)? {
+            self.next_version.store(decode_u64(&v)?, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -167,6 +192,216 @@ impl RocksDbStorageEngine {
             );
         }
         self.db.write(batch).map_err(rocks_err)
+    }
+
+    /// Materialize a version-1 snapshot of the current committed state for a
+    /// database created before MVCC version CFs existed.
+    fn ensure_version_chain(&self) -> Result<(), OntolithError> {
+        let cf_meta = self.cf(CF_META)?;
+        if self
+            .db
+            .get_cf(cf_meta, META_NEXT_VERSION)
+            .map_err(rocks_err)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let triples = self.scan_triples_with_prefix(CF_TRIPLES, None)?;
+        let quads = self.scan_quads_with_prefix(None)?;
+        if triples.is_empty() && quads.is_empty() {
+            // Fresh database: genesis only, no version chain materialization.
+            return Ok(());
+        }
+        let cf_v = self.cf(CF_VERSIONS)?;
+        let cf_vq = self.cf(CF_VERSIONS_QUADS)?;
+        let mut batch = RocksBatch::default();
+        for triple in &triples {
+            batch.put_cf(
+                cf_v,
+                Self::version_key(1, &triple_key(triple)),
+                encode_triple(triple),
+            );
+        }
+        for quad in &quads {
+            batch.put_cf(
+                cf_vq,
+                Self::version_key(1, &quad_key(quad)),
+                encode_quad(quad),
+            );
+        }
+        batch.put_cf(cf_meta, META_NEXT_VERSION, encode_u64(2));
+        self.db.write(batch).map_err(rocks_err)
+    }
+
+    /// Rebuild the in-memory retained-version set from the `versions` CFs
+    /// (distinct big-endian version prefixes, ascending).
+    fn load_retained_versions(&self) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_VERSIONS)?;
+        let mut retained = self
+            .retained_versions
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("retained versions lock poisoned"))?;
+        let mut last: Option<u64> = None;
+        for item in self.db.iterator_cf(cf, IteratorMode::Start) {
+            let (k, _) = item.map_err(rocks_err)?;
+            if k.len() < 8 {
+                continue;
+            }
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&k[..8]);
+            let version = u64::from_be_bytes(arr);
+            if last != Some(version) {
+                retained.insert(version);
+                last = Some(version);
+            }
+        }
+        Ok(())
+    }
+
+    /// MVCC snapshot key: big-endian version prefix ‖ physical key, so
+    /// versions sort ascending and prefix scans isolate one version.
+    fn version_key(version: u64, key: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + key.len());
+        out.extend_from_slice(&encode_u64(version));
+        out.extend_from_slice(key);
+        out
+    }
+
+    /// Full default-graph snapshot of a committed version from the `versions`
+    /// CF (immutable; pruned versions fall back at the caller).
+    fn scan_version_triples(&self, version: u64) -> Result<Vec<Triple>, OntolithError> {
+        let prefix = encode_u64(version);
+        let cf = self.cf(CF_VERSIONS)?;
+        let mut out = Vec::new();
+        for item in self
+            .db
+            .iterator_cf(cf, IteratorMode::From(&prefix, Direction::Forward))
+        {
+            let (k, v) = item.map_err(rocks_err)?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            out.push(decode_triple(&v)?);
+        }
+        Ok(out)
+    }
+
+    /// Full named-graph snapshot of a committed version from the
+    /// `versions_quads` CF.
+    fn scan_version_quads(&self, version: u64) -> Result<Vec<Quad>, OntolithError> {
+        let prefix = encode_u64(version);
+        let cf = self.cf(CF_VERSIONS_QUADS)?;
+        let mut out = Vec::new();
+        for item in self
+            .db
+            .iterator_cf(cf, IteratorMode::From(&prefix, Direction::Forward))
+        {
+            let (k, v) = item.map_err(rocks_err)?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            out.push(decode_quad(&v)?);
+        }
+        Ok(out)
+    }
+
+    /// Apply a committed write batch to the full default graph / named quads
+    /// (set semantics: Put dedups, Delete removes exact, DeleteKey by subject).
+    fn apply_committed_ops(
+        triples: &mut Vec<Triple>,
+        quads: &mut Vec<Quad>,
+        operations: &[WriteOperation],
+    ) {
+        for op in operations {
+            match op {
+                WriteOperation::PutTriple(t) => {
+                    if !triples.iter().any(|x| x == t) {
+                        triples.push(t.clone());
+                    }
+                }
+                WriteOperation::DeleteTriple(t) => {
+                    triples.retain(|x| x != t);
+                }
+                WriteOperation::PutQuad(q) => {
+                    if !quads.iter().any(|x| x == q) {
+                        quads.push(q.clone());
+                    }
+                }
+                WriteOperation::DeleteQuad(q) => {
+                    quads.retain(|x| x != q);
+                }
+                WriteOperation::DeleteKey(key) => {
+                    if let Some(subject_id) = key.components.first().copied() {
+                        triples.retain(|x| x.subject != subject_id);
+                        quads.retain(|x| x.triple.subject != subject_id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Batch-delete version snapshots beyond `retention` (keeps the newest
+    /// committed version and any version pinned by an outstanding snapshot;
+    /// genesis `0` is implicit). Returns the pruned version numbers; the
+    /// caller applies the batch and then updates retention metadata.
+    fn prune_locked(
+        &self,
+        batch: &mut RocksBatch,
+        retention: usize,
+    ) -> Result<Vec<u64>, OntolithError> {
+        let keep = retention.max(1);
+        let latest = self.next_version.load(Ordering::SeqCst).saturating_sub(1);
+        let pinned: HashSet<u64> = self
+            .pinned_snapshots
+            .lock()
+            .map(|pins| pins.values().copied().collect())
+            .unwrap_or_default();
+        let retained = self
+            .retained_versions
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("retained versions lock poisoned"))?;
+        let mut candidates: Vec<u64> = retained
+            .iter()
+            .copied()
+            .filter(|version| *version != latest && !pinned.contains(version))
+            .collect();
+        candidates.sort_unstable();
+
+        let cf_v = self.cf(CF_VERSIONS)?;
+        let cf_vq = self.cf(CF_VERSIONS_QUADS)?;
+        let mut pruned = Vec::new();
+        for version in candidates {
+            if retained.len().saturating_sub(pruned.len()) <= keep {
+                break;
+            }
+            let prefix = encode_u64(version);
+            let doomed: Vec<Vec<u8>> = self
+                .db
+                .iterator_cf(cf_v, IteratorMode::From(&prefix, Direction::Forward))
+                .filter_map(|item| {
+                    item.ok()
+                        .filter(|(k, _)| k.starts_with(&prefix))
+                        .map(|(k, _)| k.to_vec())
+                })
+                .collect();
+            for k in doomed {
+                batch.delete_cf(cf_v, k);
+            }
+            let doomed: Vec<Vec<u8>> = self
+                .db
+                .iterator_cf(cf_vq, IteratorMode::From(&prefix, Direction::Forward))
+                .filter_map(|item| {
+                    item.ok()
+                        .filter(|(k, _)| k.starts_with(&prefix))
+                        .map(|(k, _)| k.to_vec())
+                })
+                .collect();
+            for k in doomed {
+                batch.delete_cf(cf_vq, k);
+            }
+            pruned.push(version);
+        }
+        Ok(pruned)
     }
 
     fn apply_ops_to_triple_projection(
@@ -519,8 +754,31 @@ impl StorageEngine for RocksDbStorageEngine {
             }
         };
 
+        // Post-commit full state: drives the immutable MVCC snapshot below.
+        let mut triples = self.scan_triples_with_prefix(CF_TRIPLES, None)?;
+        let mut quads = self.scan_quads_with_prefix(None)?;
+        Self::apply_committed_ops(&mut triples, &mut quads, &operations);
+
+        let seq = self.next_version.fetch_add(1, Ordering::SeqCst);
         let mut rocks_batch = RocksBatch::default();
         self.durable_apply_ops(&mut rocks_batch, &operations)?;
+        let cf_v = self.cf(CF_VERSIONS)?;
+        let cf_vq = self.cf(CF_VERSIONS_QUADS)?;
+        for triple in &triples {
+            rocks_batch.put_cf(
+                cf_v,
+                Self::version_key(seq, &triple_key(triple)),
+                encode_triple(triple),
+            );
+        }
+        for quad in &quads {
+            rocks_batch.put_cf(
+                cf_vq,
+                Self::version_key(seq, &quad_key(quad)),
+                encode_quad(quad),
+            );
+        }
+        rocks_batch.put_cf(self.cf(CF_META)?, META_NEXT_VERSION, encode_u64(seq + 1));
         self.append_wal_record(
             &mut rocks_batch,
             &WalRecord {
@@ -530,11 +788,24 @@ impl StorageEngine for RocksDbStorageEngine {
                 operations: Vec::new(),
             },
         )?;
+        let pruned = self.prune_locked(&mut rocks_batch, self.version_retention)?;
         self.db.write(rocks_batch).map_err(|e| {
             self.failed_commit_txn_count.fetch_add(1, Ordering::SeqCst);
             rocks_err(e)
         })?;
 
+        let mut retained = self
+            .retained_versions
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("retained versions lock poisoned"))?;
+        retained.insert(seq);
+        for version in &pruned {
+            retained.remove(version);
+        }
+        if !pruned.is_empty() {
+            self.pruned_versions_count
+                .fetch_add(pruned.len() as u64, Ordering::SeqCst);
+        }
         self.committed_txn_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -570,11 +841,54 @@ impl StorageEngine for RocksDbStorageEngine {
         if key.components.is_empty() {
             return Ok(0);
         }
+        let subject_id = key.components[0];
+        let (doomed_t, doomed_q) = self.scan_doomed_by_subject(subject_id)?;
+        let removed = doomed_t.len() + doomed_q.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        let mut triples = self.scan_triples_with_prefix(CF_TRIPLES, None)?;
+        let mut quads = self.scan_quads_with_prefix(None)?;
+        triples.retain(|t| t.subject != subject_id);
+        quads.retain(|q| q.triple.subject != subject_id);
+
+        let seq = self.next_version.fetch_add(1, Ordering::SeqCst);
         let mut rocks_batch = RocksBatch::default();
-        let op = WriteOperation::DeleteKey(key.clone());
-        let removed = self.durable_apply_ops(&mut rocks_batch, std::slice::from_ref(&op))?;
-        if removed > 0 {
-            self.db.write(rocks_batch).map_err(rocks_err)?;
+        self.durable_apply_ops(
+            &mut rocks_batch,
+            std::slice::from_ref(&WriteOperation::DeleteKey(key.clone())),
+        )?;
+        let cf_v = self.cf(CF_VERSIONS)?;
+        let cf_vq = self.cf(CF_VERSIONS_QUADS)?;
+        for triple in &triples {
+            rocks_batch.put_cf(
+                cf_v,
+                Self::version_key(seq, &triple_key(triple)),
+                encode_triple(triple),
+            );
+        }
+        for quad in &quads {
+            rocks_batch.put_cf(
+                cf_vq,
+                Self::version_key(seq, &quad_key(quad)),
+                encode_quad(quad),
+            );
+        }
+        rocks_batch.put_cf(self.cf(CF_META)?, META_NEXT_VERSION, encode_u64(seq + 1));
+        let pruned = self.prune_locked(&mut rocks_batch, self.version_retention)?;
+        self.db.write(rocks_batch).map_err(rocks_err)?;
+
+        let mut retained = self
+            .retained_versions
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("retained versions lock poisoned"))?;
+        retained.insert(seq);
+        for version in &pruned {
+            retained.remove(version);
+        }
+        if !pruned.is_empty() {
+            self.pruned_versions_count
+                .fetch_add(pruned.len() as u64, Ordering::SeqCst);
         }
         Ok(removed)
     }
@@ -584,12 +898,12 @@ impl StorageEngine for RocksDbStorageEngine {
         consistency: ConsistencyLevel,
         read_txn_id: Option<TxnId>,
     ) -> SnapshotRef {
-        SnapshotRef {
-            snapshot_id: self.next_snapshot_id.fetch_add(1, Ordering::SeqCst),
-            read_txn_id,
-            consistency,
-            version: 0,
+        let version = self.committed_version();
+        let snapshot_id = self.next_snapshot_id.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut pins) = self.pinned_snapshots.lock() {
+            pins.insert(snapshot_id, version);
         }
+        SnapshotRef::new(snapshot_id, read_txn_id, consistency, version)
     }
 
     fn stats(&self) -> StorageStats {
@@ -629,9 +943,9 @@ impl StorageEngine for RocksDbStorageEngine {
             pending_transactions,
             wal_records: self.entries().len() as u64,
             index_kinds_active: 3,
-            committed_versions: 0,
-            pruned_versions: 0,
-            pinned_snapshots: 0,
+            committed_versions: self.committed_version(),
+            pruned_versions: self.pruned_versions_count.load(Ordering::SeqCst),
+            pinned_snapshots: self.pinned_snapshot_count(),
         }
     }
 
@@ -729,6 +1043,100 @@ impl StorageEngine for RocksDbStorageEngine {
             quads.retain(|q| &q.triple.object == o);
         }
         quads
+    }
+
+    fn committed_version(&self) -> u64 {
+        self.next_version.load(Ordering::SeqCst).saturating_sub(1)
+    }
+
+    fn version_count(&self) -> u64 {
+        self.committed_version()
+    }
+
+    fn pruned_version_count(&self) -> u64 {
+        self.pruned_versions_count.load(Ordering::SeqCst)
+    }
+
+    fn pinned_snapshot_count(&self) -> u64 {
+        self.pinned_snapshots
+            .lock()
+            .map(|pins| pins.len() as u64)
+            .unwrap_or(0)
+    }
+
+    fn release_snapshot(&self, snapshot_id: u64) {
+        if let Ok(mut pins) = self.pinned_snapshots.lock() {
+            pins.remove(&snapshot_id);
+        }
+    }
+
+    fn prune_versions(&self, retention: usize) -> Result<usize, OntolithError> {
+        let _commit = self
+            .commit_lock
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("commit lock poisoned"))?;
+        let mut rocks_batch = RocksBatch::default();
+        let pruned = self.prune_locked(&mut rocks_batch, retention)?;
+        if !pruned.is_empty() {
+            self.db.write(rocks_batch).map_err(rocks_err)?;
+            let mut retained = self
+                .retained_versions
+                .lock()
+                .map_err(|_| OntolithError::InvalidState("retained versions lock poisoned"))?;
+            for version in &pruned {
+                retained.remove(version);
+            }
+            self.pruned_versions_count
+                .fetch_add(pruned.len() as u64, Ordering::SeqCst);
+        }
+        Ok(pruned.len())
+    }
+
+    fn triples_at_version_in_txn(&self, version: u64, txn_id: Option<TxnId>) -> Vec<Triple> {
+        let retained = self
+            .retained_versions
+            .lock()
+            .map(|set| set.clone())
+            .unwrap_or_default();
+        let mut triples = if version == 0 {
+            Vec::new() // genesis: empty default graph
+        } else if retained.contains(&version) {
+            self.scan_version_triples(version).unwrap_or_default()
+        } else if retained.first().is_none_or(|oldest| version >= *oldest) {
+            // Newer than the oldest retained version: not pruned (either a
+            // just-committed version or the latest) — serve the live state.
+            self.scan_triples_with_prefix(CF_TRIPLES, None)
+                .unwrap_or_default()
+        } else {
+            // Pruned: fall back to the oldest retained version.
+            retained
+                .first()
+                .and_then(|oldest| self.scan_version_triples(*oldest).ok())
+                .unwrap_or_default()
+        };
+        let ops = self.pending_ops(txn_id);
+        Self::apply_ops_to_triple_projection(&mut triples, &ops, None, None, None);
+        triples
+    }
+
+    fn quads_at_version(&self, version: u64) -> Vec<Quad> {
+        let retained = self
+            .retained_versions
+            .lock()
+            .map(|set| set.clone())
+            .unwrap_or_default();
+        if version == 0 {
+            Vec::new()
+        } else if retained.contains(&version) {
+            self.scan_version_quads(version).unwrap_or_default()
+        } else if retained.first().is_none_or(|oldest| version >= *oldest) {
+            self.scan_quads_with_prefix(None).unwrap_or_default()
+        } else {
+            retained
+                .first()
+                .and_then(|oldest| self.scan_version_quads(*oldest).ok())
+                .unwrap_or_default()
+        }
     }
 }
 
@@ -1048,5 +1456,185 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn rocksdb_versioned_reads_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        {
+            let engine = RocksDbStorageEngine::open(path).unwrap();
+            let graph = Iri::new("urn:graph:mvcc:rocks");
+            let first = TxnId::new(21);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: first,
+                    operations: vec![
+                        WriteOperation::PutTriple(Triple {
+                            subject: NodeId::new(1),
+                            predicate: Iri::new("urn:p"),
+                            object: Term::Iri(Iri::new("urn:o1")),
+                        }),
+                        WriteOperation::PutQuad(Quad::in_named_graph(
+                            Triple::new(
+                                NodeId::new(1),
+                                Iri::new("urn:p"),
+                                Term::Iri(Iri::new("urn:o1")),
+                            ),
+                            graph.clone(),
+                        )),
+                    ],
+                })
+                .unwrap();
+            engine.commit_transaction(first).unwrap();
+            assert_eq!(engine.committed_version(), 1);
+
+            let snapshot = engine.snapshot();
+            assert_eq!(snapshot.version, 1);
+            assert_eq!(engine.pinned_snapshot_count(), 1);
+
+            let second = TxnId::new(22);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: second,
+                    operations: vec![WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(2),
+                        predicate: Iri::new("urn:p"),
+                        object: Term::Iri(Iri::new("urn:o2")),
+                    })],
+                })
+                .unwrap();
+            engine.commit_transaction(second).unwrap();
+            assert_eq!(engine.committed_version(), 2);
+            assert_eq!(engine.version_count(), 2);
+
+            assert_eq!(engine.triples_at_version_in_txn(1, None).len(), 1);
+            assert_eq!(engine.triples_at_version_in_txn(2, None).len(), 2);
+            assert_eq!(engine.quads_at_version(1).len(), 1);
+            assert_eq!(engine.quads_at_version(2).len(), 1);
+            assert!(engine.triples_at_version_in_txn(0, None).is_empty());
+
+            engine.release_snapshot(snapshot.snapshot_id);
+            assert_eq!(engine.pinned_snapshot_count(), 0);
+        }
+        // Reopen: version chain is durable, snapshots still isolated.
+        let engine = RocksDbStorageEngine::open(path).unwrap();
+        assert_eq!(engine.committed_version(), 2);
+        assert_eq!(engine.version_count(), 2);
+        assert_eq!(engine.triples_at_version_in_txn(1, None).len(), 1);
+        assert_eq!(engine.triples_at_version_in_txn(2, None).len(), 2);
+        assert_eq!(engine.quads_at_version(1).len(), 1);
+        assert_eq!(engine.default_graph_triples().len(), 2);
+    }
+
+    #[test]
+    fn rocksdb_prune_preserves_pinned_older_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        for seq in 1..=2u64 {
+            let txn = TxnId::new(200 + seq as u128);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(seq),
+                        predicate: Iri::new("urn:p"),
+                        object: Term::Iri(Iri::new("urn:o")),
+                    })],
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+        }
+        assert_eq!(engine.committed_version(), 2);
+
+        // Pin version 2 before committing the remaining versions.
+        let pinned = engine.snapshot_with(ConsistencyLevel::Strong, None);
+        assert_eq!(pinned.version, 2);
+        assert_eq!(engine.pinned_snapshot_count(), 1);
+        for seq in 3..=5u64 {
+            let txn = TxnId::new(200 + seq as u128);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(seq),
+                        predicate: Iri::new("urn:p"),
+                        object: Term::Iri(Iri::new("urn:o")),
+                    })],
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+        }
+        assert_eq!(engine.committed_version(), 5);
+
+        // Prune with retention 1: keeps latest (5) + pinned (2); prunes 1,3,4.
+        let pruned = engine.prune_versions(1).unwrap();
+        assert_eq!(pruned, 3);
+        assert_eq!(engine.pruned_version_count(), 3);
+        assert_eq!(engine.triples_at_version_in_txn(2, None).len(), 2);
+        assert_eq!(engine.triples_at_version_in_txn(5, None).len(), 5);
+        // Pruned version 1 falls back to the oldest retained version (2).
+        assert_eq!(engine.triples_at_version_in_txn(1, None).len(), 2);
+
+        engine.release_snapshot(pinned.snapshot_id);
+        assert_eq!(engine.pinned_snapshot_count(), 0);
+        let pruned = engine.prune_versions(1).unwrap();
+        assert_eq!(pruned, 1); // version 2 is now prunable
+        assert_eq!(engine.pruned_version_count(), 4);
+        // Version 2 falls back to the oldest retained version (5).
+        assert_eq!(engine.triples_at_version_in_txn(2, None).len(), 5);
+
+        drop(engine);
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        assert_eq!(engine.committed_version(), 5);
+        assert_eq!(engine.triples_at_version_in_txn(2, None).len(), 5);
+        assert_eq!(engine.triples_at_version_in_txn(5, None).len(), 5);
+    }
+
+    #[test]
+    fn rocksdb_delete_by_key_mints_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        let txn = TxnId::new(301);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![
+                    WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(5),
+                        predicate: Iri::new("urn:p"),
+                        object: Term::Iri(Iri::new("urn:o1")),
+                    }),
+                    WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(9),
+                        predicate: Iri::new("urn:p"),
+                        object: Term::Iri(Iri::new("urn:o2")),
+                    }),
+                ],
+            })
+            .unwrap();
+        engine.commit_transaction(txn).unwrap();
+        assert_eq!(engine.committed_version(), 1);
+
+        let removed = engine
+            .delete_by_key(&StorageKey::spo_subject(NodeId::new(5)))
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(engine.committed_version(), 2);
+        assert_eq!(engine.triples_at_version_in_txn(1, None).len(), 2);
+        assert_eq!(engine.triples_at_version_in_txn(2, None).len(), 1);
+
+        // Deleting a missing subject must not mint a version.
+        let removed = engine
+            .delete_by_key(&StorageKey::spo_subject(NodeId::new(99)))
+            .unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(engine.committed_version(), 2);
+
+        drop(engine);
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        assert_eq!(engine.committed_version(), 2);
+        assert_eq!(engine.triples_at_version_in_txn(1, None).len(), 2);
+        assert_eq!(engine.triples_at_version_in_txn(2, None).len(), 1);
     }
 }
