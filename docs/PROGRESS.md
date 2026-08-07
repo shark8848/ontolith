@@ -116,7 +116,7 @@
 | P2-02 | WAL / 快照恢复 / MVCC 基线 | 已完成 | 100% | 内存+Rocks WAL CF、reopen 恢复、snapshot+consistency；内存 MVCC 版本链（`versions` 链 + pin/剪枝 + WAL 重放重建）；repo 层按版本读取；RocksDB 磁盘 MVCC 版本链（`versions`/`versions_quads` CF，键 = BE version ‖ 物理键，`meta.next_version` 持久化，提交铸全量快照 + 剪枝/pin，旧库打开自动回填 v1，storage 40 测） | — |
 | P2-03 | 三元组/四元组物理编码 | 部分完成 | 90% | codec + 六置换键 + CF 落盘 | 列族级索引键直接扫描 |
 | P2-04 | 索引基线 SPO/POS/OSP | 已完成 | 100% | 默认图 SPO/POS/OSP CF 前缀扫描 + 命名图 GSPO/GPOS/GOSP 索引 CF（graph‖S/P/O 置换，绑定位置选择最选择性前缀，storage 43 测）；旧库打开自动回填索引 CF | Async 维护（预留：正确性优先，索引维护保持同步；后续可用“水位+主 CF 回退”方案） |
-| P2-05 | 可恢复耐久写入路径 | 部分完成 | 85% | RocksDB commit/reopen/delete 单测通过 | fsync 策略/备份演练 |
+| P2-05 | 可恢复耐久写入路径 | 已完成 | 100% | `RocksDbOptions`（`sync_writes` 默认 true，commit/delete/字典/WAL 追加走 `WriteOptions::set_sync` fsync）+ `open_with_options`；BackupEngine `create_backup`（提交锁串行化 + flush 后快照）/`restore_backup` 演练（MVCC 版本随备份恢复）；storage 43→46 测 | 备份调度/保留策略接入管理面（运维轨） |
 | P2-06 | 事务行为规范文档 | 部分完成 | 95% | [L2 文档 v3](./L2-ontolith-storage-transaction-kernel.md) | 随真 MVCC 修订 |
 
 **阶段退出条件：** 耐久写入可恢复；至少 SPO/POS/OSP；事务文档发布。
@@ -307,6 +307,7 @@
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-07 | Codex | L2：P2-05 可恢复耐久写入路径——`RocksDbOptions`（`sync_writes` 默认 true：commit/delete/字典/WAL 追加走 `WriteOptions::set_sync` fsync）+ `open_with_options`；RocksDB BackupEngine `create_backup`（提交锁串行化 + flush 后快照）/`restore_backup` 演练（MVCC 版本随备份恢复，命名图 quads 一并保留）；storage 43→46 测，全量测试通过（server 2 测因沙箱禁绑端口除外） |
 | 2026-07-15 | Claude Code | 初建台账 PROG-0001；基于 PLAN-0001 与工作区代码对照录入基线完成度 |
 | 2026-07-17 | Claude Code | 移除 crates 嵌套 `.git`；提交 docs+crates 基线并推送 `origin/main`（`8d7eca1`） |
 | 2026-07-17 | Claude Code | L0：`ontolith-core` 落地 SAS-0401 KO 基座（identity/resource/knowledge/canonical/error）；11 单测通过，下游 crate 回归绿 |
@@ -384,10 +385,10 @@
 
 原则：先底层逐层到最顶层应用——优先完成当前最低未完成层，再推进上一层；避免跳层开发。R1 退出标准收尾（核心 SLO 基线、恢复/回滚演练、全表勾选）随各层推进同步完成。
 
-> 当前光标：**L0–L3 底层收尾（本队列首项）**
+> 当前光标：**L3 查询引擎（队列下一项）**
 
 - [x] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局（2026-08-07）
-- [~] **L2 存储内核**：P2-02 真 MVCC 版本链（内存+磁盘）✅（2026-08-07，storage 30→40 测）、P2-01 纯 CF 索引扫描 ✅（2026-08-07）、P2-04 命名图六置换 ✅（2026-08-07；Async 维护预留）→ P2-05 fsync/备份演练
+- [x] **L2 存储内核**：P2-02 真 MVCC 版本链（内存+磁盘）✅（2026-08-07，storage 30→40 测）、P2-01 纯 CF 索引扫描 ✅（2026-08-07）、P2-04 命名图六置换 ✅（2026-08-07；Async 维护预留）、P2-05 fsync/备份演练 ✅（2026-08-07，storage 43→46 测）
 - [ ] **L3 查询引擎**：P3-01 高级 Update（LOAD/CLEAR/WITH）→ P3-02 代价模型/统计 → P3-03 HTTP Explain API → P3-04 异步抢占 → P3-05 W3C 欠账逐项提 PASS
 - [ ] **L4 集群**：P4-02 多进程 Raft M1（单节点 openraft 适配）→ M2（多进程 HTTP RPC + RocksDB raft CF）→ M3（默认运行时切换 + CI 三进程 smoke）；P4-01 多进程 RPC、P4-03 跨节点数据搬迁、P4-04 真实网络分区
 - [ ] **L5 接入与安全**：P5-03 强制分库/行级租户隔离 → P5-02 OIDC/JWT → P5-05 Tracing 全链路 → P5-01 gRPC

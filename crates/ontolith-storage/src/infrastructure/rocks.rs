@@ -20,7 +20,9 @@ use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_transaction::domain::TxnId;
 use rocksdb::{
-    ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options, WriteBatch as RocksBatch,
+    backup::BackupEngine, backup::BackupEngineOptions, backup::RestoreOptions,
+    ColumnFamilyDescriptor, DB, Direction, Env, IteratorMode, Options, WriteBatch as RocksBatch,
+    WriteOptions,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -47,6 +49,25 @@ const META_WAL_SEQ: &[u8] = b"wal_seq";
 const META_DICT_EPOCH: &[u8] = b"dict_epoch";
 const META_NEXT_VERSION: &[u8] = b"next_version";
 
+/// Durability tuning for the RocksDB engine.
+#[derive(Debug, Clone)]
+pub struct RocksDbOptions {
+    /// fsync the WAL on commits, deletes, dictionary writes and WAL appends
+    /// (durability vs. write latency; default `true`).
+    pub sync_writes: bool,
+    /// MVCC version retention applied after each commit/delete (default 16).
+    pub version_retention: usize,
+}
+
+impl Default for RocksDbOptions {
+    fn default() -> Self {
+        Self {
+            sync_writes: true,
+            version_retention: 16,
+        }
+    }
+}
+
 struct EngineState {
     pending_writes: HashMap<TxnId, Vec<WriteOperation>>,
 }
@@ -71,6 +92,8 @@ pub struct RocksDbStorageEngine {
     pinned_snapshots: Mutex<HashMap<u64, u64>>,
     /// Auto-prune retention applied after each commit/delete (default 16).
     version_retention: usize,
+    /// fsync WAL on durability-critical writes.
+    sync_writes: bool,
     staged_batches_count: AtomicU64,
     failed_stage_batches_count: AtomicU64,
     committed_txn_count: AtomicU64,
@@ -80,6 +103,14 @@ pub struct RocksDbStorageEngine {
 
 impl RocksDbStorageEngine {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OntolithError> {
+        Self::open_with_options(path, RocksDbOptions::default())
+    }
+
+    /// Open (or create) a durable engine with explicit durability tuning.
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: RocksDbOptions,
+    ) -> Result<Self, OntolithError> {
         let path = path.as_ref().to_path_buf();
         std::fs::create_dir_all(&path)
             .map_err(|e| OntolithError::Failed(format!("create dir: {e}")))?;
@@ -126,7 +157,8 @@ impl RocksDbStorageEngine {
             retained_versions: Mutex::new(BTreeSet::new()),
             pruned_versions_count: AtomicU64::new(0),
             pinned_snapshots: Mutex::new(HashMap::new()),
-            version_retention: 16,
+            version_retention: options.version_retention,
+            sync_writes: options.sync_writes,
             staged_batches_count: AtomicU64::new(0),
             failed_stage_batches_count: AtomicU64::new(0),
             committed_txn_count: AtomicU64::new(0),
@@ -145,10 +177,54 @@ impl RocksDbStorageEngine {
         &self.path
     }
 
+    /// Create a full backup of the current database into `backup_dir`
+    /// (RocksDB BackupEngine; flushes memtables first so the snapshot is
+    /// durable). Serialized against concurrent commits.
+    pub fn create_backup(&self, backup_dir: impl AsRef<Path>) -> Result<(), OntolithError> {
+        let _commit = self
+            .commit_lock
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("commit lock poisoned"))?;
+        let env = Env::new().map_err(rocks_err)?;
+        let opts = BackupEngineOptions::new(backup_dir.as_ref()).map_err(rocks_err)?;
+        let mut backup = BackupEngine::open(&opts, &env).map_err(rocks_err)?;
+        backup
+            .create_new_backup_flush(self.db.as_ref(), true)
+            .map_err(rocks_err)?;
+        Ok(())
+    }
+
+    /// Restore the latest backup from `backup_dir` into `db_dir`. The target
+    /// directory must not be held by an open engine (close first).
+    pub fn restore_backup(
+        backup_dir: impl AsRef<Path>,
+        db_dir: impl AsRef<Path>,
+    ) -> Result<(), OntolithError> {
+        let env = Env::new().map_err(rocks_err)?;
+        let opts = BackupEngineOptions::new(backup_dir.as_ref()).map_err(rocks_err)?;
+        let mut backup = BackupEngine::open(&opts, &env).map_err(rocks_err)?;
+        let restore_opts = RestoreOptions::default();
+        backup
+            .restore_from_latest_backup(db_dir.as_ref(), db_dir.as_ref(), &restore_opts)
+            .map_err(rocks_err)
+    }
+
     fn cf(&self, name: &str) -> Result<&rocksdb::ColumnFamily, OntolithError> {
         self.db
             .cf_handle(name)
             .ok_or(OntolithError::Storage("missing column family"))
+    }
+
+    /// Write a batch with the configured durability: fsync the WAL when
+    /// `sync_writes` is enabled (default).
+    fn durable_write(&self, batch: RocksBatch) -> Result<(), OntolithError> {
+        if self.sync_writes {
+            let mut write_opts = WriteOptions::default();
+            write_opts.set_sync(true);
+            self.db.write_opt(batch, &write_opts).map_err(rocks_err)
+        } else {
+            self.db.write(batch).map_err(rocks_err)
+        }
     }
 
     fn load_meta(&mut self) -> Result<(), OntolithError> {
@@ -784,7 +860,7 @@ impl DictionaryCodec for RocksDbStorageEngine {
         batch.put_cf(cf_fwd, value.as_bytes(), encode_u64(id));
         batch.put_cf(cf_rev, encode_u64(id), value.as_bytes());
         batch.put_cf(cf_meta, META_NEXT_NODE, encode_u64(id + 1));
-        let _ = self.db.write(batch);
+        let _ = self.durable_write(batch);
         node
     }
 
@@ -823,7 +899,7 @@ impl WriteAheadLog for RocksDbStorageEngine {
             .map_err(|_| OntolithError::InvalidState("commit lock poisoned"))?;
         let mut batch = RocksBatch::default();
         self.append_wal_record(&mut batch, &record)?;
-        self.db.write(batch).map_err(rocks_err)
+        self.durable_write(batch)
     }
 
     fn entries(&self) -> Vec<WalRecord> {
@@ -858,7 +934,7 @@ impl WriteAheadLog for RocksDbStorageEngine {
         for k in keys {
             batch.delete_cf(cf, k);
         }
-        self.db.write(batch).map_err(rocks_err)
+        self.durable_write(batch)
     }
 }
 
@@ -949,9 +1025,8 @@ impl StorageEngine for RocksDbStorageEngine {
             },
         )?;
         let pruned = self.prune_locked(&mut rocks_batch, self.version_retention)?;
-        self.db.write(rocks_batch).map_err(|e| {
+        self.durable_write(rocks_batch).inspect_err(|_| {
             self.failed_commit_txn_count.fetch_add(1, Ordering::SeqCst);
-            rocks_err(e)
         })?;
 
         let mut retained = self
@@ -1036,7 +1111,7 @@ impl StorageEngine for RocksDbStorageEngine {
         }
         rocks_batch.put_cf(self.cf(CF_META)?, META_NEXT_VERSION, encode_u64(seq + 1));
         let pruned = self.prune_locked(&mut rocks_batch, self.version_retention)?;
-        self.db.write(rocks_batch).map_err(rocks_err)?;
+        self.durable_write(rocks_batch)?;
 
         let mut retained = self
             .retained_versions
@@ -1263,7 +1338,7 @@ impl StorageEngine for RocksDbStorageEngine {
         let mut rocks_batch = RocksBatch::default();
         let pruned = self.prune_locked(&mut rocks_batch, retention)?;
         if !pruned.is_empty() {
-            self.db.write(rocks_batch).map_err(rocks_err)?;
+            self.durable_write(rocks_batch)?;
             let mut retained = self
                 .retained_versions
                 .lock()
@@ -2041,5 +2116,151 @@ mod tests {
                 .quads_matching_in_graph(&graph, Some(NodeId::new(7)), None, None, None)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn rocksdb_backup_restore_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let backup_dir = dir.path().join("backup");
+        let restored_dir = dir.path().join("restored");
+        let graph = Iri::new("urn:graph:bk");
+        let triple = Triple::new(
+            NodeId::new(1),
+            Iri::new("urn:p"),
+            Term::Iri(Iri::new("urn:o")),
+        );
+        {
+            let engine = RocksDbStorageEngine::open(&path).unwrap();
+            let txn = TxnId::new(701);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![
+                        WriteOperation::PutTriple(triple.clone()),
+                        WriteOperation::PutQuad(Quad::in_named_graph(
+                            triple.clone(),
+                            graph.clone(),
+                        )),
+                    ],
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+            std::fs::create_dir_all(&backup_dir).unwrap();
+            engine.create_backup(&backup_dir).unwrap();
+            assert_eq!(engine.stats().triple_count, 1);
+            assert_eq!(engine.stats().quad_count, 1);
+        }
+        // Restore into a fresh directory and reopen.
+        RocksDbStorageEngine::restore_backup(&backup_dir, &restored_dir).unwrap();
+        let engine = RocksDbStorageEngine::open(&restored_dir).unwrap();
+        assert_eq!(engine.stats().triple_count, 1);
+        assert_eq!(engine.stats().quad_count, 1);
+        assert_eq!(engine.default_graph_triples().len(), 1);
+        assert_eq!(
+            engine
+                .quads_matching_in_graph(&graph, Some(NodeId::new(1)), None, None, None)
+                .len(),
+            1
+        );
+        assert_eq!(engine.committed_version(), 1);
+        assert_eq!(engine.version_count(), 1);
+        assert_eq!(engine.triples_at_version_in_txn(1, None).len(), 1);
+    }
+
+    #[test]
+    fn rocksdb_backup_restore_keeps_mvcc_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let backup_dir = dir.path().join("backup");
+        let restored_dir = dir.path().join("restored");
+        {
+            let engine = RocksDbStorageEngine::open(&path).unwrap();
+            let txn = TxnId::new(801);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![WriteOperation::PutTriple(Triple::new(
+                        NodeId::new(1),
+                        Iri::new("urn:p"),
+                        Term::Iri(Iri::new("urn:o1")),
+                    ))],
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+            let txn = TxnId::new(802);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![WriteOperation::PutTriple(Triple::new(
+                        NodeId::new(1),
+                        Iri::new("urn:p"),
+                        Term::Iri(Iri::new("urn:o2")),
+                    ))],
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+            assert_eq!(engine.committed_version(), 2);
+            std::fs::create_dir_all(&backup_dir).unwrap();
+            engine.create_backup(&backup_dir).unwrap();
+        }
+        RocksDbStorageEngine::restore_backup(&backup_dir, &restored_dir).unwrap();
+        let engine = RocksDbStorageEngine::open(&restored_dir).unwrap();
+        assert_eq!(engine.committed_version(), 2);
+        assert_eq!(engine.version_count(), 2);
+        assert_eq!(
+            engine.triples_at_version_in_txn(1, None),
+            vec![Triple::new(
+                NodeId::new(1),
+                Iri::new("urn:p"),
+                Term::Iri(Iri::new("urn:o1")),
+            )]
+        );
+        // Version 2 is the full state after the second commit: both triples
+        // (the second PutTriple adds, it does not replace).
+        assert_eq!(
+            engine.triples_at_version_in_txn(2, None),
+            vec![
+                Triple::new(
+                    NodeId::new(1),
+                    Iri::new("urn:p"),
+                    Term::Iri(Iri::new("urn:o1")),
+                ),
+                Triple::new(
+                    NodeId::new(1),
+                    Iri::new("urn:p"),
+                    Term::Iri(Iri::new("urn:o2")),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn rocksdb_open_with_options_sync_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let options = RocksDbOptions {
+            sync_writes: false,
+            version_retention: 4,
+        };
+        {
+            let engine = RocksDbStorageEngine::open_with_options(path, options).unwrap();
+            let txn = TxnId::new(901);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![WriteOperation::PutTriple(Triple::new(
+                        NodeId::new(1),
+                        Iri::new("urn:p"),
+                        Term::Iri(Iri::new("urn:o")),
+                    ))],
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+            assert_eq!(engine.version_retention, 4);
+            assert!(!engine.sync_writes);
+        }
+        let engine = RocksDbStorageEngine::open(path).unwrap();
+        assert_eq!(engine.stats().triple_count, 1);
     }
 }
