@@ -24,6 +24,7 @@
 2. 变更范围或优先级时，在 [§7 变更日志](#7-变更日志) 追加一条。
 3. 阶段退出前，核对 [§4 里程碑退出标准](#4-里程碑-r1r4-退出标准) 是否全部勾选。
 4. 有 ADR/RFC 时回填链接到对应 Phase/WBS 行。
+5. 执行顺序遵循自底向上（L0→L8）：优先完成当前最低未完成层，再逐层向顶层应用推进；跨层依赖以被依赖层为准。
 
 图例：
 
@@ -70,9 +71,11 @@
 
 | 优先级 | 焦点 | 负责人 | 目标日期 |
 |--------|------|--------|----------|
-| P0 | 管理面安全加固落地（TLS 终止方案或 OIDC 校验链路） | TBD | 进行中 |
-| P1 | 管理平台窗口化 SLO（天/周）自动化与性能基线（benchmarks/SLO） | TBD | 进行中 |
-| P2 | 多进程 Raft ADR / openraft | TBD | TBD |
+| P0 | L0–L3 底层收尾（编码/字典契约文档、存储真 MVCC、查询代价模型与高级 Update、W3C 欠账提 PASS） | TBD | 进行中 |
+| P1 | L4 集群多进程 Raft 实施（P4-02 M1–M3：openraft 适配 → 多进程 HTTP RPC + RocksDB raft CF → 默认运行时切换 + CI 三进程 smoke） | TBD | TBD |
+| P2 | L5 应用层安全与隔离（P5-03 强制租户隔离、P5-02 OIDC/JWT、P5-05 Tracing） | TBD | TBD |
+| P3 | L6 推理应用化（P6-01 规则扩展收尾 → P6-03 接入 server 查询/推理管线 → P6-02 SHACL 补全） | TBD | TBD |
+| P4 | L7 运维演练与发布（P7-01/04 演练与运维手册、P7-02 阈值断言、P7-03 发布/回滚） | TBD | TBD |
 
 ---
 
@@ -365,10 +368,26 @@
 | 2026-08-07 | Codex | L6：OWL 2 RL 键与一致性规则——`prp-key`（owl:hasKey 列表键全部共享值 → owl:sameAs，支持多键/列表遍历）、一致性 ⊥ 检测（`cax-dw` 互斥类、`cls-nothing1`/2、`eq-diff1`/2；`ReasoningReport.inconsistent` 标记）；reasoner 37→41 测（forward-chain 15→19），全量测试 244 通过。 |
 | 2026-08-07 | Codex | L6：Claude Code 审查修复——F1 prp-key 改值→成员桶索引（消除 O(m^2·k·n^2) 对扫）；F2 eq-sym/eq-trans/eq-diff 改 bnode 感知（NodeId 索引）；F3 一致性规则并入同迭代 frontier（max_iterations=1 也能检出链式 ⊥）；F4 补 6 测（一致输入负断言/单键 hasKey/字面量键值/反向 differentFrom/传递链到 Nothing/环列表）；reasoner 41→47 测（forward-chain 19→25），全量测试 250 通过。 |
 | 2026-08-07 | Codex | L6：OWL 2 RL 等价与基数规则——`prp-fp`/`prp-ifp`（功能/逆功能属性 → 值/主词 sameAs）、`eq-rep-s/p/o`（sameAs 主/谓/宾替换，HashMap 索引）、`cls-maxc2`（maxCardinality 1 基数键）、`cls-com`（complementOf 一致性 ⊥）；reasoner 47→52 测（forward-chain 25→30），全量测试 255 通过。 |
+| 2026-08-07 | Codex | 计划更新：执行顺序改为自底向上逐层推进（L0→L8，先底层后顶层应用）；§2 焦点表按层重排（P0=L0–L3 底层收尾、P1=L4 多进程 Raft、P2=L5 安全隔离、P3=L6 推理应用化、P4=L7 运维发布）；§8 新增分层后续执行队列，当前光标为 L0–L3 底层收尾。 |
 
 ---
 
 ## 8. 近期行动队列（可勾选）
+
+### 后续执行队列（自底向上，逐层到顶层应用）
+
+原则：先底层逐层到最顶层应用——优先完成当前最低未完成层，再推进上一层；避免跳层开发。R1 退出标准收尾（核心 SLO 基线、恢复/回滚演练、全表勾选）随各层推进同步完成。
+
+> 当前光标：**L0–L3 底层收尾（本队列首项）**
+
+- [ ] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局
+- [ ] **L2 存储内核**：P2-02 真 MVCC 版本链 → P2-01 纯 CF 索引扫描 → P2-04 命名图六置换/Async → P2-05 fsync/备份演练
+- [ ] **L3 查询引擎**：P3-01 高级 Update（LOAD/CLEAR/WITH）→ P3-02 代价模型/统计 → P3-03 HTTP Explain API → P3-04 异步抢占 → P3-05 W3C 欠账逐项提 PASS
+- [ ] **L4 集群**：P4-02 多进程 Raft M1（单节点 openraft 适配）→ M2（多进程 HTTP RPC + RocksDB raft CF）→ M3（默认运行时切换 + CI 三进程 smoke）；P4-01 多进程 RPC、P4-03 跨节点数据搬迁、P4-04 真实网络分区
+- [ ] **L5 接入与安全**：P5-03 强制分库/行级租户隔离 → P5-02 OIDC/JWT → P5-05 Tracing 全链路 → P5-01 gRPC
+- [ ] **L6 推理与验证**：P6-01 规则扩展收尾（cls-hv1/2、prp-irp、cax-adc/eq-diff2/3 AllDifferent、prp-chain）→ P6-03 接入 server 查询/推理管线 → P6-02 SHACL 补全 + W3C SHACL 套件
+- [ ] **L7 平台工程**：P7-01/04 在线重平衡与灾备演练、运维手册与证据包 → P7-02 阈值断言/趋势记录 → P7-03 发布/回滚手册
+- [ ] **L8 AI-Native**：R4 启动时立项（P8-01/02/03）
 
 ### 本周建议
 
