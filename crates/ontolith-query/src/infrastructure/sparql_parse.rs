@@ -1990,6 +1990,12 @@ impl<'a> SparqlParser<'a> {
             if c == '>' {
                 let iri = self.input[start..self.pos].to_owned();
                 self.bump();
+                // SPARQL resolves IRI references against the active base.
+                if let Some(base) = &self.base
+                    && let Some(resolved) = super::execute::resolve_iri(&iri, base)
+                {
+                    return Ok(resolved);
+                }
                 return Ok(iri);
             }
             self.bump();

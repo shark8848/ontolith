@@ -194,7 +194,7 @@ functions	IF() error propogation	PASS
 functions	IN 1	PASS	
 functions	IN 2	PASS	
 functions	IRI()/URI()	PASS	
-functions	IRI()/URI() when the input is an IRI	FAIL	other
+functions	IRI()/URI() when the input is an IRI	PASS	
 functions	LCASE()	PASS	
 functions	LCASE() on non-BMP unicode strings	PASS	
 functions	MD5()	PASS	

@@ -2241,7 +2241,7 @@ fn encode_for_uri(s: &str) -> String {
 
 /// Resolve a (possibly relative) IRI reference against a base IRI (RFC 3986
 /// §5.3 subset: absolute, network-path, root-relative, and relative refs).
-fn resolve_iri(reference: &str, base: &str) -> Option<String> {
+pub(crate) fn resolve_iri(reference: &str, base: &str) -> Option<String> {
     if reference.contains(':') {
         return Some(reference.to_owned());
     }
