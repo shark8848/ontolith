@@ -1792,6 +1792,18 @@ fn eval_function(
             let b = str_lit_lex(&str_lit(1)?)?.to_owned();
             Some(bool(a.contains(&b)))
         }
+        "MD5" | "SHA1" | "SHA256" | "SHA384" | "SHA512" => {
+            let l = str_lit(0)?;
+            let s = str_lit_lex(&l)?;
+            let hex_digest = match name {
+                "MD5" => super::hashes::hex(&super::hashes::md5(s.as_bytes())),
+                "SHA1" => super::hashes::hex(&super::hashes::sha1(s.as_bytes())),
+                "SHA256" => super::hashes::hex(&super::hashes::sha256(s.as_bytes())),
+                "SHA384" => super::hashes::hex(&super::hashes::sha384(s.as_bytes())),
+                _ => super::hashes::hex(&super::hashes::sha512(s.as_bytes())),
+            };
+            Some(strlit(hex_digest))
+        }
         "STRSTARTS" => {
             let a = str_lit_lex(&str_lit(0)?)?.to_owned();
             let b = str_lit_lex(&str_lit(1)?)?.to_owned();

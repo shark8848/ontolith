@@ -1,6 +1,7 @@
 //! Query infrastructure: SPARQL parse, optimize, execute (L3 full).
 
 mod execute;
+mod hashes;
 mod optimize;
 mod sparql_parse;
 

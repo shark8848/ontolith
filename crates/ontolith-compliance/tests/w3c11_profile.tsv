@@ -197,8 +197,8 @@ functions	IRI()/URI()	PASS
 functions	IRI()/URI() when the input is an IRI	FAIL	other
 functions	LCASE()	PASS	
 functions	LCASE() on non-BMP unicode strings	PASS	
-functions	MD5()	FAIL	semantic
-functions	MD5() over Unicode data	FAIL	semantic
+functions	MD5()	PASS	
+functions	MD5() over Unicode data	PASS	
 functions	MINUTES()	PASS	
 functions	MONTH()	PASS	
 functions	NOT IN 1	PASS	
@@ -211,14 +211,14 @@ functions	REPLACE() with overlapping pattern	FAIL	semantic
 functions	REPLACE() with the 'i' option	FAIL	data-format
 functions	ROUND()	PASS	
 functions	SECONDS()	PASS	
-functions	SHA1()	FAIL	semantic
-functions	SHA1() on Unicode data	FAIL	semantic
-functions	SHA256()	FAIL	semantic
-functions	SHA256() on Unicode data	FAIL	semantic
-functions	SHA384()	FAIL	semantic
-functions	SHA384() on Unicode data	FAIL	semantic
-functions	SHA512()	FAIL	semantic
-functions	SHA512() on Unicode data	FAIL	semantic
+functions	SHA1()	PASS	
+functions	SHA1() on Unicode data	PASS	
+functions	SHA256()	PASS	
+functions	SHA256() on Unicode data	PASS	
+functions	SHA384()	PASS	
+functions	SHA384() on Unicode data	PASS	
+functions	SHA512()	PASS	
+functions	SHA512() on Unicode data	PASS	
 functions	STRAFTER()	PASS	
 functions	STRAFTER() datatyping	PASS	
 functions	STRBEFORE()	PASS	
