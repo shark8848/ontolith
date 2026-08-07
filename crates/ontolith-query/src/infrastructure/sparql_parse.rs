@@ -5,9 +5,9 @@
 //! VALUES, DISTINCT, ORDER BY, LIMIT/OFFSET, PREFIX/BASE.
 
 use crate::domain::{
-    AggregateFunction, AggregateSpec, Algebra, Expression, GraphTarget, OrderKey, PathExpression,
-    ProjectionExpr, QueryKind, QueryPlan, QueryPlanId, QueryRequest, TermPattern, TriplePattern,
-    UpdateOp,
+    AggregateFunction, AggregateSpec, Algebra, Expression, GraphRef, GraphTarget, OrderKey,
+    PathExpression, ProjectionExpr, QueryKind, QueryPlan, QueryPlanId, QueryRequest, TermPattern,
+    TriplePattern, UpdateOp, UpdatePattern,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue};
 use ontolith_core::error::OntolithError;
@@ -83,6 +83,10 @@ impl<'a> SparqlParser<'a> {
             || self.looking_at_keyword("LOAD")
             || self.looking_at_keyword("CLEAR")
             || self.looking_at_keyword("DROP")
+            || self.looking_at_keyword("ADD")
+            || self.looking_at_keyword("COPY")
+            || self.looking_at_keyword("MOVE")
+            || self.looking_at_keyword("CREATE")
         {
             QueryKind::Update
         } else {
@@ -458,6 +462,17 @@ impl<'a> SparqlParser<'a> {
             };
         }
 
+        // SPARQL 1.1 trailing VALUES clause (`SELECT ... WHERE {...} VALUES ...`)
+        // joins the whole query result with the values table.
+        if kind == QueryKind::Select || kind == QueryKind::Ask || kind == QueryKind::Construct {
+            self.skip();
+            if self.eat_keyword("VALUES") {
+                let values = self.parse_values()?;
+                algebra = join(algebra, values);
+                self.logical.push("post_values".into());
+            }
+        }
+
         let physical = physical_steps(&algebra);
         Ok(QueryPlan {
             id: plan_id(self.input),
@@ -515,14 +530,86 @@ impl<'a> SparqlParser<'a> {
         Ok(patterns)
     }
 
-    fn parse_data_block(&mut self) -> Result<Vec<TriplePattern>, OntolithError> {
-        let patterns = self.parse_construct_template()?;
+    /// Update template / DATA block / DELETE WHERE body: `{ ... }` with triple
+    /// patterns, `;`/`,` shorthands and `GRAPH <g> { ... }` blocks. Returns
+    /// patterns with their target named graph (`None` = operation default).
+    fn parse_update_block(
+        &mut self,
+        allow_bnodes: bool,
+    ) -> Result<Vec<UpdatePattern>, OntolithError> {
+        self.expect_char('{')?;
+        let mut patterns = Vec::new();
+        self.skip();
+        while self.peek_char() != Some('}') && !self.eof() {
+            self.skip();
+            if self.looking_at_keyword("GRAPH") {
+                let save = self.checkpoint();
+                self.eat_keyword("GRAPH");
+                self.skip();
+                if self.peek_char() == Some('<') || self.looking_at_prefixed_name() {
+                    let g = Iri::new(self.parse_iri_or_prefixed()?);
+                    self.skip();
+                    let inner = self.parse_update_block(allow_bnodes)?;
+                    for p in inner {
+                        if p.graph.is_some() {
+                            return Err(self.err("nested GRAPH blocks are not allowed"));
+                        }
+                        patterns.push(UpdatePattern {
+                            graph: Some(g.clone()),
+                            triple: p.triple,
+                        });
+                    }
+                    self.skip();
+                    if self.peek_char() == Some('.') {
+                        self.bump();
+                        self.skip();
+                    }
+                    continue;
+                }
+                self.restore(save);
+            }
+            if let Some(p) = self.try_parse_triple_pattern()? {
+                for triple in self.parse_triple_semicolon_chain(p)? {
+                    if !allow_bnodes
+                        && (matches!(triple.subject, TermPattern::Blank(_))
+                            || matches!(triple.object, TermPattern::Blank(_)))
+                    {
+                        return Err(self.err("blank nodes are not allowed in DELETE templates"));
+                    }
+                    patterns.push(UpdatePattern {
+                        graph: None,
+                        triple,
+                    });
+                }
+            } else {
+                break;
+            }
+            self.skip();
+            if self.peek_char() == Some('.') {
+                self.bump();
+                self.skip();
+            }
+        }
+        self.expect_char('}')?;
+        Ok(patterns)
+    }
+
+    fn parse_data_block(
+        &mut self,
+        allow_bnodes: bool,
+    ) -> Result<Vec<UpdatePattern>, OntolithError> {
+        let patterns = self.parse_update_block(true)?;
+        let is_real_var = |tp: &TermPattern| matches!(tp, TermPattern::Variable(_));
         for p in &patterns {
-            if p.subject.is_variable()
-                || p.predicate.is_variable()
-                || p.object.is_variable()
-                || matches!(p.subject, TermPattern::Blank(_))
-                || matches!(p.object, TermPattern::Blank(_))
+            let t = &p.triple;
+            // Blank labels are legal in INSERT/DELETE DATA; only true
+            // variables are rejected there.
+            if is_real_var(&t.subject)
+                || is_real_var(&t.predicate)
+                || is_real_var(&t.object)
+                || (!allow_bnodes
+                    && (matches!(t.subject, TermPattern::Blank(_))
+                        || matches!(t.object, TermPattern::Blank(_))))
             {
                 return Err(self.err("DATA block triples must be concrete (no variables)"));
             }
@@ -530,108 +617,198 @@ impl<'a> SparqlParser<'a> {
         Ok(patterns)
     }
 
-    fn parse_update_ops(&mut self) -> Result<Vec<UpdateOp>, OntolithError> {
-        let mut ops = Vec::new();
+    /// Parse an IRI that may be either an `<IRIREF>` or a prefixed name.
+    fn parse_iri_or_prefixed(&mut self) -> Result<String, OntolithError> {
         self.skip();
+        if self.peek_char() == Some('<') {
+            self.parse_iriref()
+        } else {
+            let word = self.parse_word();
+            if word.is_empty() {
+                return Err(self.err("expected IRI"));
+            }
+            self.expand_prefixed(&word)
+        }
+    }
+
+    fn looking_at_prefixed_name(&self) -> bool {
+        // Accept `ex:local` and the default prefix `:local`; a bare `:` or
+        // `ex:` followed by a delimiter is rejected (invalid anyway).
+        let rest = &self.input[self.pos..];
+        for (i, c) in rest.chars().enumerate() {
+            if c == ':' {
+                return rest[i + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|nc| nc.is_ascii_alphanumeric() || nc == '_' || nc == '-');
+            }
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                continue;
+            }
+            return false;
+        }
+        false
+    }
+
+    fn parse_update_ops(&mut self) -> Result<Vec<UpdateOp>, OntolithError> {
+        // SPARQL Update request: operations separated by `;` (a single
+        // trailing `;` is tolerated). Blank labels in INSERT/DELETE DATA are
+        // request-scoped and must not be reused across operations; labels in
+        // modify templates are operation-scoped variables and may repeat.
+        let mut ops = Vec::new();
+        let mut seen_data_blanks: BTreeSet<String> = BTreeSet::new();
+        self.skip();
+        loop {
+            let op = self.parse_single_update_op()?;
+            // Deduplicate within the operation: reusing a label inside one
+            // DATA block denotes the same blank node and is legal.
+            let op_blanks: BTreeSet<String> = data_op_blank_labels(&op).into_iter().collect();
+            for label in op_blanks {
+                if !seen_data_blanks.insert(label.clone()) {
+                    return Err(self.err(format!(
+                        "blank node label '_:{label}' reused across DATA operations"
+                    )));
+                }
+            }
+            ops.push(op);
+            self.skip();
+            let has_separator = self.eat_operator(";");
+            if has_separator {
+                self.skip();
+                if !self.eof() && !self.looking_at_update_keyword() {
+                    return Err(self.err("expected update operation after ';'"));
+                }
+                if !self.eof() {
+                    continue;
+                }
+            }
+            break;
+        }
+        self.skip();
+        if !self.eof() {
+            return Err(self.err("unexpected trailing content after update request"));
+        }
+        self.logical.push(format!("update_ops:{}", ops.len()));
+        Ok(ops)
+    }
+
+    fn parse_single_update_op(&mut self) -> Result<UpdateOp, OntolithError> {
+        self.skip();
+        let op;
         if self.looking_at_keyword("INSERT") {
             self.eat_keyword("INSERT");
             self.skip();
             if self.eat_keyword("DATA") {
                 self.skip();
-                ops.push(UpdateOp::InsertData(self.parse_data_block()?));
+                op = UpdateOp::InsertData(self.parse_data_block(true)?);
             } else {
-                let insert = self.parse_construct_template()?;
+                let insert = self.parse_update_block(true)?;
                 self.skip();
+                let (using, using_named) = self.parse_using_clause()?;
                 self.expect_keyword("WHERE")?;
                 self.skip();
                 let where_pattern = self.parse_group_graph_pattern()?;
-                ops.push(UpdateOp::DeleteInsert {
+                op = UpdateOp::DeleteInsert {
                     graph: None,
+                    using,
+                    using_named,
                     delete: Vec::new(),
                     insert,
                     where_pattern,
-                });
+                };
             }
         } else if self.looking_at_keyword("DELETE") {
             self.eat_keyword("DELETE");
             self.skip();
             if self.eat_keyword("DATA") {
                 self.skip();
-                ops.push(UpdateOp::DeleteData(self.parse_data_block()?));
+                op = UpdateOp::DeleteData(self.parse_data_block(false)?);
             } else if self.looking_at_keyword("WHERE") {
                 self.eat_keyword("WHERE");
                 self.skip();
-                ops.push(UpdateOp::DeleteWhere {
+                op = UpdateOp::DeleteWhere {
                     graph: None,
-                    patterns: self.parse_construct_template()?,
-                });
+                    using: Vec::new(),
+                    using_named: Vec::new(),
+                    patterns: self.parse_update_block(false)?,
+                };
             } else {
-                let delete = self.parse_construct_template()?;
+                let delete = self.parse_update_block(false)?;
                 self.skip();
                 let mut insert = Vec::new();
                 if self.eat_keyword("INSERT") {
                     self.skip();
-                    insert = self.parse_construct_template()?;
+                    insert = self.parse_update_block(true)?;
                     self.skip();
                 }
+                let (using, using_named) = self.parse_using_clause()?;
                 self.expect_keyword("WHERE")?;
                 self.skip();
                 let where_pattern = self.parse_group_graph_pattern()?;
-                ops.push(UpdateOp::DeleteInsert {
+                op = UpdateOp::DeleteInsert {
                     graph: None,
+                    using,
+                    using_named,
                     delete,
                     insert,
                     where_pattern,
-                });
+                };
             }
         } else if self.eat_keyword("WITH") {
             self.skip();
-            let graph = Iri::new(self.parse_iriref()?);
+            let graph = Iri::new(self.parse_iri_or_prefixed()?);
             self.skip();
-            // WITH composes only with the modify forms (DELETE/INSERT WHERE).
             if self.looking_at_keyword("DELETE") {
                 self.eat_keyword("DELETE");
                 self.skip();
                 if self.looking_at_keyword("WHERE") {
                     self.eat_keyword("WHERE");
                     self.skip();
-                    ops.push(UpdateOp::DeleteWhere {
+                    op = UpdateOp::DeleteWhere {
                         graph: Some(graph),
-                        patterns: self.parse_construct_template()?,
-                    });
+                        using: Vec::new(),
+                        using_named: Vec::new(),
+                        patterns: self.parse_update_block(false)?,
+                    };
                 } else {
-                    let delete = self.parse_construct_template()?;
+                    let delete = self.parse_update_block(false)?;
                     self.skip();
                     let mut insert = Vec::new();
                     if self.eat_keyword("INSERT") {
                         self.skip();
-                        insert = self.parse_construct_template()?;
+                        insert = self.parse_update_block(true)?;
                         self.skip();
                     }
+                    let (using, using_named) = self.parse_using_clause()?;
                     self.expect_keyword("WHERE")?;
                     self.skip();
                     let where_pattern = self.parse_group_graph_pattern()?;
-                    ops.push(UpdateOp::DeleteInsert {
+                    op = UpdateOp::DeleteInsert {
                         graph: Some(graph),
+                        using,
+                        using_named,
                         delete,
                         insert,
                         where_pattern,
-                    });
+                    };
                 }
             } else if self.looking_at_keyword("INSERT") {
                 self.eat_keyword("INSERT");
                 self.skip();
-                let insert = self.parse_construct_template()?;
+                let insert = self.parse_update_block(true)?;
                 self.skip();
+                let (using, using_named) = self.parse_using_clause()?;
                 self.expect_keyword("WHERE")?;
                 self.skip();
                 let where_pattern = self.parse_group_graph_pattern()?;
-                ops.push(UpdateOp::DeleteInsert {
+                op = UpdateOp::DeleteInsert {
                     graph: Some(graph),
+                    using,
+                    using_named,
                     delete: Vec::new(),
                     insert,
                     where_pattern,
-                });
+                };
             } else {
                 return Err(self.err("expected DELETE or INSERT after WITH"));
             }
@@ -650,39 +827,114 @@ impl<'a> SparqlParser<'a> {
                 GraphTarget::All
             } else if self.eat_keyword("GRAPH") {
                 self.skip();
-                GraphTarget::Graph(Iri::new(self.parse_iriref()?))
+                GraphTarget::Graph(Iri::new(self.parse_iri_or_prefixed()?))
             } else {
                 return Err(self.err("expected DEFAULT/NAMED/ALL/GRAPH after CLEAR/DROP"));
             };
-            ops.push(if is_drop {
+            op = if is_drop {
                 UpdateOp::Drop { silent, target }
             } else {
                 UpdateOp::Clear { silent, target }
-            });
+            };
         } else if self.looking_at_keyword("LOAD") {
             self.eat_keyword("LOAD");
             let silent = self.eat_keyword("SILENT");
             self.skip();
-            let source = Iri::new(self.parse_iriref()?);
+            let source = Iri::new(self.parse_iri_or_prefixed()?);
             self.skip();
             let into = if self.eat_keyword("INTO") {
                 self.skip();
                 self.expect_keyword("GRAPH")?;
                 self.skip();
-                Some(Iri::new(self.parse_iriref()?))
+                Some(Iri::new(self.parse_iri_or_prefixed()?))
             } else {
                 None
             };
-            ops.push(UpdateOp::Load {
+            op = UpdateOp::Load {
                 silent,
                 source,
                 into,
-            });
+            };
+        } else if self.looking_at_keyword("ADD")
+            || self.looking_at_keyword("COPY")
+            || self.looking_at_keyword("MOVE")
+        {
+            let op_code = if self.eat_keyword("ADD") {
+                'A'
+            } else if self.eat_keyword("COPY") {
+                'C'
+            } else {
+                self.eat_keyword("MOVE");
+                'M'
+            };
+            let silent = self.eat_keyword("SILENT");
+            self.skip();
+            let from = self.parse_graph_ref()?;
+            self.skip();
+            self.expect_keyword("TO")?;
+            self.skip();
+            let to = self.parse_graph_ref()?;
+            op = match op_code {
+                'A' => UpdateOp::Add { silent, from, to },
+                'C' => UpdateOp::Copy { silent, from, to },
+                _ => UpdateOp::Move { silent, from, to },
+            };
+        } else if self.looking_at_keyword("CREATE") {
+            self.eat_keyword("CREATE");
+            let silent = self.eat_keyword("SILENT");
+            self.skip();
+            self.expect_keyword("GRAPH")?;
+            self.skip();
+            let graph = Iri::new(self.parse_iri_or_prefixed()?);
+            op = UpdateOp::Create { silent, graph };
         } else {
-            return Err(self.err("expected update operation INSERT/DELETE/CLEAR/DROP/LOAD"));
+            return Err(self.err(
+                "expected update operation INSERT/DELETE/CLEAR/DROP/LOAD/ADD/COPY/MOVE/CREATE",
+            ));
         }
-        self.logical.push(format!("update_ops:{}", ops.len()));
-        Ok(ops)
+        Ok(op)
+    }
+
+    fn looking_at_update_keyword(&self) -> bool {
+        self.looking_at_keyword("INSERT")
+            || self.looking_at_keyword("DELETE")
+            || self.looking_at_keyword("WITH")
+            || self.looking_at_keyword("LOAD")
+            || self.looking_at_keyword("CLEAR")
+            || self.looking_at_keyword("DROP")
+            || self.looking_at_keyword("ADD")
+            || self.looking_at_keyword("COPY")
+            || self.looking_at_keyword("MOVE")
+            || self.looking_at_keyword("CREATE")
+    }
+
+    /// `USING <g>` / `USING NAMED <g>`* clause of a modify form.
+    fn parse_using_clause(&mut self) -> Result<(Vec<Iri>, Vec<Iri>), OntolithError> {
+        let mut using = Vec::new();
+        let mut using_named = Vec::new();
+        self.skip();
+        while self.eat_keyword("USING") {
+            self.skip();
+            if self.eat_keyword("NAMED") {
+                self.skip();
+                using_named.push(Iri::new(self.parse_iri_or_prefixed()?));
+            } else {
+                using.push(Iri::new(self.parse_iri_or_prefixed()?));
+            }
+            self.skip();
+        }
+        Ok((using, using_named))
+    }
+
+    fn parse_graph_ref(&mut self) -> Result<GraphRef, OntolithError> {
+        self.skip();
+        if self.eat_keyword("DEFAULT") {
+            return Ok(GraphRef::Default);
+        }
+        // GraphOrDefault: `DEFAULT` | `GRAPH`? iri — GRAPH is optional.
+        self.eat_keyword("GRAPH");
+        self.skip();
+        Ok(GraphRef::Graph(Iri::new(self.parse_iri_or_prefixed()?)))
     }
 
     fn parse_aggregate_spec(&mut self) -> Result<AggregateSpec, OntolithError> {
@@ -858,6 +1110,19 @@ impl<'a> SparqlParser<'a> {
                 let values = self.parse_values()?;
                 acc = join(acc, values);
                 self.logical.push("values".into());
+            } else if self.eat_keyword("GRAPH") {
+                self.skip();
+                let graph = self.parse_var_or_term(false)?;
+                self.skip();
+                let inner = self.parse_group_graph_pattern()?;
+                acc = join(
+                    acc,
+                    Algebra::Graph {
+                        graph,
+                        inner: Box::new(inner),
+                    },
+                );
+                self.logical.push("graph".into());
             } else if self.looking_at_keyword("SELECT") {
                 let subquery = self.parse_subquery_select()?;
                 acc = join(acc, subquery);
@@ -1083,7 +1348,10 @@ impl<'a> SparqlParser<'a> {
                 Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
             } else if self.peek_char() == Some('<') {
                 let raw = self.parse_iriref()?;
-                Iri::parse(raw).map_err(|e| self.err(e.message()))?
+                if raw.is_empty() || raw.chars().any(|c| c.is_ascii_whitespace()) {
+                    return Err(self.err("invalid IRI reference"));
+                }
+                Iri::new(raw)
             } else {
                 let word = self.parse_word();
                 if word.is_empty() {
@@ -1469,13 +1737,21 @@ impl<'a> SparqlParser<'a> {
         self.parse_graph_term()
     }
 
+    /// Accept a SPARQL IRIREF. IRIREFs may be relative references (resolved
+    /// against the active base by [`Self::parse_iriref`]); with no base they
+    /// are kept verbatim, so only empty/whitespace forms are rejected.
+    fn iri_term(&self, value: String) -> Result<TermPattern, OntolithError> {
+        if value.is_empty() || value.chars().any(|c| c.is_ascii_whitespace()) {
+            return Err(self.err("invalid IRI reference"));
+        }
+        Ok(TermPattern::Iri(Iri::new(value)))
+    }
+
     fn parse_graph_term(&mut self) -> Result<TermPattern, OntolithError> {
         self.skip();
         if self.peek_char() == Some('<') {
             let iri = self.parse_iriref()?;
-            return Ok(TermPattern::Iri(
-                Iri::parse(iri).map_err(|e| OntolithError::query(e.message()))?,
-            ));
+            return self.iri_term(iri);
         }
         if self.peek_char() == Some('"') || self.peek_char() == Some('\'') {
             return Ok(TermPattern::Literal(self.parse_string_literal()?));
@@ -2227,6 +2503,28 @@ impl<'a> SparqlParser<'a> {
     }
 }
 
+fn update_pattern_blanks(patterns: &[UpdatePattern]) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in patterns {
+        if let TermPattern::Blank(label) = &p.triple.subject {
+            out.push(label.clone());
+        }
+        if let TermPattern::Blank(label) = &p.triple.object {
+            out.push(label.clone());
+        }
+    }
+    out
+}
+
+/// Blank labels used by INSERT/DELETE DATA operations. Labels in modify
+/// templates are operation-scoped variables and are not tracked here.
+fn data_op_blank_labels(op: &UpdateOp) -> Vec<String> {
+    match op {
+        UpdateOp::InsertData(p) | UpdateOp::DeleteData(p) => update_pattern_blanks(p),
+        _ => Vec::new(),
+    }
+}
+
 fn join(left: Algebra, right: Algebra) -> Algebra {
     match left {
         Algebra::Identity => right,
@@ -2261,6 +2559,7 @@ fn apply_subject_hint(algebra: &mut Algebra, node: ontolith_core::domain::NodeId
         | Algebra::OrderBy { input, .. }
         | Algebra::Slice { input, .. }
         | Algebra::Aggregate { input, .. } => apply_subject_hint(input, node),
+        Algebra::Graph { inner, .. } => apply_subject_hint(inner, node),
         Algebra::Path { subject, .. } if subject.is_variable() => {
             *subject = TermPattern::Node(node);
             true
@@ -2279,6 +2578,7 @@ fn algebra_tag(a: &Algebra) -> &'static str {
         Algebra::Filter { .. } => "filter",
         Algebra::Aggregate { .. } => "aggregate",
         Algebra::Path { .. } => "path",
+        Algebra::Graph { .. } => "graph",
         Algebra::Identity => "identity",
         _ => "algebra",
     }
@@ -2406,6 +2706,9 @@ fn walk_physical(algebra: &Algebra, steps: &mut Vec<String>) {
         }
         Algebra::Path { path, .. } => {
             steps.push(format!("property_path:{path:?}"));
+        }
+        Algebra::Graph { .. } => {
+            steps.push("graph".into());
         }
     }
 }
@@ -2655,6 +2958,12 @@ fn collect_algebra_vars(algebra: &Algebra, out: &mut BTreeSet<String>) {
             if let Some(v) = object.as_variable() {
                 out.insert(v.to_owned());
             }
+        }
+        Algebra::Graph { graph, inner } => {
+            if let Some(v) = graph.as_variable() {
+                out.insert(v.to_owned());
+            }
+            collect_algebra_vars(inner, out);
         }
     }
 }

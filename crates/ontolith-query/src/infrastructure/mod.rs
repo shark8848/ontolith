@@ -21,7 +21,10 @@ use crate::domain::{QueryKind, QueryPlan, QueryRequest, QueryResult};
 use ontolith_core::domain::{Iri, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
-use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
+use ontolith_storage::application::{
+    DictionaryCodec, QuadRepository, StorageEngine, TripleRepository,
+};
+use ontolith_storage::infrastructure::EngineQuadRepository;
 use ontolith_transaction::domain::TxnId;
 use std::sync::Arc;
 
@@ -58,10 +61,12 @@ impl QueryStatistics for EngineQueryStatistics {
     }
 }
 
-/// Storage-backed read service using SPO/POS/OSP indexes.
+/// Storage-backed read service using SPO/POS/OSP indexes (plus optional
+/// named-graph access through a [`QuadRepository`]).
 pub struct InMemoryQueryReadService {
     triple_repo: Arc<dyn TripleRepository>,
     dictionary: Option<Arc<dyn DictionaryCodec>>,
+    quad_repo: Option<Arc<dyn QuadRepository>>,
 }
 
 impl InMemoryQueryReadService {
@@ -69,6 +74,7 @@ impl InMemoryQueryReadService {
         Self {
             triple_repo,
             dictionary: None,
+            quad_repo: None,
         }
     }
 
@@ -79,6 +85,19 @@ impl InMemoryQueryReadService {
         Self {
             triple_repo,
             dictionary: Some(dictionary),
+            quad_repo: None,
+        }
+    }
+
+    pub fn with_quads(
+        triple_repo: Arc<dyn TripleRepository>,
+        dictionary: Option<Arc<dyn DictionaryCodec>>,
+        quad_repo: Arc<dyn QuadRepository>,
+    ) -> Self {
+        Self {
+            triple_repo,
+            dictionary,
+            quad_repo: Some(quad_repo),
         }
     }
 }
@@ -133,6 +152,35 @@ impl QueryReadService for InMemoryQueryReadService {
         Ok(self
             .triple_repo
             .matching_in_txn(subject, predicate, object, txn_id))
+    }
+
+    fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.quad_repo
+            .as_ref()
+            .map(|quads| {
+                quads
+                    .by_graph_name_in_txn(graph, txn_id)
+                    .into_iter()
+                    .map(|q| q.triple)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn named_graph_names(&self, txn_id: Option<TxnId>) -> Vec<Iri> {
+        self.quad_repo
+            .as_ref()
+            .map(|quads| {
+                let mut names: Vec<Iri> = quads
+                    .all_in_txn(txn_id)
+                    .into_iter()
+                    .filter_map(|q| q.graph_name)
+                    .collect();
+                names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                names.dedup();
+                names
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -226,10 +274,10 @@ pub fn update_pipeline(
     CostBasedOptimizer<EngineQueryStatistics>,
     UpdateQueryExecutor<EngineUpdateWriteService>,
 > {
-    let read: Arc<dyn QueryReadService> = match dictionary {
-        Some(dict) => Arc::new(InMemoryQueryReadService::with_dictionary(repo, dict)),
-        None => Arc::new(InMemoryQueryReadService::new(repo)),
-    };
+    let quads: Arc<dyn QuadRepository> = Arc::new(EngineQuadRepository::new(Arc::clone(&engine)));
+    let read: Arc<dyn QueryReadService> = Arc::new(InMemoryQueryReadService::with_quads(
+        repo, dictionary, quads,
+    ));
     crate::application::QueryPipeline::new(
         SimpleQueryPlanner,
         CostBasedOptimizer::new(Arc::new(EngineQueryStatistics::new(Arc::clone(&engine)))),

@@ -18,10 +18,12 @@ use ontolith_parser::domain::ParseRequest;
 use ontolith_parser::infrastructure::{BasicRdfParser, parse_ntriples, parse_turtle_doc};
 use ontolith_query::domain::{BoundValue, QueryKind, QueryRequest, QueryResult};
 use ontolith_query::infrastructure::{plan_query, update_pipeline};
-use ontolith_rdf::domain::{Term, Triple};
-use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
+use ontolith_rdf::domain::{Quad, Term, Triple};
+use ontolith_storage::application::{
+    DictionaryCodec, QuadRepository, StorageEngine, TripleRepository,
+};
 use ontolith_storage::infrastructure::{
-    InMemoryDictionary, InMemoryStorageEngine, InMemoryTripleRepository,
+    InMemoryDictionary, InMemoryQuadRepository, InMemoryStorageEngine, InMemoryTripleRepository,
 };
 use ontolith_transaction::domain::TxnId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,9 +74,21 @@ enum TestKind {
 }
 
 #[derive(Debug, Clone)]
+struct NamedGraphFile {
+    name: String,
+    file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 enum Expected {
     Table(PathBuf),
     Graph(PathBuf),
+    /// Update result store: optional default-graph post file plus expected
+    /// named-graph contents.
+    UpdateStore {
+        default: Option<PathBuf>,
+        named: Vec<NamedGraphFile>,
+    },
     Boolean(bool),
     None,
 }
@@ -86,13 +100,12 @@ struct TestEntry {
     kind: TestKind,
     request_file: Option<PathBuf>,
     data_files: Vec<PathBuf>,
-    graph_data_files: Vec<PathBuf>,
+    graph_data: Vec<NamedGraphFile>,
     expected: Expected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FailReason {
-    NamedGraph,
     DataFormat(String),
     ResultFormat(String),
     Unsupported(String),
@@ -107,7 +120,6 @@ enum FailReason {
 impl FailReason {
     fn code(&self) -> &'static str {
         match self {
-            Self::NamedGraph => "named-graph",
             Self::DataFormat(_) => "data-format",
             Self::ResultFormat(_) => "result-format",
             Self::Unsupported(_) => "unsupported",
@@ -273,6 +285,37 @@ fn collect_files(
     out
 }
 
+fn collect_named_graphs(
+    objects: &[Term],
+    map: &BTreeMap<NodeId, Vec<(Iri, Term)>>,
+    base_dir: &Path,
+) -> Vec<NamedGraphFile> {
+    let mut out = Vec::new();
+    for object in objects {
+        if let Term::BlankNode(id) = object
+            && let Some(triples) = map.get(id)
+        {
+            let mut file = None;
+            let mut name = None;
+            for (p, o) in triples {
+                if (p.as_str() == UT_GRAPH || p.as_str() == QT_GRAPH)
+                    && let Some(iri) = term_iri(o)
+                {
+                    file = Some(relative_path(base_dir, &iri));
+                } else if p.as_str() == RDFS_LABEL
+                    && let Some(label) = term_literal_str(o)
+                {
+                    name = Some(label);
+                }
+            }
+            if let (Some(file), Some(name)) = (file, name) {
+                out.push(NamedGraphFile { name, file });
+            }
+        }
+    }
+    out
+}
+
 fn relative_path(base_dir: &Path, iri: &str) -> PathBuf {
     // Manifest IRIs resolve to file://... absolute paths; recover the
     // filesystem path from the last segment(s) that exist under base_dir.
@@ -375,7 +418,9 @@ fn build_entry(
                                     }
                                 }
                                 QT_DATA | UT_DATA => data_objects.push(ao.clone()),
-                                QT_GRAPH_DATA => graph_data_objects.push(ao.clone()),
+                                QT_GRAPH_DATA | UT_GRAPH_DATA => {
+                                    graph_data_objects.push(ao.clone())
+                                }
                                 _ => {}
                             }
                         }
@@ -389,7 +434,8 @@ fn build_entry(
                 Term::BlankNode(id) => {
                     if let Some(result_triples) = map.get(id) {
                         let mut boolean = None;
-                        let mut post_files = Vec::new();
+                        let mut post_default = None;
+                        let mut post_named = Vec::new();
                         for (rp, ro) in result_triples {
                             if rp.as_str() == MF_BOOLEAN {
                                 if let Term::Literal(l) = ro {
@@ -398,13 +444,22 @@ fn build_entry(
                             } else if (rp.as_str() == UT_DATA || rp.as_str() == QT_DATA)
                                 && let Some(iri) = term_iri(ro)
                             {
-                                post_files.push(relative_path(base_dir, &iri));
+                                post_default = Some(relative_path(base_dir, &iri));
+                            } else if rp.as_str() == UT_GRAPH_DATA || rp.as_str() == QT_GRAPH_DATA {
+                                post_named.extend(collect_named_graphs(
+                                    std::slice::from_ref(ro),
+                                    map,
+                                    base_dir,
+                                ));
                             }
                         }
                         if let Some(b) = boolean {
                             expected = Expected::Boolean(b);
-                        } else if let Some(path) = post_files.first() {
-                            expected = Expected::Graph(path.clone());
+                        } else if post_default.is_some() || !post_named.is_empty() {
+                            expected = Expected::UpdateStore {
+                                default: post_default,
+                                named: post_named,
+                            };
                         }
                     }
                 }
@@ -414,7 +469,7 @@ fn build_entry(
     }
 
     let data_files = collect_files(&data_objects, map, base_dir);
-    let graph_data_files = collect_files(&graph_data_objects, map, base_dir);
+    let graph_data = collect_named_graphs(&graph_data_objects, map, base_dir);
 
     // Distinguish table vs graph expected by extension.
     if let Expected::Table(path) = &expected {
@@ -433,7 +488,7 @@ fn build_entry(
         kind,
         request_file,
         data_files,
-        graph_data_files,
+        graph_data,
         expected,
     }
 }
@@ -444,6 +499,10 @@ const QT_DATA: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-query#dat
 const QT_GRAPH_DATA: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-query#graphData";
 const UT_REQUEST: &str = "http://www.w3.org/2009/sparql/tests/test-update#request";
 const UT_DATA: &str = "http://www.w3.org/2009/sparql/tests/test-update#data";
+const UT_GRAPH_DATA: &str = "http://www.w3.org/2009/sparql/tests/test-update#graphData";
+const UT_GRAPH: &str = "http://www.w3.org/2009/sparql/tests/test-update#graph";
+const QT_GRAPH: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-query#graph";
+const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 const MF_NAME: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#name";
 const MF_ACTION: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#action";
 const MF_RESULT: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#result";
@@ -1014,13 +1073,15 @@ struct Loaded {
     engine: Arc<InMemoryStorageEngine>,
     repo: Arc<dyn TripleRepository>,
     dict: Arc<InMemoryDictionary>,
+    quads: Arc<InMemoryQuadRepository>,
 }
 
-fn load_data(files: &[PathBuf]) -> Result<Loaded, String> {
+fn load_data(files: &[PathBuf], graph_data: &[NamedGraphFile]) -> Result<Loaded, String> {
     let engine = Arc::new(InMemoryStorageEngine::new());
     let dict = Arc::new(InMemoryDictionary::new());
     let repo: Arc<dyn TripleRepository> =
         Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+    let quads = Arc::new(InMemoryQuadRepository::new(Arc::clone(&engine)));
     let txn = TxnId::new(1);
     let mut inserted = 0usize;
     for file in files {
@@ -1038,12 +1099,30 @@ fn load_data(files: &[PathBuf]) -> Result<Loaded, String> {
             inserted += 1;
         }
     }
+    for ng in graph_data {
+        let text = std::fs::read_to_string(&ng.file)
+            .map_err(|e| format!("read {}: {e}", ng.file.display()))?;
+        let parsed = parse_turtle_doc(&text, dict.as_ref())
+            .map_err(|e| format!("parse {}: {e:?}", ng.file.display()))?;
+        let graph_name = Iri::new(ng.name.clone());
+        for triple in parsed.dataset.default_graph {
+            quads
+                .insert(txn, Quad::in_named_graph(triple, graph_name.clone()))
+                .map_err(|e| format!("insert quad: {e:?}"))?;
+            inserted += 1;
+        }
+    }
     if inserted > 0 {
         engine
             .commit_transaction(txn)
             .map_err(|e| format!("commit: {e:?}"))?;
     }
-    Ok(Loaded { engine, repo, dict })
+    Ok(Loaded {
+        engine,
+        repo,
+        dict,
+        quads,
+    })
 }
 
 fn execute_query(
@@ -1170,6 +1249,55 @@ fn compare_update_graph(loaded: &Loaded, expected_path: &Path) -> Result<(), Str
 // Per-test execution
 // ---------------------------------------------------------------------------
 
+fn compare_update_store(
+    loaded: &Loaded,
+    default_expected: Option<&Path>,
+    named_expected: &[NamedGraphFile],
+) -> Result<(), String> {
+    if let Some(path) = default_expected {
+        let actual_triples = loaded.repo.all_in_txn(None);
+        let actual_set = graph_set(&actual_triples, &loaded.dict);
+        let (expected_triples, expected_dict) = parse_graph_file(path)?;
+        let expected_set = graph_set(&expected_triples, &expected_dict);
+        if actual_set != expected_set {
+            return Err(format!(
+                "update default-graph mismatch: expected {} triples, got {}",
+                expected_set.len(),
+                actual_set.len()
+            ));
+        }
+    }
+    let mut expected_names: BTreeSet<&str> = BTreeSet::new();
+    for ng in named_expected {
+        expected_names.insert(ng.name.as_str());
+        let graph_name = Iri::new(ng.name.clone());
+        let actual_quads = loaded.quads.by_graph_name(&graph_name);
+        let actual_triples: Vec<Triple> = actual_quads.iter().map(|q| q.triple.clone()).collect();
+        let actual_set = graph_set(&actual_triples, &loaded.dict);
+        let (expected_triples, expected_dict) = parse_graph_file(&ng.file)?;
+        let expected_set = graph_set(&expected_triples, &expected_dict);
+        if actual_set != expected_set {
+            return Err(format!(
+                "update graph {} mismatch: expected {} triples, got {}",
+                ng.name,
+                expected_set.len(),
+                actual_set.len()
+            ));
+        }
+    }
+    for quad in loaded.quads.all() {
+        if let Some(name) = &quad.graph_name
+            && !expected_names.contains(name.as_str())
+        {
+            return Err(format!(
+                "update result contains unexpected named graph {}",
+                name.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn run_entry(entry: &TestEntry) -> TestOutcome {
     let result = run_entry_inner(entry);
     match result {
@@ -1210,10 +1338,8 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
             Ok(())
         }
         TestKind::QueryEvaluation => {
-            if !entry.graph_data_files.is_empty() {
-                return fail(FailReason::NamedGraph);
-            }
-            let loaded = load_data(&entry.data_files).map_err(FailReason::DataFormat)?;
+            let loaded =
+                load_data(&entry.data_files, &entry.graph_data).map_err(FailReason::DataFormat)?;
             let actual = execute_query(&loaded, &text).map_err(|e| classify_query_error(&e))?;
             if actual.timed_out {
                 return fail(FailReason::Timeout);
@@ -1259,13 +1385,14 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
                     compare_graph(&actual, path, &loaded).map_err(FailReason::Semantic)
                 }
                 Expected::None => Ok(()),
+                other => fail(FailReason::Other(format!(
+                    "unexpected expected-result shape for query: {other:?}"
+                ))),
             }
         }
         TestKind::UpdateEvaluation => {
-            if !entry.graph_data_files.is_empty() {
-                return fail(FailReason::NamedGraph);
-            }
-            let loaded = load_data(&entry.data_files).map_err(FailReason::DataFormat)?;
+            let loaded =
+                load_data(&entry.data_files, &entry.graph_data).map_err(FailReason::DataFormat)?;
             let actual = execute_query(&loaded, &text).map_err(|e| classify_query_error(&e))?;
             if actual.timed_out {
                 return fail(FailReason::Timeout);
@@ -1277,6 +1404,10 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
                 )));
             }
             match &entry.expected {
+                Expected::UpdateStore { default, named } => {
+                    compare_update_store(&loaded, default.as_deref(), named)
+                        .map_err(FailReason::Semantic)
+                }
                 Expected::Graph(path) => {
                     compare_update_graph(&loaded, path).map_err(FailReason::Semantic)
                 }

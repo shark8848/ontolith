@@ -66,6 +66,15 @@ pub struct TriplePattern {
     pub object: TermPattern,
 }
 
+/// A triple in an update template or DATA block, with an optional target
+/// named graph from an enclosing `GRAPH <g> { ... }` block. `None` means the
+/// operation's default graph (DEFAULT or the `WITH <g>` graph when present).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdatePattern {
+    pub graph: Option<Iri>,
+    pub triple: TriplePattern,
+}
+
 /// FILTER / BIND expression subset.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
@@ -155,23 +164,49 @@ pub struct AggregateSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpdateOp {
     /// `INSERT DATA { ... }` — concrete triples (no variables).
-    InsertData(Vec<TriplePattern>),
+    InsertData(Vec<UpdatePattern>),
     /// `DELETE DATA { ... }` — concrete triples (no variables).
-    DeleteData(Vec<TriplePattern>),
+    DeleteData(Vec<UpdatePattern>),
     /// `DELETE { tpl } INSERT { tpl } WHERE { pattern }` (either side may be empty).
     DeleteInsert {
         /// Target graph from a `WITH <g>` prefix; `None` = default graph.
         graph: Option<Iri>,
-        delete: Vec<TriplePattern>,
-        insert: Vec<TriplePattern>,
+        /// `USING <g>` IRIs: merged as the WHERE default graph.
+        using: Vec<Iri>,
+        /// `USING NAMED <g>` IRIs: restricted named-graph visibility.
+        using_named: Vec<Iri>,
+        delete: Vec<UpdatePattern>,
+        insert: Vec<UpdatePattern>,
         where_pattern: Algebra,
     },
     /// `DELETE WHERE { pattern }` — delete every match of the pattern.
     DeleteWhere {
         /// Target graph from a `WITH <g>` prefix; `None` = default graph.
         graph: Option<Iri>,
-        patterns: Vec<TriplePattern>,
+        using: Vec<Iri>,
+        using_named: Vec<Iri>,
+        patterns: Vec<UpdatePattern>,
     },
+    /// `ADD [SILENT] src TO dst` — union source graph into destination.
+    Add {
+        silent: bool,
+        from: GraphRef,
+        to: GraphRef,
+    },
+    /// `COPY [SILENT] src TO dst` — replace destination with source contents.
+    Copy {
+        silent: bool,
+        from: GraphRef,
+        to: GraphRef,
+    },
+    /// `MOVE [SILENT] src TO dst` — copy then drop the source graph.
+    Move {
+        silent: bool,
+        from: GraphRef,
+        to: GraphRef,
+    },
+    /// `CREATE [SILENT] GRAPH <g>` — ensure an (empty) named graph exists.
+    Create { silent: bool, graph: Iri },
     /// `CLEAR [SILENT] (DEFAULT | NAMED | ALL | GRAPH <iri>)`.
     Clear { silent: bool, target: GraphTarget },
     /// `DROP [SILENT] (DEFAULT | NAMED | ALL | GRAPH <iri>)`.
@@ -184,6 +219,13 @@ pub enum UpdateOp {
         source: Iri,
         into: Option<Iri>,
     },
+}
+
+/// Source/destination of graph-management operations (ADD/COPY/MOVE).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphRef {
+    Default,
+    Graph(Iri),
 }
 
 /// Graph scope for `CLEAR` / `DROP`.
@@ -277,6 +319,12 @@ pub enum Algebra {
         subject: TermPattern,
         path: PathExpression,
         object: TermPattern,
+    },
+    /// `GRAPH (iri|?var) { pattern }` — evaluate `inner` against one named
+    /// graph; a variable graph name binds to every named graph in the store.
+    Graph {
+        graph: TermPattern,
+        inner: Box<Algebra>,
     },
     /// Empty identity multiset (one empty solution) — unit for joins.
     Identity,
@@ -446,6 +494,9 @@ pub fn summarize_algebra(algebra: &Algebra) -> String {
             path,
             object,
         } => format!("Path({subject:?}, {}, {object:?})", summarize_path(path)),
+        Algebra::Graph { graph, inner } => {
+            format!("Graph({graph:?}, {})", summarize_algebra(inner))
+        }
     }
 }
 

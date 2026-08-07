@@ -180,6 +180,14 @@ pub trait StorageEngine: Send + Sync {
 
     fn named_graph_quads(&self) -> Vec<Quad>;
 
+    /// Named-graph quads as of `txn_id`, including staged (uncommitted) writes
+    /// of that transaction. Engines without pending-txn support return the
+    /// committed state.
+    fn named_graph_quads_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Quad> {
+        let _ = txn_id;
+        self.named_graph_quads()
+    }
+
     fn quads_by_graph_in_txn(&self, graph_name: Option<&Iri>, txn_id: Option<TxnId>) -> Vec<Quad> {
         let _ = txn_id;
         match graph_name {
@@ -368,6 +376,13 @@ pub trait QuadRepository: Send + Sync {
     fn by_graph_name_in_txn(&self, graph_name: &Iri, txn_id: Option<TxnId>) -> Vec<Quad> {
         let _ = txn_id;
         self.by_graph_name(graph_name)
+    }
+
+    /// All named-graph quads as of `txn_id`, including staged (uncommitted)
+    /// writes of that transaction.
+    fn all_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Quad> {
+        let _ = txn_id;
+        self.all()
     }
 }
 

@@ -2,9 +2,9 @@
 
 use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
-    AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, GraphTarget, PathExpression,
-    PreemptionReason, PreemptionToken, QueryKind, QueryPlan, QueryRequest, QueryResult, Solution,
-    TermPattern, TriplePattern, UpdateOp,
+    AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, GraphRef, GraphTarget,
+    PathExpression, PreemptionReason, PreemptionToken, QueryKind, QueryPlan, QueryRequest,
+    QueryResult, Solution, TermPattern, TriplePattern, UpdateOp, UpdatePattern,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
@@ -261,174 +261,196 @@ pub fn execute_update(
     let mut affected: u64 = 0;
     let mut staged = false;
 
-    let result =
-        (|| -> Result<(), OntolithError> {
-            for op in &plan.update_ops {
-                match op {
-                    UpdateOp::InsertData(patterns) => {
-                        let triples = concrete_update_triples(patterns, read)?;
-                        let ops: Vec<_> = triples
-                            .iter()
-                            .map(|t| WriteOperation::PutTriple(t.clone()))
-                            .collect();
-                        if !ops.is_empty() {
-                            write.apply_write_batch(txn_id, ops)?;
-                            staged = true;
-                        }
-                        affected += triples.len() as u64;
-                    }
-                    UpdateOp::DeleteData(patterns) => {
-                        let triples = concrete_update_triples(patterns, read)?;
-                        let ops: Vec<_> = triples
-                            .iter()
-                            .map(|t| WriteOperation::DeleteTriple(t.clone()))
-                            .collect();
-                        if !ops.is_empty() {
-                            write.apply_write_batch(txn_id, ops)?;
-                            staged = true;
-                        }
-                        affected += triples.len() as u64;
-                    }
-                    UpdateOp::DeleteInsert {
-                        graph,
-                        delete,
-                        insert,
-                        where_pattern,
-                    } => {
-                        let scoped = graph.as_ref().map(|g| GraphScopedRead::new(read, write, g));
-                        let op_read: &dyn QueryReadService = scoped
-                            .as_ref()
-                            .map(|s| s as &dyn QueryReadService)
-                            .unwrap_or(read);
-                        let op_ctx = ExecCtx {
-                            read: op_read,
-                            txn_id: Some(txn_id),
-                            token: &token,
-                            base: None,
-                            bnode: RefCell::new(BnodeState::default()),
-                            uuid: RefCell::new(uuid_seed()),
-                        };
-                        let solutions = eval_algebra(where_pattern, &op_ctx)?;
-                        let mut ops = Vec::new();
-                        let mut seen = HashSet::new();
-                        for sol in &solutions {
-                            for t in materialize_update_triples(delete, sol, op_read)? {
-                                let key = match graph {
-                                    Some(_) => format!("g|{}", triple_key(&t)),
-                                    None => triple_key(&t),
-                                };
-                                if seen.insert(key) {
-                                    ops.push(match graph {
-                                        Some(g) => WriteOperation::DeleteQuad(
-                                            Quad::in_named_graph(t, g.clone()),
-                                        ),
-                                        None => WriteOperation::DeleteTriple(t),
-                                    });
-                                }
+    let result = (|| -> Result<(), OntolithError> {
+        for op in &plan.update_ops {
+            match op {
+                UpdateOp::InsertData(patterns) => {
+                    let mut blanks = HashMap::new();
+                    let triples = concrete_update_patterns(patterns, read, &mut blanks)?;
+                    let ops: Vec<_> = triples
+                        .iter()
+                        .map(|(g, t)| match g {
+                            Some(g) => {
+                                WriteOperation::PutQuad(Quad::in_named_graph(t.clone(), g.clone()))
                             }
-                            for t in materialize_update_triples(insert, sol, op_read)? {
-                                ops.push(match graph {
-                                    Some(g) => {
-                                        WriteOperation::PutQuad(Quad::in_named_graph(t, g.clone()))
-                                    }
-                                    None => WriteOperation::PutTriple(t),
+                            None => WriteOperation::PutTriple(t.clone()),
+                        })
+                        .collect();
+                    if !ops.is_empty() {
+                        write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
+                    }
+                    affected += triples.len() as u64;
+                }
+                UpdateOp::DeleteData(patterns) => {
+                    let triples = concrete_update_patterns(patterns, read, &mut HashMap::new())?;
+                    let ops: Vec<_> = triples
+                        .iter()
+                        .map(|(g, t)| match g {
+                            Some(g) => WriteOperation::DeleteQuad(Quad::in_named_graph(
+                                t.clone(),
+                                g.clone(),
+                            )),
+                            None => WriteOperation::DeleteTriple(t.clone()),
+                        })
+                        .collect();
+                    if !ops.is_empty() {
+                        write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
+                    }
+                    affected += triples.len() as u64;
+                }
+                UpdateOp::DeleteInsert {
+                    graph,
+                    using,
+                    using_named,
+                    delete,
+                    insert,
+                    where_pattern,
+                } => {
+                    let dataset = dataset_read(read, graph.as_ref(), using, using_named, txn_id);
+                    let op_read = dataset.as_read();
+                    let op_ctx = ExecCtx {
+                        read: op_read,
+                        txn_id: Some(txn_id),
+                        token: &token,
+                        base: None,
+                        bnode: RefCell::new(BnodeState::default()),
+                        uuid: RefCell::new(uuid_seed()),
+                    };
+                    let solutions = eval_algebra(where_pattern, &op_ctx)?;
+                    let mut ops = Vec::new();
+                    let mut seen = HashSet::new();
+                    let mut blanks = HashMap::new();
+                    for sol in &solutions {
+                        let mut del_mode = BlankMode::Variable;
+                        for (pat_graph, t) in
+                            materialize_update_patterns(delete, sol, op_read, &mut del_mode)?
+                        {
+                            let eff = pat_graph.as_ref().or(graph.as_ref());
+                            let key = match eff {
+                                Some(g) => format!("g|{}|{}", g.as_str(), triple_key(&t)),
+                                None => triple_key(&t),
+                            };
+                            if seen.insert(key) {
+                                ops.push(match eff {
+                                    Some(g) => WriteOperation::DeleteQuad(Quad::in_named_graph(
+                                        t,
+                                        g.clone(),
+                                    )),
+                                    None => WriteOperation::DeleteTriple(t),
                                 });
                             }
                         }
-                        if !ops.is_empty() {
-                            affected += ops.len() as u64;
-                            write.apply_write_batch(txn_id, ops)?;
-                            staged = true;
+                        let mut ins_mode = BlankMode::Fresh(&mut blanks);
+                        for (pat_graph, t) in
+                            materialize_update_patterns(insert, sol, op_read, &mut ins_mode)?
+                        {
+                            let eff = pat_graph.as_ref().or(graph.as_ref());
+                            ops.push(match eff {
+                                Some(g) => {
+                                    WriteOperation::PutQuad(Quad::in_named_graph(t, g.clone()))
+                                }
+                                None => WriteOperation::PutTriple(t),
+                            });
                         }
                     }
-                    UpdateOp::DeleteWhere { graph, patterns } => {
-                        let scoped = graph.as_ref().map(|g| GraphScopedRead::new(read, write, g));
-                        let op_read: &dyn QueryReadService = scoped
-                            .as_ref()
-                            .map(|s| s as &dyn QueryReadService)
-                            .unwrap_or(read);
-                        let op_ctx = ExecCtx {
-                            read: op_read,
-                            txn_id: Some(txn_id),
-                            token: &token,
-                            base: None,
-                            bnode: RefCell::new(BnodeState::default()),
-                            uuid: RefCell::new(uuid_seed()),
-                        };
-                        let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &op_ctx)?;
-                        let mut ops = Vec::new();
-                        let mut seen = HashSet::new();
-                        for sol in &solutions {
-                            for t in materialize_update_triples(patterns, sol, op_read)? {
-                                let key = match graph {
-                                    Some(_) => format!("g|{}", triple_key(&t)),
-                                    None => triple_key(&t),
-                                };
-                                if seen.insert(key) {
-                                    ops.push(match graph {
-                                        Some(g) => WriteOperation::DeleteQuad(
-                                            Quad::in_named_graph(t, g.clone()),
-                                        ),
-                                        None => WriteOperation::DeleteTriple(t),
-                                    });
-                                }
-                            }
-                        }
-                        if !ops.is_empty() {
-                            affected += ops.len() as u64;
-                            write.apply_write_batch(txn_id, ops)?;
-                            staged = true;
-                        }
+                    if !ops.is_empty() {
+                        affected += ops.len() as u64;
+                        write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
                     }
-                    UpdateOp::Clear { target, .. } | UpdateOp::Drop { target, .. } => {
-                        let mut ops = Vec::new();
-                        match target {
-                            GraphTarget::Default => {
-                                for t in write.default_graph_triples(Some(txn_id)) {
-                                    ops.push(WriteOperation::DeleteTriple(t));
-                                }
-                            }
-                            GraphTarget::Graph(g) => {
-                                for q in write.quads_in_graph(g, Some(txn_id)) {
-                                    ops.push(WriteOperation::DeleteQuad(q));
-                                }
-                            }
-                            GraphTarget::Named => {
-                                for q in write.named_graph_quads() {
-                                    ops.push(WriteOperation::DeleteQuad(q));
-                                }
-                            }
-                            GraphTarget::All => {
-                                for t in write.default_graph_triples(Some(txn_id)) {
-                                    ops.push(WriteOperation::DeleteTriple(t));
-                                }
-                                for q in write.named_graph_quads() {
-                                    ops.push(WriteOperation::DeleteQuad(q));
-                                }
-                            }
-                        }
-                        if !ops.is_empty() {
-                            affected += ops.len() as u64;
-                            write.apply_write_batch(txn_id, ops)?;
-                            staged = true;
-                        }
-                    }
-                    UpdateOp::Load { source, into, .. } => {
-                        let quads = write.quads_in_graph(source, Some(txn_id));
-                        let mut ops = Vec::new();
-                        match into {
-                            Some(g) => {
-                                for q in quads {
-                                    ops.push(WriteOperation::PutQuad(Quad::in_named_graph(
-                                        q.triple,
+                }
+                UpdateOp::DeleteWhere {
+                    graph,
+                    using,
+                    using_named,
+                    patterns,
+                } => {
+                    let dataset = dataset_read(read, graph.as_ref(), using, using_named, txn_id);
+                    let op_read = dataset.as_read();
+                    let op_ctx = ExecCtx {
+                        read: op_read,
+                        txn_id: Some(txn_id),
+                        token: &token,
+                        base: None,
+                        bnode: RefCell::new(BnodeState::default()),
+                        uuid: RefCell::new(uuid_seed()),
+                    };
+                    let where_algebra = update_patterns_algebra(patterns);
+                    let solutions = eval_algebra(&where_algebra, &op_ctx)?;
+                    let mut ops = Vec::new();
+                    let mut seen = HashSet::new();
+                    for sol in &solutions {
+                        let mut del_mode = BlankMode::Variable;
+                        for (pat_graph, t) in
+                            materialize_update_patterns(patterns, sol, op_read, &mut del_mode)?
+                        {
+                            let eff = pat_graph.as_ref().or(graph.as_ref());
+                            let key = match eff {
+                                Some(g) => format!("g|{}|{}", g.as_str(), triple_key(&t)),
+                                None => triple_key(&t),
+                            };
+                            if seen.insert(key) {
+                                ops.push(match eff {
+                                    Some(g) => WriteOperation::DeleteQuad(Quad::in_named_graph(
+                                        t,
                                         g.clone(),
-                                    )));
-                                }
+                                    )),
+                                    None => WriteOperation::DeleteTriple(t),
+                                });
                             }
-                            None => {
-                                for q in quads {
-                                    ops.push(WriteOperation::PutTriple(q.triple));
-                                }
+                        }
+                    }
+                    if !ops.is_empty() {
+                        affected += ops.len() as u64;
+                        write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
+                    }
+                }
+                UpdateOp::Add { from, to, .. }
+                | UpdateOp::Copy { from, to, .. }
+                | UpdateOp::Move { from, to, .. } => {
+                    let is_copy = matches!(op, UpdateOp::Copy { .. });
+                    let is_move = matches!(op, UpdateOp::Move { .. });
+                    // Self-directed graph-management operations are no-ops.
+                    if from != to {
+                        let source: Vec<Triple> = match from {
+                            GraphRef::Default => write.default_graph_triples(Some(txn_id)),
+                            GraphRef::Graph(g) => write
+                                .quads_in_graph(g, Some(txn_id))
+                                .into_iter()
+                                .map(|q| q.triple)
+                                .collect(),
+                        };
+                        let mut ops = Vec::new();
+                        // COPY and MOVE replace the destination graph; ADD
+                        // unions into it.
+                        if is_copy || is_move {
+                            ops.extend(destination_deletes(to, write, txn_id));
+                        }
+                        for t in &source {
+                            match to {
+                                GraphRef::Default => ops.push(WriteOperation::PutTriple(t.clone())),
+                                GraphRef::Graph(g) => ops.push(WriteOperation::PutQuad(
+                                    Quad::in_named_graph(t.clone(), g.clone()),
+                                )),
+                            }
+                        }
+                        if is_move {
+                            match from {
+                                GraphRef::Default => ops.extend(
+                                    write
+                                        .default_graph_triples(Some(txn_id))
+                                        .into_iter()
+                                        .map(WriteOperation::DeleteTriple),
+                                ),
+                                GraphRef::Graph(g) => ops.extend(
+                                    write
+                                        .quads_in_graph(g, Some(txn_id))
+                                        .into_iter()
+                                        .map(WriteOperation::DeleteQuad),
+                                ),
                             }
                         }
                         if !ops.is_empty() {
@@ -438,10 +460,74 @@ pub fn execute_update(
                         }
                     }
                 }
-                ctx.check()?;
+                UpdateOp::Create { .. } => {
+                    // Named graphs are created lazily on first write; an
+                    // empty graph is already represented, so CREATE is a
+                    // no-op (SILENT is irrelevant since CREATE never errors
+                    // in this model).
+                }
+                UpdateOp::Clear { target, .. } | UpdateOp::Drop { target, .. } => {
+                    let mut ops = Vec::new();
+                    match target {
+                        GraphTarget::Default => {
+                            for t in write.default_graph_triples(Some(txn_id)) {
+                                ops.push(WriteOperation::DeleteTriple(t));
+                            }
+                        }
+                        GraphTarget::Graph(g) => {
+                            for q in write.quads_in_graph(g, Some(txn_id)) {
+                                ops.push(WriteOperation::DeleteQuad(q));
+                            }
+                        }
+                        GraphTarget::Named => {
+                            for q in write.named_graph_quads() {
+                                ops.push(WriteOperation::DeleteQuad(q));
+                            }
+                        }
+                        GraphTarget::All => {
+                            for t in write.default_graph_triples(Some(txn_id)) {
+                                ops.push(WriteOperation::DeleteTriple(t));
+                            }
+                            for q in write.named_graph_quads() {
+                                ops.push(WriteOperation::DeleteQuad(q));
+                            }
+                        }
+                    }
+                    if !ops.is_empty() {
+                        affected += ops.len() as u64;
+                        write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
+                    }
+                }
+                UpdateOp::Load { source, into, .. } => {
+                    let quads = write.quads_in_graph(source, Some(txn_id));
+                    let mut ops = Vec::new();
+                    match into {
+                        Some(g) => {
+                            for q in quads {
+                                ops.push(WriteOperation::PutQuad(Quad::in_named_graph(
+                                    q.triple,
+                                    g.clone(),
+                                )));
+                            }
+                        }
+                        None => {
+                            for q in quads {
+                                ops.push(WriteOperation::PutTriple(q.triple));
+                            }
+                        }
+                    }
+                    if !ops.is_empty() {
+                        affected += ops.len() as u64;
+                        write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
+                    }
+                }
             }
-            Ok(())
-        })();
+            ctx.check()?;
+        }
+        Ok(())
+    })();
 
     let (timed_out, cancelled) = match result {
         Ok(()) => {
@@ -483,19 +569,158 @@ fn next_update_txn() -> TxnId {
     TxnId::new(0x8000_0000_0000_0000 + n as u128)
 }
 
-fn concrete_update_triples(
-    patterns: &[TriplePattern],
+/// WHERE-clause read view: `WITH <g>` scopes to one named graph; `USING <g>`*
+/// merges the listed graphs into the default graph; `USING NAMED <g>`*
+/// restricts named-graph visibility.
+enum DatasetView<'a> {
+    Base(&'a dyn QueryReadService),
+    Scoped(GraphScopedRead<'a>),
+    Merged(MergedGraphRead<'a>),
+}
+
+impl<'a> DatasetView<'a> {
+    fn as_read(&self) -> &dyn QueryReadService {
+        match self {
+            Self::Base(r) => *r,
+            Self::Scoped(s) => s,
+            Self::Merged(m) => m,
+        }
+    }
+}
+
+fn dataset_read<'a>(
+    read: &'a dyn QueryReadService,
+    graph: Option<&Iri>,
+    using: &[Iri],
+    using_named: &[Iri],
+    txn_id: TxnId,
+) -> DatasetView<'a> {
+    if !using.is_empty() || !using_named.is_empty() {
+        return DatasetView::Merged(MergedGraphRead::new(read, using, using_named, Some(txn_id)));
+    }
+    match graph {
+        Some(g) => DatasetView::Scoped(GraphScopedRead::new(read, g, Some(txn_id))),
+        None => DatasetView::Base(read),
+    }
+}
+
+/// Delete the full contents of a graph (COPY destination reset).
+fn destination_deletes(
+    to: &GraphRef,
+    write: &dyn UpdateWriteService,
+    txn_id: TxnId,
+) -> Vec<WriteOperation> {
+    match to {
+        GraphRef::Default => write
+            .default_graph_triples(Some(txn_id))
+            .into_iter()
+            .map(WriteOperation::DeleteTriple)
+            .collect(),
+        GraphRef::Graph(g) => write
+            .quads_in_graph(g, Some(txn_id))
+            .into_iter()
+            .map(WriteOperation::DeleteQuad)
+            .collect(),
+    }
+}
+
+/// Build the WHERE algebra for `DELETE WHERE { pattern }` — flat triples form a
+/// BGP, `GRAPH <g> { ... }` blocks become `Algebra::Graph` nodes.
+fn update_patterns_algebra(patterns: &[UpdatePattern]) -> Algebra {
+    let mut default_bgp = Vec::new();
+    let mut graph_ops: Vec<(Iri, Vec<TriplePattern>)> = Vec::new();
+    for p in patterns {
+        match &p.graph {
+            None => default_bgp.push(p.triple.clone()),
+            Some(g) => {
+                if let Some((_, triples)) = graph_ops.iter_mut().find(|(name, _)| name == g) {
+                    triples.push(p.triple.clone());
+                } else {
+                    graph_ops.push((g.clone(), vec![p.triple.clone()]));
+                }
+            }
+        }
+    }
+    let mut parts: Vec<Algebra> = Vec::new();
+    if !default_bgp.is_empty() {
+        parts.push(Algebra::Bgp(default_bgp));
+    }
+    for (g, triples) in graph_ops {
+        parts.push(Algebra::Graph {
+            graph: TermPattern::Iri(g),
+            inner: Box::new(Algebra::Bgp(triples)),
+        });
+    }
+    let mut alg = Algebra::Identity;
+    for part in parts {
+        alg = match alg {
+            Algebra::Identity => part,
+            other => Algebra::Join {
+                left: Box::new(other),
+                right: Box::new(part),
+            },
+        };
+    }
+    alg
+}
+
+/// Whether blank node labels in an update template resolve as variables
+/// (DELETE semantics) or mint fresh request-scoped ids (INSERT semantics).
+enum BlankMode<'a> {
+    Variable,
+    Fresh(&'a mut HashMap<String, NodeId>),
+}
+
+impl BlankMode<'_> {
+    fn fresh(&mut self, label: &str) -> NodeId {
+        match self {
+            Self::Variable => unreachable!("fresh() called in Variable mode"),
+            Self::Fresh(blanks) => *blanks.entry(label.to_owned()).or_insert_with(|| {
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                NodeId::new((1u64 << 62) + COUNTER.fetch_add(1, Ordering::Relaxed))
+            }),
+        }
+    }
+}
+
+fn concrete_update_patterns(
+    patterns: &[UpdatePattern],
     read: &dyn QueryReadService,
-) -> Result<Vec<Triple>, OntolithError> {
+    blanks: &mut HashMap<String, NodeId>,
+) -> Result<Vec<(Option<Iri>, Triple)>, OntolithError> {
+    let mut mode = BlankMode::Fresh(blanks);
     let mut out = Vec::new();
     for p in patterns {
-        let triples = materialize_update_triples(std::slice::from_ref(p), &Solution::new(), read)?;
+        let triples = materialize_update_triples(
+            std::slice::from_ref(&p.triple),
+            &Solution::new(),
+            read,
+            &mut mode,
+        )?;
         if triples.is_empty() {
             return Err(OntolithError::query(
                 "DATA block triples must be concrete (no variables)",
             ));
         }
-        out.extend(triples);
+        for t in triples {
+            out.push((p.graph.clone(), t));
+        }
+    }
+    Ok(out)
+}
+
+fn materialize_update_patterns(
+    patterns: &[UpdatePattern],
+    sol: &Solution,
+    read: &dyn QueryReadService,
+    mode: &mut BlankMode<'_>,
+) -> Result<Vec<(Option<Iri>, Triple)>, OntolithError> {
+    let mut out = Vec::new();
+    for p in patterns {
+        let triples = materialize_update_triples(std::slice::from_ref(&p.triple), sol, read, mode)?;
+        for t in triples {
+            out.push((p.graph.clone(), t));
+        }
     }
     Ok(out)
 }
@@ -504,6 +729,7 @@ fn materialize_update_triples(
     patterns: &[TriplePattern],
     sol: &Solution,
     read: &dyn QueryReadService,
+    mode: &mut BlankMode<'_>,
 ) -> Result<Vec<Triple>, OntolithError> {
     let mut out = Vec::new();
     for p in patterns {
@@ -515,9 +741,31 @@ fn materialize_update_triples(
                     i.as_str()
                 ))
             })?,
-            TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v) {
+            TermPattern::Variable(v) => match sol.get(v) {
                 Some(BoundValue::Node(n) | BoundValue::Blank(n)) => *n,
+                // A WHERE solution may bind a subject variable to an IRI (the
+                // dictionary bridge resolves IRI ↔ node); translate it back
+                // to the node id so the write targets the right triple.
+                Some(BoundValue::Iri(iri)) => read.node_for_iri(iri)?.ok_or_else(|| {
+                    OntolithError::query(format!(
+                        "cannot resolve bound subject <{}> to a node id",
+                        iri.as_str()
+                    ))
+                })?,
                 _ => continue,
+            },
+            TermPattern::Blank(v) => match mode {
+                BlankMode::Fresh(_) => mode.fresh(v),
+                BlankMode::Variable => match sol.get(v) {
+                    Some(BoundValue::Node(n) | BoundValue::Blank(n)) => *n,
+                    Some(BoundValue::Iri(iri)) => read.node_for_iri(iri)?.ok_or_else(|| {
+                        OntolithError::query(format!(
+                            "cannot resolve bound subject <{}> to a node id",
+                            iri.as_str()
+                        ))
+                    })?,
+                    _ => continue,
+                },
             },
             TermPattern::Literal(_) => {
                 return Err(OntolithError::query("literal cannot be a triple subject"));
@@ -525,9 +773,16 @@ fn materialize_update_triples(
         };
         let predicate = match &p.predicate {
             TermPattern::Iri(i) => i.clone(),
-            TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v) {
+            TermPattern::Variable(v) => match sol.get(v) {
                 Some(BoundValue::Iri(i)) => i.clone(),
                 _ => continue,
+            },
+            TermPattern::Blank(v) => match mode {
+                BlankMode::Fresh(_) => continue,
+                BlankMode::Variable => match sol.get(v) {
+                    Some(BoundValue::Iri(i)) => i.clone(),
+                    _ => continue,
+                },
             },
             _ => return Err(OntolithError::query("predicate must be an IRI")),
         };
@@ -535,11 +790,20 @@ fn materialize_update_triples(
             TermPattern::Iri(i) => Term::Iri(i.clone()),
             TermPattern::Literal(l) => Term::Literal(l.clone()),
             TermPattern::Node(n) => Term::BlankNode(*n),
-            TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v) {
+            TermPattern::Variable(v) => match sol.get(v) {
                 Some(BoundValue::Iri(i)) => Term::Iri(i.clone()),
                 Some(BoundValue::Literal(l)) => Term::Literal(l.clone()),
                 Some(BoundValue::Node(n) | BoundValue::Blank(n)) => Term::BlankNode(*n),
                 None => continue,
+            },
+            TermPattern::Blank(v) => match mode {
+                BlankMode::Fresh(_) => Term::BlankNode(mode.fresh(v)),
+                BlankMode::Variable => match sol.get(v) {
+                    Some(BoundValue::Iri(i)) => Term::Iri(i.clone()),
+                    Some(BoundValue::Literal(l)) => Term::Literal(l.clone()),
+                    Some(BoundValue::Node(n) | BoundValue::Blank(n)) => Term::BlankNode(*n),
+                    None => continue,
+                },
             },
         };
         out.push(Triple {
@@ -556,20 +820,17 @@ fn triple_key(t: &Triple) -> String {
 }
 
 /// Read view exposing one named graph's quads as the default graph, used by
-/// `WITH <g>` so the WHERE clause matches against graph `g` while IRI→NodeId
-/// dictionary lookups still delegate to the base read service.
+/// `WITH <g>` and query-side `GRAPH <g> { ... }` so the inner pattern matches
+/// against graph `g` while IRI→NodeId dictionary lookups still delegate to
+/// the base read service.
 struct GraphScopedRead<'a> {
     base: &'a dyn QueryReadService,
     triples: Vec<Triple>,
 }
 
 impl<'a> GraphScopedRead<'a> {
-    fn new(base: &'a dyn QueryReadService, write: &dyn UpdateWriteService, graph: &Iri) -> Self {
-        let triples = write
-            .quads_in_graph(graph, None)
-            .into_iter()
-            .map(|q| q.triple)
-            .collect();
+    fn new(base: &'a dyn QueryReadService, graph: &Iri, txn_id: Option<TxnId>) -> Self {
+        let triples = base.quads_in_graph(graph, txn_id);
         Self { base, triples }
     }
 }
@@ -624,6 +885,112 @@ impl QueryReadService for GraphScopedRead<'_> {
 
     fn encode_node(&self, value: &str) -> Option<NodeId> {
         self.base.encode_node(value)
+    }
+
+    fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.base.quads_in_graph(graph, txn_id)
+    }
+
+    fn named_graph_names(&self, txn_id: Option<TxnId>) -> Vec<Iri> {
+        self.base.named_graph_names(txn_id)
+    }
+}
+
+/// Dataset view for `USING <g>`* / `USING NAMED <g>`*: the merged listed
+/// graphs become the default graph; named-graph visibility is restricted to
+/// the `USING NAMED` list (or everything when absent).
+struct MergedGraphRead<'a> {
+    base: &'a dyn QueryReadService,
+    triples: Vec<Triple>,
+    named: Vec<Iri>,
+}
+
+impl<'a> MergedGraphRead<'a> {
+    fn new(
+        base: &'a dyn QueryReadService,
+        using: &[Iri],
+        using_named: &[Iri],
+        txn_id: Option<TxnId>,
+    ) -> Self {
+        let mut triples = Vec::new();
+        for g in using {
+            triples.extend(base.quads_in_graph(g, txn_id));
+        }
+        let named = if using_named.is_empty() {
+            base.named_graph_names(txn_id)
+        } else {
+            using_named.to_vec()
+        };
+        Self {
+            base,
+            triples,
+            named,
+        }
+    }
+}
+
+impl QueryReadService for MergedGraphRead<'_> {
+    fn all_triples(&self, _txn_id: Option<TxnId>) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self.triples.clone())
+    }
+
+    fn by_subject(
+        &self,
+        subject: NodeId,
+        _txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
+            .triples
+            .iter()
+            .filter(|t| t.subject == subject)
+            .cloned()
+            .collect())
+    }
+
+    fn by_predicate(
+        &self,
+        predicate: &Iri,
+        _txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
+            .triples
+            .iter()
+            .filter(|t| &t.predicate == predicate)
+            .cloned()
+            .collect())
+    }
+
+    fn by_object(
+        &self,
+        object: &Term,
+        _txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
+            .triples
+            .iter()
+            .filter(|t| &t.object == object)
+            .cloned()
+            .collect())
+    }
+
+    fn node_for_iri(&self, iri: &Iri) -> Result<Option<NodeId>, OntolithError> {
+        self.base.node_for_iri(iri)
+    }
+
+    fn encode_node(&self, value: &str) -> Option<NodeId> {
+        self.base.encode_node(value)
+    }
+
+    fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
+        if self.named.iter().any(|n| n == graph) {
+            self.base.quads_in_graph(graph, txn_id)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn named_graph_names(&self, _txn_id: Option<TxnId>) -> Vec<Iri> {
+        self.named.clone()
     }
 }
 
@@ -759,6 +1126,62 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
             path,
             object,
         } => eval_path_pattern(subject, path, object, ctx),
+        Algebra::Graph { graph, inner } => eval_graph_pattern(graph, inner, ctx),
+    }
+}
+
+/// `GRAPH (iri|?var) { pattern }` evaluation: a constant IRI scopes the inner
+/// pattern to that named graph; a variable binds to every named graph in the
+/// store (skipping rows where the variable is already bound incompatibly).
+fn eval_graph_pattern(
+    graph: &TermPattern,
+    inner: &Algebra,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Solution>, OntolithError> {
+    match graph {
+        TermPattern::Iri(iri) => {
+            let scoped = GraphScopedRead::new(ctx.read, iri, ctx.txn_id);
+            let sub_ctx = ExecCtx {
+                read: &scoped,
+                txn_id: ctx.txn_id,
+                token: ctx.token,
+                base: ctx.base,
+                bnode: RefCell::new(BnodeState::default()),
+                uuid: RefCell::new(*ctx.uuid.borrow()),
+            };
+            eval_algebra(inner, &sub_ctx)
+        }
+        TermPattern::Variable(v) => {
+            let names = ctx.read.named_graph_names(ctx.txn_id);
+            let mut out = Vec::new();
+            for name in names {
+                ctx.check()?;
+                let scoped = GraphScopedRead::new(ctx.read, &name, ctx.txn_id);
+                let sub_ctx = ExecCtx {
+                    read: &scoped,
+                    txn_id: ctx.txn_id,
+                    token: ctx.token,
+                    base: ctx.base,
+                    bnode: RefCell::new(BnodeState::default()),
+                    uuid: RefCell::new(*ctx.uuid.borrow()),
+                };
+                let rows = eval_algebra(inner, &sub_ctx)?;
+                for mut s in rows {
+                    match s.get(v) {
+                        Some(BoundValue::Iri(existing)) if existing == &name => {
+                            out.push(s);
+                        }
+                        Some(_) => {}
+                        None => {
+                            s.insert(v.clone(), BoundValue::Iri(name.clone()));
+                            out.push(s);
+                        }
+                    }
+                }
+            }
+            Ok(out)
+        }
+        _ => Err(OntolithError::query("GRAPH requires an IRI or a variable")),
     }
 }
 

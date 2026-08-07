@@ -76,6 +76,16 @@ pub trait QueryReadService: Send + Sync {
         Ok(triples)
     }
 
+    /// Named-graph triples of one graph (GRAPH patterns / WITH / USING datasets).
+    fn quads_in_graph(&self, _graph: &Iri, _txn_id: Option<TxnId>) -> Vec<Triple> {
+        Vec::new()
+    }
+
+    /// Distinct named-graph names in the store (for `GRAPH ?var { ... }`).
+    fn named_graph_names(&self, _txn_id: Option<TxnId>) -> Vec<Iri> {
+        Vec::new()
+    }
+
     /// Legacy summary helpers used by older tests / pipelines.
     fn execute_select_all(
         &self,
@@ -177,13 +187,22 @@ pub trait UpdateWriteService: Send + Sync {
     /// Default-graph triples as of `txn_id` (for CLEAR/DROP DEFAULT).
     fn default_graph_triples(&self, txn_id: Option<TxnId>) -> Vec<Triple>;
 
-    /// All named-graph quads (for CLEAR/DROP NAMED/ALL).
-    fn named_graph_quads(&self) -> Vec<Quad>;
+    /// All named-graph quads (for CLEAR/DROP NAMED/ALL), as of `txn_id`
+    /// including staged (uncommitted) writes.
+    fn named_graph_quads(&self) -> Vec<Quad> {
+        self.named_graph_quads_in_txn(None)
+    }
 
-    /// Quads of one named graph (for CLEAR/DROP GRAPH and LOAD).
-    fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Quad> {
+    /// All named-graph quads as of `txn_id`, including staged writes.
+    fn named_graph_quads_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Quad> {
         let _ = txn_id;
         self.named_graph_quads()
+    }
+
+    /// Quads of one named graph (for CLEAR/DROP GRAPH and LOAD), as of
+    /// `txn_id` including staged writes.
+    fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Quad> {
+        self.named_graph_quads_in_txn(txn_id)
             .into_iter()
             .filter(|q| q.graph_name.as_ref() == Some(graph))
             .collect()
@@ -225,6 +244,14 @@ impl UpdateWriteService for EngineUpdateWriteService {
 
     fn named_graph_quads(&self) -> Vec<Quad> {
         self.engine.named_graph_quads()
+    }
+
+    fn named_graph_quads_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Quad> {
+        self.engine.named_graph_quads_in_txn(txn_id)
+    }
+
+    fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Quad> {
+        self.engine.quads_by_graph_in_txn(Some(graph), txn_id)
     }
 }
 

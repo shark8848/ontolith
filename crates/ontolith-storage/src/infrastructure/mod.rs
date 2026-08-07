@@ -436,6 +436,46 @@ impl InMemoryStorageEngine {
         }
     }
 
+    fn apply_ops_to_quad_projection(
+        quads: &mut Vec<Quad>,
+        operations: &[WriteOperation],
+        graph_filter: Option<&Iri>,
+    ) {
+        for op in operations {
+            match op {
+                WriteOperation::PutQuad(quad) => {
+                    let graph_ok = graph_filter.is_none_or(|g| quad.graph_name.as_ref() == Some(g));
+                    if graph_ok && !quads.iter().any(|existing| existing == quad) {
+                        quads.push(quad.clone());
+                    }
+                }
+                WriteOperation::DeleteQuad(quad) => {
+                    let graph_ok = graph_filter.is_none_or(|g| quad.graph_name.as_ref() == Some(g));
+                    if graph_ok {
+                        quads.retain(|existing| existing != quad);
+                    }
+                }
+                WriteOperation::PutTriple(triple) => {
+                    if graph_filter.is_none()
+                        && !quads.iter().any(|existing| existing.triple == *triple)
+                    {
+                        quads.push(Quad::in_default_graph(triple.clone()));
+                    }
+                }
+                WriteOperation::DeleteTriple(triple) => {
+                    if graph_filter.is_none() {
+                        quads.retain(|existing| existing.triple != *triple);
+                    }
+                }
+                WriteOperation::DeleteKey(key) => {
+                    if let Some(subject_id) = key.components.first().copied() {
+                        quads.retain(|existing| existing.triple.subject != subject_id);
+                    }
+                }
+            }
+        }
+    }
+
     fn apply_committed_op(triples: &mut Vec<Triple>, quads: &mut Vec<Quad>, op: WriteOperation) {
         match op {
             WriteOperation::PutTriple(triple) => {
@@ -887,6 +927,46 @@ impl StorageEngine for InMemoryStorageEngine {
         triples
     }
 
+    fn named_graph_quads_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Quad> {
+        let guard = match self.state.read() {
+            Ok(state) => state,
+            Err(_) => return Vec::new(),
+        };
+        let mut quads = Self::latest_committed(&guard).named_graph_quads.clone();
+        if let Some(txn_id) = txn_id
+            && let Some(operations) = guard.pending_writes.get(&txn_id)
+        {
+            Self::apply_ops_to_quad_projection(&mut quads, operations, None);
+        }
+        quads
+    }
+
+    fn quads_by_graph_in_txn(&self, graph_name: Option<&Iri>, txn_id: Option<TxnId>) -> Vec<Quad> {
+        let guard = match self.state.read() {
+            Ok(state) => state,
+            Err(_) => return Vec::new(),
+        };
+        let mut quads = match graph_name {
+            Some(g) => Self::latest_committed(&guard)
+                .named_graph_quads
+                .iter()
+                .filter(|q| q.graph_name.as_ref() == Some(g))
+                .cloned()
+                .collect(),
+            None => Self::latest_committed(&guard)
+                .default_graph
+                .iter()
+                .map(|t| Quad::in_default_graph(t.clone()))
+                .collect(),
+        };
+        if let Some(txn_id) = txn_id
+            && let Some(operations) = guard.pending_writes.get(&txn_id)
+        {
+            Self::apply_ops_to_quad_projection(&mut quads, operations, graph_name);
+        }
+        quads
+    }
+
     fn quads_at_version(&self, version: u64) -> Vec<Quad> {
         self.state
             .read()
@@ -1066,6 +1146,55 @@ impl QuadRepository for InMemoryQuadRepository {
             .into_iter()
             .filter(|quad| quad.graph_name.as_ref() == Some(graph_name))
             .collect()
+    }
+
+    fn all_at_version(&self, version: u64) -> Vec<Quad> {
+        self.engine.quads_at_version(version)
+    }
+
+    fn by_graph_name_at_version(&self, version: u64, graph_name: &Iri) -> Vec<Quad> {
+        self.engine
+            .quads_at_version(version)
+            .into_iter()
+            .filter(|quad| quad.graph_name.as_ref() == Some(graph_name))
+            .collect()
+    }
+}
+
+/// [`QuadRepository`] façade over any [`StorageEngine`] (memory or RocksDB).
+pub struct EngineQuadRepository {
+    engine: Arc<dyn StorageEngine>,
+}
+
+impl EngineQuadRepository {
+    pub fn new(engine: Arc<dyn StorageEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+impl QuadRepository for EngineQuadRepository {
+    fn insert(&self, txn_id: TxnId, quad: Quad) -> Result<(), OntolithError> {
+        let batch = WriteBatch {
+            txn_id,
+            operations: vec![WriteOperation::PutQuad(quad)],
+        };
+        self.engine.apply_write_batch(&batch)
+    }
+
+    fn all(&self) -> Vec<Quad> {
+        self.engine.named_graph_quads()
+    }
+
+    fn by_graph_name(&self, graph_name: &Iri) -> Vec<Quad> {
+        self.engine.quads_by_graph_in_txn(Some(graph_name), None)
+    }
+
+    fn by_graph_name_in_txn(&self, graph_name: &Iri, txn_id: Option<TxnId>) -> Vec<Quad> {
+        self.engine.quads_by_graph_in_txn(Some(graph_name), txn_id)
+    }
+
+    fn all_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Quad> {
+        self.engine.named_graph_quads_in_txn(txn_id)
     }
 
     fn all_at_version(&self, version: u64) -> Vec<Quad> {
