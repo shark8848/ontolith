@@ -793,7 +793,7 @@ fn materialize_update_triples(
             TermPattern::Variable(v) => match sol.get(v) {
                 Some(BoundValue::Iri(i)) => Term::Iri(i.clone()),
                 Some(BoundValue::Literal(l)) => Term::Literal(l.clone()),
-                Some(BoundValue::Node(n) | BoundValue::Blank(n)) => Term::BlankNode(*n),
+                Some(BoundValue::Node(n) | BoundValue::Blank(n)) => node_id_term(*n, read),
                 None => continue,
             },
             TermPattern::Blank(v) => match mode {
@@ -801,7 +801,7 @@ fn materialize_update_triples(
                 BlankMode::Variable => match sol.get(v) {
                     Some(BoundValue::Iri(i)) => Term::Iri(i.clone()),
                     Some(BoundValue::Literal(l)) => Term::Literal(l.clone()),
-                    Some(BoundValue::Node(n) | BoundValue::Blank(n)) => Term::BlankNode(*n),
+                    Some(BoundValue::Node(n) | BoundValue::Blank(n)) => node_id_term(*n, read),
                     None => continue,
                 },
             },
@@ -885,6 +885,10 @@ impl QueryReadService for GraphScopedRead<'_> {
 
     fn encode_node(&self, value: &str) -> Option<NodeId> {
         self.base.encode_node(value)
+    }
+
+    fn decode_node(&self, node_id: NodeId) -> Option<String> {
+        self.base.decode_node(node_id)
     }
 
     fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
@@ -979,6 +983,10 @@ impl QueryReadService for MergedGraphRead<'_> {
 
     fn encode_node(&self, value: &str) -> Option<NodeId> {
         self.base.encode_node(value)
+    }
+
+    fn decode_node(&self, node_id: NodeId) -> Option<String> {
+        self.base.decode_node(node_id)
     }
 
     fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
@@ -1941,7 +1949,7 @@ fn bind_pattern(
     match pattern {
         TermPattern::Variable(v) | TermPattern::Blank(v) => {
             if let Some(existing) = sol.get(v) {
-                if existing == &value {
+                if existing == &value || node_values_equivalent(existing, &value) {
                     return Ok(Some(()));
                 }
 
@@ -2100,6 +2108,9 @@ fn bound_values_compatible(
     if left == right {
         return Ok(true);
     }
+    if node_values_equivalent(left, right) {
+        return Ok(true);
+    }
 
     match (left, right) {
         (
@@ -2108,6 +2119,19 @@ fn bound_values_compatible(
         ) => Ok(a == b),
         _ => iri_node_compatible(left, right, ctx),
     }
+}
+
+/// `Node` and `Blank` both denote blank nodes by dictionary id: the same
+/// blank node is bound as `Node(id)` in subject position and `Blank(id)` in
+/// object position, so the two must compare equal by id.
+fn node_values_equivalent(left: &BoundValue, right: &BoundValue) -> bool {
+    matches!(
+        (left, right),
+        (
+            BoundValue::Node(a) | BoundValue::Blank(a),
+            BoundValue::Node(b) | BoundValue::Blank(b)
+        ) if a == b
+    )
 }
 
 fn eval_expr_bool(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Option<bool> {
@@ -3602,11 +3626,16 @@ fn materialize_construct(
 ) -> Vec<Triple> {
     let mut out = Vec::new();
     for sol in solutions {
+        // Blank nodes in a CONSTRUCT template are instantiated per solution:
+        // labels already bound by the pattern (CONSTRUCT WHERE) keep their
+        // matched node; unbound template labels mint a fresh node shared
+        // across every triple of this solution.
+        let mut template_blanks: HashMap<String, NodeId> = HashMap::new();
         for pattern in template {
             if let (Some(s), Some(p), Some(o)) = (
-                instantiate_node(&pattern.subject, sol, ctx),
+                instantiate_node(&pattern.subject, sol, ctx, &mut template_blanks),
                 instantiate_iri(&pattern.predicate, sol),
-                instantiate_term(&pattern.object, sol),
+                instantiate_term(&pattern.object, sol, ctx, &mut template_blanks),
             ) {
                 out.push(Triple::new(s, p, o));
             }
@@ -3615,14 +3644,30 @@ fn materialize_construct(
     out
 }
 
-fn instantiate_node(p: &TermPattern, sol: &Solution, ctx: &ExecCtx<'_>) -> Option<NodeId> {
+fn instantiate_node(
+    p: &TermPattern,
+    sol: &Solution,
+    ctx: &ExecCtx<'_>,
+    template_blanks: &mut HashMap<String, NodeId>,
+) -> Option<NodeId> {
     match p {
         TermPattern::Node(n) => Some(*n),
         TermPattern::Iri(i) => ctx.read.node_for_iri(i).ok().flatten(),
-        TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v)? {
+        TermPattern::Variable(v) => match sol.get(v)? {
             BoundValue::Node(n) | BoundValue::Blank(n) => Some(*n),
             _ => None,
         },
+        TermPattern::Blank(v) => {
+            if let Some(BoundValue::Node(n) | BoundValue::Blank(n)) = sol.get(v) {
+                Some(*n)
+            } else {
+                Some(
+                    *template_blanks
+                        .entry(v.clone())
+                        .or_insert_with(|| ctx.bnode.borrow_mut().fresh()),
+                )
+            }
+        }
         _ => None,
     }
 }
@@ -3638,16 +3683,45 @@ fn instantiate_iri(p: &TermPattern, sol: &Solution) -> Option<Iri> {
     }
 }
 
-fn instantiate_term(p: &TermPattern, sol: &Solution) -> Option<Term> {
+fn instantiate_term(
+    p: &TermPattern,
+    sol: &Solution,
+    ctx: &ExecCtx<'_>,
+    template_blanks: &mut HashMap<String, NodeId>,
+) -> Option<Term> {
     match p {
         TermPattern::Iri(i) => Some(Term::Iri(i.clone())),
         TermPattern::Literal(l) => Some(Term::Literal(l.clone())),
         TermPattern::Node(n) => Some(Term::BlankNode(*n)),
-        TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v)? {
+        TermPattern::Variable(v) => match sol.get(v)? {
             BoundValue::Iri(i) => Some(Term::Iri(i.clone())),
             BoundValue::Literal(l) => Some(Term::Literal(l.clone())),
-            BoundValue::Node(n) | BoundValue::Blank(n) => Some(Term::BlankNode(*n)),
+            BoundValue::Node(n) | BoundValue::Blank(n) => Some(node_id_term(*n, ctx.read)),
         },
+        TermPattern::Blank(v) => {
+            if let Some(bv) = sol.get(v) {
+                match bv {
+                    BoundValue::Iri(i) => Some(Term::Iri(i.clone())),
+                    BoundValue::Literal(l) => Some(Term::Literal(l.clone())),
+                    BoundValue::Node(n) | BoundValue::Blank(n) => Some(node_id_term(*n, ctx.read)),
+                }
+            } else {
+                Some(Term::BlankNode(
+                    *template_blanks
+                        .entry(v.clone())
+                        .or_insert_with(|| ctx.bnode.borrow_mut().fresh()),
+                ))
+            }
+        }
+    }
+}
+
+/// Recover the stored term for a node id: IRI when the dictionary maps the id
+/// to an IRI string, blank node otherwise (or when no bridge is available).
+fn node_id_term(node: NodeId, read: &dyn QueryReadService) -> Term {
+    match read.decode_node(node) {
+        Some(value) if !value.starts_with("_:") => Term::Iri(Iri::new(value)),
+        _ => Term::BlankNode(node),
     }
 }
 

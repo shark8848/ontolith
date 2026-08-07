@@ -142,6 +142,12 @@ impl QueryReadService for InMemoryQueryReadService {
         self.dictionary.as_ref().map(|dict| dict.encode_node(value))
     }
 
+    fn decode_node(&self, node_id: NodeId) -> Option<String> {
+        self.dictionary
+            .as_ref()
+            .and_then(|dict| dict.decode_node(node_id))
+    }
+
     fn matching(
         &self,
         subject: Option<NodeId>,

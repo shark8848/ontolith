@@ -99,7 +99,7 @@ clear	CLEAR ALL	PASS
 clear	CLEAR DEFAULT	PASS	
 clear	CLEAR GRAPH	PASS	
 clear	CLEAR NAMED	PASS	
-construct	CONSTRUCT list	FAIL	parse-error
+construct	CONSTRUCT list	PASS	
 construct	constructwhere01 - CONSTRUCT WHERE	PASS	
 construct	constructwhere02 - CONSTRUCT WHERE	PASS	
 construct	constructwhere03 - CONSTRUCT WHERE	PASS	
@@ -140,7 +140,7 @@ delete-data	Simple DELETE DATA 1	PASS
 delete-data	Simple DELETE DATA 2	PASS	
 delete-data	Simple DELETE DATA 3	PASS	
 delete-data	Simple DELETE DATA 4	PASS	
-delete-insert	DELETE INSERT 1	FAIL	semantic
+delete-insert	DELETE INSERT 1	PASS	
 delete-insert	DELETE INSERT 1b	PASS	
 delete-insert	DELETE INSERT 1c	PASS	
 delete-insert	DELETE INSERT 2	PASS	
@@ -149,7 +149,7 @@ delete-insert	DELETE INSERT 3b	PASS
 delete-insert	DELETE INSERT 4	PASS	
 delete-insert	DELETE INSERT 4b	PASS	
 delete-insert	DELETE INSERT 5	PASS	
-delete-insert	DELETE INSERT 5b	FAIL	semantic
+delete-insert	DELETE INSERT 5b	PASS	
 delete-insert	DELETE INSERT 6	PASS	
 delete-insert	DELETE INSERT 6b	PASS	
 delete-insert	DELETE INSERT 7	PASS	
@@ -326,9 +326,9 @@ subquery	sq07 - Subquery with from 	FAIL	semantic
 subquery	sq08 - Subquery with aggregate	FAIL	data-format
 subquery	sq09 - Nested Subqueries	FAIL	data-format
 subquery	sq10 - Subquery with exists	FAIL	data-format
-subquery	sq11 - Subquery limit per resource	FAIL	parse-error
-subquery	sq12 - Subquery in CONSTRUCT with built-ins	FAIL	parse-error
-subquery	sq13 - Subqueries don't inject bindings	FAIL	parse-error
+subquery	sq11 - Subquery limit per resource	PASS	
+subquery	sq12 - Subquery in CONSTRUCT with built-ins	PASS	
+subquery	sq13 - Subqueries don't inject bindings	PASS	
 subquery	sq14 - limit by resource	PASS	
 syntax-query	Invalid multi-pass codepoint escaping (\U then \u)	PASS	
 syntax-query	Invalid multi-pass codepoint escaping (\u then \U)	PASS	
@@ -369,7 +369,7 @@ syntax-query	syn-pname-06	PASS
 syntax-query	syn-pname-07	PASS	
 syntax-query	syn-pname-08	PASS	
 syntax-query	syn-pname-09	FAIL	parse-error
-syntax-query	syn-pp-in-collection	FAIL	parse-error
+syntax-query	syn-pp-in-collection	PASS	
 syntax-query	syntax-BINDscope1.rq	PASS	
 syntax-query	syntax-BINDscope2.rq	PASS	
 syntax-query	syntax-BINDscope3.rq	PASS	
@@ -378,9 +378,9 @@ syntax-query	syntax-BINDscope5.rq	PASS
 syntax-query	syntax-BINDscope6.rq	PASS	
 syntax-query	syntax-BINDscope7.rq	PASS	
 syntax-query	syntax-BINDscope8.rq	PASS	
-syntax-query	syntax-SELECTscope1.rq	FAIL	parse-error
+syntax-query	syntax-SELECTscope1.rq	PASS	
 syntax-query	syntax-SELECTscope2	PASS	
-syntax-query	syntax-SELECTscope3.rq	FAIL	parse-error
+syntax-query	syntax-SELECTscope3.rq	PASS	
 syntax-query	syntax-aggregate-01.rq	PASS	
 syntax-query	syntax-aggregate-02.rq	PASS	
 syntax-query	syntax-aggregate-03.rq	PASS	
@@ -414,7 +414,7 @@ syntax-query	syntax-not-exists-03.rq	PASS
 syntax-query	syntax-oneof-01.rq	PASS	
 syntax-query	syntax-oneof-02.rq	PASS	
 syntax-query	syntax-oneof-03.rq	PASS	
-syntax-query	syntax-propertyPaths-01.rq	FAIL	parse-error
+syntax-query	syntax-propertyPaths-01.rq	PASS	
 syntax-query	syntax-select-expr-01.rq	PASS	
 syntax-query	syntax-select-expr-02.rq	PASS	
 syntax-query	syntax-select-expr-03.rq	PASS	

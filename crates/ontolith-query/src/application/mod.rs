@@ -47,6 +47,12 @@ pub trait QueryReadService: Send + Sync {
         None
     }
 
+    /// Dictionary-backed NodeId → value decode (IRI strings or `_:label`
+    /// blank labels). Returns `None` when no dictionary bridge is available.
+    fn decode_node(&self, _node_id: NodeId) -> Option<String> {
+        None
+    }
+
     /// Multi-bound pattern probe (L2 `matching_in_txn`); default filters single-index results.
     fn matching(
         &self,

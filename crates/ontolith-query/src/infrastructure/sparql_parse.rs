@@ -32,6 +32,13 @@ struct SparqlParser<'a> {
     base: Option<String>,
     logical: Vec<String>,
     blank_counter: u64,
+    /// Expansion triples/patterns produced by blank node property lists and
+    /// RDF collections, pending collection into the enclosing BGP/template.
+    pending_group: Vec<Algebra>,
+    /// Aliases bound by the enclosing SELECT expression/aggregate projection.
+    /// A subquery must not project a variable with one of these names
+    /// (SPARQL 1.1 §18.2.2 variable scope).
+    outer_select_expr_vars: Vec<String>,
 }
 
 impl<'a> SparqlParser<'a> {
@@ -55,6 +62,8 @@ impl<'a> SparqlParser<'a> {
             base: None,
             logical: vec!["normalize_query".into()],
             blank_counter: 0,
+            pending_group: Vec::new(),
+            outer_select_expr_vars: Vec::new(),
         }
     }
 
@@ -252,6 +261,15 @@ impl<'a> SparqlParser<'a> {
             let _ = self.eat_keyword("WHERE");
         }
         self.skip();
+
+        // Projected expression/aggregate aliases are in scope for the WHERE
+        // clause; a subquery must not project a variable with one of these
+        // names (SPARQL 1.1 §18.2.2).
+        self.outer_select_expr_vars = projection_exprs
+            .iter()
+            .map(|e| e.alias.clone())
+            .chain(aggregates.iter().map(|a| a.output.clone()))
+            .collect();
 
         let mut body = if construct_where_consumed {
             Algebra::Bgp(construct_template.clone())
@@ -517,6 +535,7 @@ impl<'a> SparqlParser<'a> {
         while self.peek_char() != Some('}') && !self.eof() {
             if let Some(p) = self.try_parse_triple_pattern()? {
                 patterns.extend(self.parse_triple_semicolon_chain(p)?);
+                patterns.extend(self.drain_template_patterns()?);
             } else {
                 break;
             }
@@ -576,6 +595,12 @@ impl<'a> SparqlParser<'a> {
                     {
                         return Err(self.err("blank nodes are not allowed in DELETE templates"));
                     }
+                    patterns.push(UpdatePattern {
+                        graph: None,
+                        triple,
+                    });
+                }
+                for triple in self.drain_template_patterns()? {
                     patterns.push(UpdatePattern {
                         graph: None,
                         triple,
@@ -1180,6 +1205,23 @@ impl<'a> SparqlParser<'a> {
                 }
                 self.logical.push(format!("bgp:{}", bgp.len()));
                 acc = join(acc, Algebra::Bgp(bgp));
+                for item in self.drain_pending() {
+                    acc = join(acc, item);
+                }
+            } else if self.peek_char() == Some('[') {
+                // Blank node property list as a standalone pattern
+                // (`[ :p ?o ]`); expansion is queued by the parser. Runs only
+                // after triple/path forms fail, so `[ :p ?o ] ...` (list as a
+                // triple subject) is still parsed as a triple.
+                let _term = self.parse_bnode_property_list()?;
+                for item in self.drain_pending() {
+                    acc = join(acc, item);
+                }
+                self.logical.push("bnode_property_list".into());
+                self.skip();
+                if self.peek_char() == Some('.') {
+                    self.bump();
+                }
             } else {
                 break;
             }
@@ -1382,10 +1424,23 @@ impl<'a> SparqlParser<'a> {
         self.expect_keyword("SELECT")?;
         self.skip();
 
+        let saved_outer_vars = std::mem::take(&mut self.outer_select_expr_vars);
+        let result = self.parse_subquery_select_inner(saved_outer_vars.clone());
+        self.outer_select_expr_vars = saved_outer_vars;
+        result
+    }
+
+    fn parse_subquery_select_inner(
+        &mut self,
+        outer_expr_vars: Vec<String>,
+    ) -> Result<Algebra, OntolithError> {
+        self.skip();
+
         let mut distinct = false;
         let mut select_vars: Vec<String> = Vec::new();
         let mut plain_vars: Vec<String> = Vec::new();
         let mut aggregates: Vec<AggregateSpec> = Vec::new();
+        let mut projection_exprs: Vec<ProjectionExpr> = Vec::new();
 
         if self.eat_keyword("DISTINCT") {
             distinct = true;
@@ -1403,17 +1458,63 @@ impl<'a> SparqlParser<'a> {
                     select_vars.push(v.clone());
                     plain_vars.push(v);
                 } else if self.peek_char() == Some('(') {
-                    let spec = self.parse_aggregate_spec()?;
-                    select_vars.push(spec.output.clone());
-                    aggregates.push(spec);
+                    // Distinguish aggregate specs from generic projection
+                    // expressions `(expr AS ?alias)`.
+                    let save = self.checkpoint();
+                    self.bump(); // '('
+                    self.skip();
+                    let is_aggregate = self.looking_at_keyword("COUNT")
+                        || self.looking_at_keyword("SUM")
+                        || self.looking_at_keyword("AVG")
+                        || self.looking_at_keyword("MIN")
+                        || self.looking_at_keyword("MAX")
+                        || self.looking_at_keyword("GROUP_CONCAT")
+                        || self.looking_at_keyword("SAMPLE");
+                    self.restore(save);
+                    if is_aggregate {
+                        let spec = self.parse_aggregate_spec()?;
+                        select_vars.push(spec.output.clone());
+                        aggregates.push(spec);
+                    } else {
+                        self.bump(); // '('
+                        self.skip();
+                        let expression = self.parse_expression()?;
+                        self.skip();
+                        self.expect_keyword("AS")?;
+                        self.skip();
+                        let alias = self.parse_var_name()?;
+                        self.skip();
+                        self.expect_char(')')?;
+                        select_vars.push(alias.clone());
+                        projection_exprs.push(ProjectionExpr {
+                            expression,
+                            alias,
+                        });
+                    }
                 } else {
                     break;
                 }
             }
-            if select_vars.is_empty() && aggregates.is_empty() {
+            if select_vars.is_empty()
+                && aggregates.is_empty()
+                && projection_exprs.is_empty()
+            {
                 return Err(self.err("subquery SELECT requires '*' or variables"));
             }
         }
+
+        for v in &select_vars {
+            if outer_expr_vars.iter().any(|outer| outer == v) {
+                return Err(self.err(format!(
+                    "subquery projects ?{v}, which is bound by the enclosing SELECT expression"
+                )));
+            }
+        }
+        self.outer_select_expr_vars = projection_exprs
+            .iter()
+            .map(|e| e.alias.clone())
+            .chain(aggregates.iter().map(|a| a.output.clone()))
+            .collect();
 
         let _ = self.eat_keyword("WHERE");
         self.skip();
@@ -1484,6 +1585,13 @@ impl<'a> SparqlParser<'a> {
                 groups,
                 aggregates,
                 having,
+                input: Box::new(algebra),
+            };
+        }
+        for expr in &projection_exprs {
+            algebra = Algebra::Extend {
+                variable: expr.alias.clone(),
+                expression: expr.expression.clone(),
                 input: Box::new(algebra),
             };
         }
@@ -1704,6 +1812,171 @@ impl<'a> SparqlParser<'a> {
         })
     }
 
+    fn fresh_blank(&mut self) -> String {
+        self.blank_counter += 1;
+        format!("_gen_{}", self.blank_counter)
+    }
+
+    fn drain_pending(&mut self) -> Vec<Algebra> {
+        std::mem::take(&mut self.pending_group)
+    }
+
+    /// Drain pending expansions from templates: only plain triples are legal
+    /// in CONSTRUCT/update templates (property paths are a query-side form).
+    fn drain_template_patterns(&mut self) -> Result<Vec<TriplePattern>, OntolithError> {
+        let mut out = Vec::new();
+        for item in self.drain_pending() {
+            match item {
+                Algebra::Bgp(patterns) => out.extend(patterns),
+                _ => return Err(self.err("property paths are not allowed in templates")),
+            }
+        }
+        Ok(out)
+    }
+
+    /// `[ p o ; p2 o2 ]` — anonymous blank node with a property list. Property
+    /// predicates may be paths (`[ :p|:q ?x ]`). Returns the blank term and
+    /// queues the expansion (triples or path patterns) into `pending_group`.
+    fn parse_bnode_property_list(&mut self) -> Result<TermPattern, OntolithError> {
+        self.expect_char('[')?;
+        self.skip();
+        let label = self.fresh_blank();
+        if self.peek_char() == Some(']') {
+            self.bump();
+            return Ok(TermPattern::Blank(label));
+        }
+        loop {
+            self.skip();
+            let (verb, path) = self.parse_verb_or_path()?;
+            self.skip();
+            let object = self.parse_var_or_term(false)?;
+            let subject = TermPattern::Blank(label.clone());
+            if let Some(path) = path {
+                self.pending_group.push(Algebra::Path {
+                    subject,
+                    path,
+                    object,
+                });
+            } else {
+                self.pending_group.push(Algebra::Bgp(vec![TriplePattern {
+                    subject,
+                    predicate: verb,
+                    object,
+                }]));
+            }
+            self.skip();
+            if self.eat_operator(";") {
+                continue;
+            }
+            break;
+        }
+        self.skip();
+        self.expect_char(']')?;
+        Ok(TermPattern::Blank(label))
+    }
+
+    /// `( item ... )` — RDF collection; items may be terms, blank node
+    /// property lists or nested collections. Returns the head term and queues
+    /// the rdf:first/rdf:rest expansion into `pending_group`.
+    fn parse_collection(&mut self) -> Result<TermPattern, OntolithError> {
+        self.expect_char('(')?;
+        self.skip();
+        let mut items = Vec::new();
+        while self.peek_char() != Some(')') && !self.eof() {
+            items.push(self.parse_var_or_term(false)?);
+            self.skip();
+        }
+        self.expect_char(')')?;
+        if items.is_empty() {
+            return Ok(TermPattern::Iri(Iri::new(
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil",
+            )));
+        }
+        let rdf_first = TermPattern::Iri(Iri::new(
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
+        ));
+        let rdf_rest = TermPattern::Iri(Iri::new(
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+        ));
+        let rdf_nil = TermPattern::Iri(Iri::new(
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil",
+        ));
+        let head = TermPattern::Blank(self.fresh_blank());
+        let mut prev = head.clone();
+        for (i, item) in items.iter().enumerate() {
+            self.pending_group.push(Algebra::Bgp(vec![TriplePattern {
+                subject: prev.clone(),
+                predicate: rdf_first.clone(),
+                object: item.clone(),
+            }]));
+            let rest_object = if i + 1 < items.len() {
+                let next = TermPattern::Blank(self.fresh_blank());
+                self.pending_group.push(Algebra::Bgp(vec![TriplePattern {
+                    subject: prev.clone(),
+                    predicate: rdf_rest.clone(),
+                    object: next.clone(),
+                }]));
+                prev = next;
+                continue;
+            } else {
+                rdf_nil.clone()
+            };
+            self.pending_group.push(Algebra::Bgp(vec![TriplePattern {
+                subject: prev.clone(),
+                predicate: rdf_rest.clone(),
+                object: rest_object,
+            }]));
+        }
+        Ok(head)
+    }
+
+    /// Verb of a blank node property list: `a`, a plain IRI/variable, or a
+    /// property path (`:p|:q`, `^:r`, `!(:a|:b)`, `:p*` ...). Returns the
+    /// simple verb when the predicate is a plain term, else `(rdf:type, path)`.
+    fn parse_verb_or_path(
+        &mut self,
+    ) -> Result<(TermPattern, Option<PathExpression>), OntolithError> {
+        self.skip();
+        if self.eat_keyword("a") {
+            return Ok((
+                TermPattern::Iri(Iri::new(
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                )),
+                None,
+            ));
+        }
+        let save = self.checkpoint();
+        if matches!(self.peek_char(), Some('^') | Some('!') | Some('(')) {
+            self.restore(save);
+            let path = self.parse_path_alternative()?;
+            return Ok((
+                TermPattern::Iri(Iri::new(
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                )),
+                Some(path),
+            ));
+        }
+        let simple = self.parse_var_or_term(false)?;
+        let is_path = match &simple {
+            TermPattern::Iri(_) | TermPattern::Variable(_) => {
+                let adjacent_modifier =
+                    matches!(self.peek_char(), Some('?') | Some('*') | Some('+'));
+                self.skip();
+                matches!(self.peek_char(), Some('/') | Some('|')) || adjacent_modifier
+            }
+            _ => false,
+        };
+        if !is_path {
+            return Ok((simple, None));
+        }
+        self.restore(save);
+        let path = self.parse_path_alternative()?;
+        Ok((
+            TermPattern::Iri(Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")),
+            Some(path),
+        ))
+    }
+
     fn parse_var_or_term(
         &mut self,
         allow_blank_as_var: bool,
@@ -1718,12 +1991,15 @@ impl<'a> SparqlParser<'a> {
             let _ = allow_blank_as_var;
             return Ok(TermPattern::Blank(label));
         }
-        if self.input[self.pos..].starts_with("[]") {
-            // Blank node property list `[]` — anonymous, unique per occurrence.
-            self.bump();
-            self.bump();
-            self.blank_counter += 1;
-            return Ok(TermPattern::Blank(format!("_gen_{}", self.blank_counter)));
+        if self.peek_char() == Some('[') {
+            // Blank node property list `[ p o ; ... ]` — anonymous, unique per
+            // occurrence; expansion triples are queued into `pending_group`.
+            return self.parse_bnode_property_list();
+        }
+        if self.peek_char() == Some('(') {
+            // RDF collection `( item ... )` — expands into rdf:first/rest
+            // triples queued into `pending_group`; returns the head term.
+            return self.parse_collection();
         }
         if self.input[self.pos..].starts_with("node:") {
             let start = self.pos + 5;
@@ -2107,14 +2383,15 @@ impl<'a> SparqlParser<'a> {
 
     // ---- lexer helpers ----
 
-    fn checkpoint(&self) -> (usize, usize, usize) {
-        (self.pos, self.line, self.col)
+    fn checkpoint(&self) -> (usize, usize, usize, usize) {
+        (self.pos, self.line, self.col, self.pending_group.len())
     }
 
-    fn restore(&mut self, c: (usize, usize, usize)) {
+    fn restore(&mut self, c: (usize, usize, usize, usize)) {
         self.pos = c.0;
         self.line = c.1;
         self.col = c.2;
+        self.pending_group.truncate(c.3);
     }
 
     fn eof(&self) -> bool {

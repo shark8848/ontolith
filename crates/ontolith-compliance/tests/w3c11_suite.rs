@@ -1048,7 +1048,30 @@ fn triple_canon(triple: &Triple, dict: &InMemoryDictionary) -> String {
 }
 
 fn graph_set(triples: &[Triple], dict: &InMemoryDictionary) -> BTreeSet<String> {
-    triples.iter().map(|t| triple_canon(t, dict)).collect()
+    // Blank node labels in graphs are arbitrary (data labels, query-minted
+    // ids); map them to positionally stable tokens so graph comparison is
+    // label-insensitive, mirroring `norm_row` for result tables.
+    let raw: Vec<String> = triples.iter().map(|t| triple_canon(t, dict)).collect();
+    let mut labels: Vec<&str> = raw
+        .iter()
+        .flat_map(|line| line.split(' '))
+        .filter(|part| part.starts_with("_:"))
+        .collect();
+    labels.sort_unstable();
+    labels.dedup();
+    let tokens: BTreeMap<&str, String> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(i, label)| (label, format!("b{i}")))
+        .collect();
+    raw.iter()
+        .map(|line| {
+            line.split(' ')
+                .map(|part| tokens.get(part).cloned().unwrap_or_else(|| part.to_owned()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
 }
 
 fn parse_graph_file(path: &Path) -> Result<(Vec<Triple>, InMemoryDictionary), String> {
