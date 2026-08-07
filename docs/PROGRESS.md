@@ -88,7 +88,7 @@
 | P0-01 | 已批准范围基线 | 未开始 | 0% | 计划仍为 Draft | 评审并签批 PLAN-0001 |
 | P0-02 | 架构例外审批模板 | 已完成 | 100% | [adr/0000-template.md](../adr/0000-template.md) + ADR-0001/0002 | 按需新增 ADR |
 | P0-03 | 依赖登记模板与评审规则 | 部分完成 | 70% | [DEPENDENCY_REGISTER.md](./DEPENDENCY_REGISTER.md) | 持续维护 + CI 审计 |
-| P0-04 | RFC 流程落地 | 部分完成 | 40% | [rfc/0000-template.md](../rfc/0000-template.md) | 首个实质 RFC 试用 |
+| P0-04 | RFC 流程落地 | 部分完成 | 70% | [rfc/0000-template.md](../rfc/0000-template.md) + 首个实质 RFC [RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)（编码/磁盘布局） | 评审 RFC-0001 并回填状态 |
 | P0-05 | 进度台账 | 已完成 | 100% | 本文档 | 按增量维护 |
 
 **阶段退出条件：** P0-01～P0-04 均为已完成。
@@ -100,9 +100,9 @@
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
 | P1-01 | Knowledge Object 领域模型 | 部分完成 | 80% | L0 KO + L1 Statement/Graph/Dataset + 序列化 Part II（`KoCodec` 全容器往返）；见 IMPL-L0 文档 | Ontology 载荷联动 reasoner |
-| P1-02 | Node 标识与字典管理器 | 部分完成 | 75% | 内存字典 + RocksDB 持久字典 | 并发字典契约文档 |
-| P1-03 | 存储抽象接口 | 部分完成 | 90% | stats/matching/snapshot_with/delete 精确 API | 版本冻结说明 |
-| P1-04 | 确定性标识与规范化编码规则 | 部分完成 | 90% | 六置换物理键 + triple/quad set key | 独立编码 RFC；磁盘布局 |
+| P1-02 | Node 标识与字典管理器 | 部分完成 | 90% | 内存字典 + RocksDB 持久字典 + 并发字典契约（[L2-storage-contracts.md](./L2-storage-contracts.md) Part A） | 随 P2-02 MVCC 复核字典 epoch 语义 |
+| P1-03 | 存储抽象接口 | 部分完成 | 95% | stats/matching/snapshot_with/delete 精确 API + 接口版本冻结 0.1.0（[L2-storage-contracts.md](./L2-storage-contracts.md) Part B） | 破坏性变更走 RFC/ADR 登记 |
+| P1-04 | 确定性标识与规范化编码规则 | 部分完成 | 95% | 六置换物理键 + triple/quad set key + 编码规则/磁盘布局定稿（[RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)） | 磁盘布局随 MVCC（P2-02）演进时升级 |
 
 **阶段退出条件：** P1-01～P1-04 达到可被 Phase 2 依赖的稳定契约。
 
@@ -369,6 +369,7 @@
 | 2026-08-07 | Codex | L6：Claude Code 审查修复——F1 prp-key 改值→成员桶索引（消除 O(m^2·k·n^2) 对扫）；F2 eq-sym/eq-trans/eq-diff 改 bnode 感知（NodeId 索引）；F3 一致性规则并入同迭代 frontier（max_iterations=1 也能检出链式 ⊥）；F4 补 6 测（一致输入负断言/单键 hasKey/字面量键值/反向 differentFrom/传递链到 Nothing/环列表）；reasoner 41→47 测（forward-chain 19→25），全量测试 250 通过。 |
 | 2026-08-07 | Codex | L6：OWL 2 RL 等价与基数规则——`prp-fp`/`prp-ifp`（功能/逆功能属性 → 值/主词 sameAs）、`eq-rep-s/p/o`（sameAs 主/谓/宾替换，HashMap 索引）、`cls-maxc2`（maxCardinality 1 基数键）、`cls-com`（complementOf 一致性 ⊥）；reasoner 47→52 测（forward-chain 25→30），全量测试 255 通过。 |
 | 2026-08-07 | Codex | 计划更新：执行顺序改为自底向上逐层推进（L0→L8，先底层后顶层应用）；§2 焦点表按层重排（P0=L0–L3 底层收尾、P1=L4 多进程 Raft、P2=L5 安全隔离、P3=L6 推理应用化、P4=L7 运维发布）；§8 新增分层后续执行队列，当前光标为 L0–L3 底层收尾。 |
+| 2026-08-07 | Codex | L0/L1 底层契约收尾（自底向上队列首项）——首个实质 RFC [RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)（确定性标识/规范化编码/六置换键/RocksDB 磁盘布局，P0-04 试用 + P1-04 定稿）；[L2-storage-contracts.md](./L2-storage-contracts.md)（P1-02 并发字典契约：线程安全/单调分配/epoch 不可变/批写原子；P1-03 存储接口版本冻结 0.1.0 + 变更流程）。 |
 
 ---
 
@@ -380,7 +381,7 @@
 
 > 当前光标：**L0–L3 底层收尾（本队列首项）**
 
-- [ ] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局
+- [x] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局（2026-08-07）
 - [ ] **L2 存储内核**：P2-02 真 MVCC 版本链 → P2-01 纯 CF 索引扫描 → P2-04 命名图六置换/Async → P2-05 fsync/备份演练
 - [ ] **L3 查询引擎**：P3-01 高级 Update（LOAD/CLEAR/WITH）→ P3-02 代价模型/统计 → P3-03 HTTP Explain API → P3-04 异步抢占 → P3-05 W3C 欠账逐项提 PASS
 - [ ] **L4 集群**：P4-02 多进程 Raft M1（单节点 openraft 适配）→ M2（多进程 HTTP RPC + RocksDB raft CF）→ M3（默认运行时切换 + CI 三进程 smoke）；P4-01 多进程 RPC、P4-03 跨节点数据搬迁、P4-04 真实网络分区
@@ -466,6 +467,7 @@
 - [L0 ontolith-core 功能说明](./L0-ontolith-core-Knowledge-Object-Foundation.md)
 - [L1 ontolith-rdf 功能说明](./L1-ontolith-rdf-Statement-Graph-Dataset.md)
 - [L2 storage/transaction 功能说明](./L2-ontolith-storage-transaction-kernel.md)
+- [L2 存储契约（并发字典/接口冻结）](./L2-storage-contracts.md)
 - [L3 parser/query 功能说明](./L3-ontolith-parser-query.md)
 - [L5 access/security 功能说明](./L5-ontolith-access-security.md)
 - [L5 管理平台 SLO 基线](./L5-management-platform-slo.md)
@@ -473,3 +475,4 @@
 - [R1 SPARQL 烟雾符合性](./R1-sparql-smoke-compliance.md)
 - [CI workflow](../.github/workflows/ci.yml) · [ci-local](../scripts/ci-local.sh)
 - [ADR 模板](../adr/0000-template.md) · [RFC 模板](../rfc/0000-template.md)
+- [RFC-0001 确定性标识与规范化编码规则](../rfc/0001-canonical-encoding-and-disk-layout.md)
