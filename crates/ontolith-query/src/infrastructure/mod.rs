@@ -848,6 +848,32 @@ mod tests {
     }
 
     #[test]
+    fn explain_includes_cost_estimates() {
+        let (engine, repo) = seed();
+        let p_cost = cost_pipeline(repo, engine);
+        let explain = p_cost
+            .explain(&QueryRequest::new(
+                "SELECT * WHERE { ?s <http://ex.org/knows> ?o }",
+            ))
+            .unwrap();
+        assert_eq!(explain.estimated_rows, Some(3));
+        assert_eq!(explain.pattern_costs.len(), 1);
+        let cost = &explain.pattern_costs[0];
+        assert_eq!(cost.pattern, "?s <http://ex.org/knows> ?o");
+        assert_eq!(cost.estimated_rows, 3);
+        assert!(cost.selectivity > 0.0 && cost.selectivity <= 1.0);
+
+        // A query without statistics keeps the fields empty.
+        let (_e, repo) = seed();
+        let p_std = standard_pipeline(repo);
+        let explain = p_std
+            .explain(&QueryRequest::new("SELECT * WHERE { ?s ?p ?o }"))
+            .unwrap();
+        assert_eq!(explain.estimated_rows, None);
+        assert!(explain.pattern_costs.is_empty());
+    }
+
+    #[test]
     fn select_star_returns_all_triples_as_solutions() {
         let (_e, repo) = seed();
         let p = pipeline(repo);

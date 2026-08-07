@@ -1,7 +1,7 @@
 //! Rule-based SPARQL algebra optimizer (L3).
 
 use crate::application::{QueryOptimizer, QueryStatistics};
-use crate::domain::{Algebra, QueryPlan, TermPattern, TriplePattern};
+use crate::domain::{Algebra, PatternCost, QueryPlan, TermPattern, TriplePattern};
 use ontolith_core::error::OntolithError;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -34,6 +34,10 @@ impl<S: QueryStatistics> QueryOptimizer for CostBasedOptimizer<S> {
         let before = crate::domain::summarize_algebra(&plan.algebra);
         plan.algebra = optimize_algebra_with_stats(plan.algebra, self.stats.as_ref());
         let after = crate::domain::summarize_algebra(&plan.algebra);
+        let (estimated_rows, pattern_costs) =
+            estimate_pattern_costs(&plan.algebra, self.stats.as_ref());
+        plan.estimated_rows = estimated_rows;
+        plan.pattern_costs = pattern_costs;
         plan.logical_steps
             .push(format!("optimize(cost):{before}->{after}"));
         plan.physical_steps =
@@ -390,6 +394,75 @@ fn pattern_vars(p: &TriplePattern) -> Vec<String> {
         }
     }
     out
+}
+
+/// Flatten all BGP nodes of the algebra into per-pattern cost estimates and
+/// derive a whole-query row estimate (the dominant BGP's product of pattern
+/// selectivities × total triples, i.e. its expected output rows).
+fn estimate_pattern_costs(
+    algebra: &Algebra,
+    stats: &dyn QueryStatistics,
+) -> (Option<u64>, Vec<PatternCost>) {
+    let total = stats.triple_count().max(1) as f64;
+    let mut pattern_costs = Vec::new();
+    let mut max_rows: Option<u64> = None;
+    collect_bgp_estimates(algebra, stats, total, &mut pattern_costs, &mut max_rows);
+    (max_rows, pattern_costs)
+}
+
+fn collect_bgp_estimates(
+    algebra: &Algebra,
+    stats: &dyn QueryStatistics,
+    total: f64,
+    out: &mut Vec<PatternCost>,
+    max_rows: &mut Option<u64>,
+) {
+    match algebra {
+        Algebra::Bgp(patterns) => {
+            let mut product = 1.0;
+            for p in patterns {
+                let sel = stats.pattern_selectivity(p);
+                product *= sel;
+                out.push(PatternCost {
+                    pattern: pattern_signature(p),
+                    selectivity: sel,
+                    estimated_rows: (sel * total).ceil() as u64,
+                });
+            }
+            let rows = (product * total).ceil() as u64;
+            *max_rows = Some(max_rows.unwrap_or(0).max(rows));
+        }
+        Algebra::Join { left, right }
+        | Algebra::LeftJoin {
+            left,
+            right,
+            condition: _,
+        }
+        | Algebra::Union { left, right } => {
+            collect_bgp_estimates(left, stats, total, out, max_rows);
+            collect_bgp_estimates(right, stats, total, out, max_rows);
+        }
+        Algebra::Filter { input, .. }
+        | Algebra::Extend { input, .. }
+        | Algebra::Distinct { input }
+        | Algebra::Project { input, .. }
+        | Algebra::OrderBy { input, .. }
+        | Algebra::Slice { input, .. }
+        | Algebra::Aggregate { input, .. } => {
+            collect_bgp_estimates(input, stats, total, out, max_rows);
+        }
+        _ => {}
+    }
+}
+
+fn pattern_signature(p: &TriplePattern) -> String {
+    let sig = |t: &TermPattern| match t {
+        TermPattern::Variable(v) | TermPattern::Blank(v) => format!("?{v}"),
+        TermPattern::Iri(i) => format!("<{}>", i.as_str()),
+        TermPattern::Node(n) => format!("node:{}", n.get()),
+        TermPattern::Literal(l) => format!("{l:?}"),
+    };
+    format!("{} {} {}", sig(&p.subject), sig(&p.predicate), sig(&p.object))
 }
 
 fn push_filters(algebra: Algebra) -> Algebra {

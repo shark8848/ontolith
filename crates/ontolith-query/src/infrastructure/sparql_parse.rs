@@ -98,6 +98,8 @@ impl<'a> SparqlParser<'a> {
                 logical_steps: self.logical.clone(),
                 physical_steps: vec![format!("unsupported:{}", kind.as_str())],
                 construct_template: Vec::new(),
+                estimated_rows: None,
+                pattern_costs: Vec::new(),
             });
         }
 
@@ -113,6 +115,8 @@ impl<'a> SparqlParser<'a> {
                 logical_steps: self.logical.clone(),
                 physical_steps: vec!["update:ops".to_string()],
                 construct_template: Vec::new(),
+                estimated_rows: None,
+                pattern_costs: Vec::new(),
             });
         }
 
@@ -395,6 +399,8 @@ impl<'a> SparqlParser<'a> {
             logical_steps: self.logical.clone(),
             physical_steps: physical,
             construct_template,
+            estimated_rows: None,
+            pattern_costs: Vec::new(),
         })
     }
 

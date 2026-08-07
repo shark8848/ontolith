@@ -15,7 +15,7 @@ use ontolith_parser::domain::ParseFormat;
 use ontolith_parser::infrastructure::{
     parse_nquads, parse_ntriples, parse_trig_doc, parse_turtle_doc,
 };
-use ontolith_query::domain::{BoundValue, QueryKind, QueryRequest, QueryResult};
+use ontolith_query::domain::{BoundValue, PatternCost, QueryKind, QueryRequest, QueryResult};
 use ontolith_query::infrastructure::update_pipeline;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
@@ -480,12 +480,14 @@ impl AppState {
         if explain {
             let plan = pipeline.explain(&qreq)?;
             let body = format!(
-                r#"{{"head":{{"plan_id":{},"kind":{}}},"algebra":{},"logical_steps":{},"physical_steps":{},"tenant":{},"consistency":{}}}"#,
+                r#"{{"head":{{"plan_id":{},"kind":{}}},"algebra":{},"logical_steps":{},"physical_steps":{},"estimated_rows":{},"pattern_costs":{},"tenant":{},"consistency":{}}}"#,
                 plan.plan_id.0,
                 json_string(plan.kind.as_str()),
                 json_string(&plan.algebra_summary),
                 json_string_array(&plan.logical_steps),
                 json_string_array(&plan.physical_steps),
+                json_opt_number(plan.estimated_rows),
+                json_pattern_costs(&plan.pattern_costs),
                 json_string(ctx.tenant.as_str()),
                 json_string(consistency.as_str()),
             );
@@ -1295,6 +1297,30 @@ fn json_string_array(items: &[String]) -> String {
     out
 }
 
+fn json_opt_number(v: Option<u64>) -> String {
+    match v {
+        Some(n) => n.to_string(),
+        None => "null".into(),
+    }
+}
+
+fn json_pattern_costs(costs: &[PatternCost]) -> String {
+    let mut out = String::from("[");
+    for (i, c) in costs.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            r#"{{"pattern":{},"selectivity":{},"estimated_rows":{}}}"#,
+            json_string(&c.pattern),
+            c.selectivity,
+            c.estimated_rows
+        ));
+    }
+    out.push(']');
+    out
+}
+
 pub fn shared_handler(state: Arc<AppState>) -> crate::http::Handler {
     Arc::new(move |req| state.handle(req))
 }
@@ -1317,6 +1343,21 @@ mod tests {
         HttpRequest {
             method: method.to_owned(),
             path: "/sparql".to_owned(),
+            query: HashMap::new(),
+            headers,
+            body: query.as_bytes().to_vec(),
+        }
+    }
+
+    fn explain_req(method: &str, query: &str) -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "content-type".to_owned(),
+            "application/sparql-query".to_owned(),
+        );
+        HttpRequest {
+            method: method.to_owned(),
+            path: "/explain".to_owned(),
             query: HashMap::new(),
             headers,
             body: query.as_bytes().to_vec(),
@@ -1351,5 +1392,37 @@ mod tests {
         );
         assert_eq!(read.status, 200);
         assert!(String::from_utf8_lossy(&read.body).contains("\"c\""));
+    }
+
+    #[test]
+    fn explain_via_http_includes_cost_estimates() {
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let insert = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "INSERT DATA { <http://ex.org/a> <http://ex.org/b> \"c\" }",
+            ),
+        );
+        assert_eq!(insert.status, 200);
+
+        let resp = dispatch_for_test(
+            &state,
+            explain_req("POST", "SELECT * WHERE { ?s <http://ex.org/b> ?o }"),
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("\"estimated_rows\":1"), "body={body}");
+        assert!(body.contains("\"pattern_costs\":["), "body={body}");
+        assert!(
+            body.contains("\"pattern\":\"?s <http://ex.org/b> ?o\""),
+            "body={body}"
+        );
     }
 }

@@ -231,11 +231,13 @@ pub struct QueryResult {
 
 ```rust
 pipeline.explain(&req)? -> QueryExplain {
-  plan_id, kind, logical_steps, physical_steps, algebra_summary
+  plan_id, kind, logical_steps, physical_steps, algebra_summary,
+  estimated_rows,          // 代价优化器估算结果行数（无统计时为 None）
+  pattern_costs            // 每三元组模式：pattern/selectivity/estimated_rows
 }
 ```
 
-logical 含 `optimize:before->after`。
+logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）。HTTP `/explain` 输出 JSON 含 `estimated_rows` 与 `pattern_costs`。
 
 ### 3.11 其它
 
@@ -309,3 +311,4 @@ logical 含 `optimize:before->after`。
 | 2026-08-06 | 2.9.0 | 完整 W3C SPARQL 1.1 套件接入（vendored `w3c/rdf-tests` sparql11，941 文件/28 feature）：manifest 驱动 runner `ontolith-compliance/tests/w3c11_suite.rs` 执行 QueryEvaluation/UpdateEvaluation/PositiveSyntax/NegativeSyntax 四类，SRX/SRJ/TSV/CSV + Turtle 图 + ASK 结果比对；`w3c11_profile.tsv` 锁定 492 条基线（127 PASS/365 FAIL，reason-code 分类：parse-error 223 / data-format 52 / semantic 48 / accepted-invalid 17 / named-graph 16 / other 9），drift 防回归；修复 Turtle 数字字面量词法（`.` 不再作分隔符，完整 INTEGER/DECIMAL/DOUBLE 文法 + `.5`），parser 16→17 测 |
 | 2026-08-07 | 2.10.0 | 新增 SPARQL Update 高级形态：`CLEAR/DROP [SILENT] DEFAULT/NAMED/ALL/GRAPH <g>`、`WITH <g>` 图作用域 DELETE·INSERT…WHERE / DELETE WHERE（WHERE 以图 g 为默认图、模板写入图 g）、`LOAD [SILENT] <src> [INTO GRAPH <g>]` 本地命名图复制子集；修复空更新（无匹配 DELETE/CLEAR 空图）误报 “pending storage transaction not found” 的 bug（无写入不提交）；`UpdateWriteService` 增图范围读取（default/named/graph）；query 46→55 测，W3C 套件基线 127→151 PASS（24 项 FAIL→PASS：clear/drop 5、delete/delete-insert/delete-where 4、syntax-update 13、update-silent 2），无回归 |
 | 2026-08-07 | 2.11.0 | 新增代价模型/统计：`QueryStatistics` 契约（triple/subject/predicate/object 计数 + 均匀选择性 `pattern_selectivity`）、`EngineQueryStatistics`（引擎增量统计）、`CostBasedOptimizer`（贪心 join 序 + 绑定传播，语义保持）；`update_pipeline` 与新增 `cost_pipeline` 走代价优化；query 55→58 测，W3C 套件基线无漂移 |
+| 2026-08-07 | 2.12.0 | Explain 增成本信息：`QueryExplain`/`QueryPlan` 新增 `estimated_rows`（主导 BGP 乘积×总数）与 `pattern_costs`（逐模式 selectivity/estimated_rows，代价优化器填充）；HTTP `/explain` JSON 输出两字段；query 58→59 测，server explain HTTP 测试 +1（20 测） |

@@ -252,15 +252,35 @@ pub struct QueryPlan {
     pub physical_steps: Vec<String>,
     /// CONSTRUCT template (only for Construct).
     pub construct_template: Vec<TriplePattern>,
+    /// Cost-based estimate of result rows (filled by the cost optimizer).
+    pub estimated_rows: Option<u64>,
+    /// Per-pattern cost estimates (filled by the cost optimizer).
+    pub pattern_costs: Vec<PatternCost>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueryExplain {
     pub plan_id: QueryPlanId,
     pub kind: QueryKind,
     pub logical_steps: Vec<String>,
     pub physical_steps: Vec<String>,
     pub algebra_summary: String,
+    /// Whole-query estimated result rows (dominant BGP product), `None` when
+    /// no statistics are available.
+    pub estimated_rows: Option<u64>,
+    /// Per-triple-pattern cost estimates from the cost optimizer.
+    pub pattern_costs: Vec<PatternCost>,
+}
+
+/// Cost estimate for one triple pattern (uniform selectivity heuristic).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatternCost {
+    /// Triple-pattern signature, e.g. `?s <urn:p> ?o`.
+    pub pattern: String,
+    /// Selectivity estimate in `(0, 1]`.
+    pub selectivity: f64,
+    /// Estimated matching rows: `ceil(selectivity × triple_count)`.
+    pub estimated_rows: u64,
 }
 
 impl QueryPlan {
@@ -271,6 +291,8 @@ impl QueryPlan {
             logical_steps: self.logical_steps.clone(),
             physical_steps: self.physical_steps.clone(),
             algebra_summary: summarize_algebra(&self.algebra),
+            estimated_rows: self.estimated_rows,
+            pattern_costs: self.pattern_costs.clone(),
         }
     }
 }
