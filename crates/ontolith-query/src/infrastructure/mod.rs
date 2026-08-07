@@ -2108,4 +2108,192 @@ mod tests {
             Some(&BoundValue::Literal(LiteralValue::Boolean(true)))
         );
     }
+
+    #[test]
+    fn negated_property_set_forward_reverse_and_combined() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/alice");
+        let bob = dict.encode_node("http://ex.org/bob");
+        let carol = dict.encode_node("http://ex.org/carol");
+        let person = dict.encode_node("http://ex.org/Person");
+        let knows = Iri::new("http://ex.org/knows");
+        let likes = Iri::new("http://ex.org/likes");
+
+        let txn = TxnId::new(40);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: knows.clone(),
+                object: Term::Iri(Iri::new("http://ex.org/bob")),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: likes.clone(),
+                object: Term::Iri(Iri::new("http://ex.org/carol")),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            txn,
+            Triple {
+                subject: bob,
+                predicate: Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+                object: Term::Iri(Iri::new("http://ex.org/Person")),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+
+        // Forward negated set: every triple whose predicate is not `knows`.
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s ?o WHERE { ?s !<http://ex.org/knows> ?o }",
+            ))
+            .unwrap();
+        let pairs: Vec<(BoundValue, BoundValue)> = r
+            .solutions
+            .iter()
+            .map(|s| (s.get("s").unwrap().clone(), s.get("o").unwrap().clone()))
+            .collect();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.contains(&(BoundValue::Node(alice), BoundValue::Node(carol))));
+        assert!(pairs.contains(&(BoundValue::Node(bob), BoundValue::Node(person))));
+
+        // Reverse negated set `!^knows`: (y, x) for triples (y, p, x) with p != knows.
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s ?o WHERE { ?s !^<http://ex.org/knows> ?o }",
+            ))
+            .unwrap();
+        let pairs: Vec<(BoundValue, BoundValue)> = r
+            .solutions
+            .iter()
+            .map(|s| (s.get("s").unwrap().clone(), s.get("o").unwrap().clone()))
+            .collect();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.contains(&(BoundValue::Node(carol), BoundValue::Node(alice))));
+        assert!(pairs.contains(&(BoundValue::Node(person), BoundValue::Node(bob))));
+
+        // Combined `!(knows|^likes)`: forward non-knows plus reverse non-likes.
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s ?o WHERE { ?s !(<http://ex.org/knows>|^<http://ex.org/likes>) ?o }",
+            ))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 4);
+
+        // `!a` excludes only rdf:type in the forward direction.
+        let r = p
+            .execute(&QueryRequest::new("SELECT ?s ?o WHERE { ?s !a ?o }"))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 2);
+        assert!(
+            r.solutions
+                .iter()
+                .any(|s| s.get("o") == Some(&BoundValue::Node(carol)))
+        );
+
+        // `!^a` excludes rdf:type in the reverse direction only.
+        let r = p
+            .execute(&QueryRequest::new("SELECT ?s ?o WHERE { ?s !^a ?o }"))
+            .unwrap();
+        let pairs: Vec<(BoundValue, BoundValue)> = r
+            .solutions
+            .iter()
+            .map(|s| (s.get("s").unwrap().clone(), s.get("o").unwrap().clone()))
+            .collect();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.contains(&(BoundValue::Node(bob), BoundValue::Node(alice))));
+        assert!(pairs.contains(&(BoundValue::Node(carol), BoundValue::Node(alice))));
+    }
+
+    #[test]
+    fn path_zero_length_question_mark_constant_endpoints_on_empty_data() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let o_node = dict.encode_node("http://example/o");
+        let s_node = dict.encode_node("http://example/s");
+        let p = standard_pipeline_with_dictionary(repo, dict);
+
+        let r = p
+            .execute(&QueryRequest::new(
+                "PREFIX : <http://example/> SELECT ?s WHERE { ?s :p? :o }",
+            ))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 1);
+        assert_eq!(r.solutions[0].get("s"), Some(&BoundValue::Node(o_node)));
+
+        let r = p
+            .execute(&QueryRequest::new(
+                "PREFIX : <http://example/> SELECT ?o WHERE { :s :p? ?o }",
+            ))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 1);
+        assert_eq!(r.solutions[0].get("o"), Some(&BoundValue::Node(s_node)));
+    }
+
+    #[test]
+    fn path_zero_or_more_includes_literal_object_self_pair() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/a");
+        let bob = dict.encode_node("http://ex.org/bob");
+
+        let txn = TxnId::new(41);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/knows"),
+                object: Term::Iri(Iri::new("http://ex.org/bob")),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: Iri::new("http://ex.org/name"),
+                object: Term::Literal(LiteralValue::String("test".into())),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT ?x ?y WHERE { ?x <http://ex.org/knows>* ?y }",
+            ))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 4);
+        let pairs: Vec<(BoundValue, BoundValue)> = r
+            .solutions
+            .iter()
+            .map(|s| (s.get("x").unwrap().clone(), s.get("y").unwrap().clone()))
+            .collect();
+        assert!(pairs.contains(&(BoundValue::Node(alice), BoundValue::Node(alice))));
+        assert!(pairs.contains(&(BoundValue::Node(alice), BoundValue::Node(bob))));
+        assert!(pairs.contains(&(
+            BoundValue::Literal(LiteralValue::String("test".into())),
+            BoundValue::Literal(LiteralValue::String("test".into()))
+        )));
+    }
 }

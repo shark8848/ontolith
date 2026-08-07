@@ -284,37 +284,37 @@ project-expression	Expression raise an error	PASS
 project-expression	Reuse a project expression variable in order by	PASS	
 project-expression	Reuse a project expression variable in select	PASS	
 property-path	(pp01) Simple path	PASS	
-property-path	(pp02) Star path	FAIL	parse-error
+property-path	(pp02) Star path	PASS	
 property-path	(pp03) Simple path with loop	PASS	
 property-path	(pp06) Path with two graphs	FAIL	named-graph
 property-path	(pp07) Path with one graph	FAIL	named-graph
 property-path	(pp08) Reverse path	PASS	
-property-path	(pp09) Reverse sequence path	FAIL	parse-error
-property-path	(pp10) Path with negation	FAIL	parse-error
+property-path	(pp09) Reverse sequence path	PASS	
+property-path	(pp10) Path with negation	PASS	
 property-path	(pp11) Simple path and two paths to same target node	PASS	
-property-path	(pp12) Variable length path and two paths to same target node	FAIL	parse-error
+property-path	(pp12) Variable length path and two paths to same target node	PASS	
 property-path	(pp14) Star path over foaf:knows	PASS	
-property-path	(pp16) Duplicate paths and cycles through foaf:knows*	FAIL	semantic
+property-path	(pp16) Duplicate paths and cycles through foaf:knows*	PASS	
 property-path	(pp21) Diamond -- :p+	PASS	
 property-path	(pp23) Diamond, with tail -- :p+	PASS	
 property-path	(pp25) Diamond, with loop -- :p+	PASS	
-property-path	(pp28a) Diamond, with loop -- (:p/:p)?	FAIL	parse-error
+property-path	(pp28a) Diamond, with loop -- (:p/:p)?	PASS	
 property-path	(pp30) Operator precedence 1	PASS	
-property-path	(pp31) Operator precedence 2	FAIL	parse-error
+property-path	(pp31) Operator precedence 2	PASS	
 property-path	(pp32) Operator precedence 3	PASS	
-property-path	(pp33) Operator precedence 4	FAIL	parse-error
+property-path	(pp33) Operator precedence 4	PASS	
 property-path	(pp34) Named Graph 1	FAIL	named-graph
 property-path	(pp35) Named Graph 2	FAIL	named-graph
-property-path	(pp36) Arbitrary path with bound endpoints	FAIL	parse-error
-property-path	(pp37) Nested (*)*	FAIL	parse-error
+property-path	(pp36) Arbitrary path with bound endpoints	PASS	
+property-path	(pp37) Nested (*)*	PASS	
 property-path	* with end being a constant on the empty dataset	PASS	
-property-path	* with start being a constant on the empty dataset	FAIL	semantic
-property-path	? with end being a constant on the empty dataset	FAIL	semantic
-property-path	? with start being a constant on the empty dataset	FAIL	semantic
-property-path	Negated Property Set with both direct and inverse properties	FAIL	parse-error
-property-path	Negated Property Set with inverse properties	FAIL	parse-error
-property-path	Negated Property Set with the inverse rdf:type property written using '^a'	FAIL	parse-error
-property-path	Negated Property Set with the rdf:type property written using 'a'	FAIL	parse-error
+property-path	* with start being a constant on the empty dataset	PASS	
+property-path	? with end being a constant on the empty dataset	PASS	
+property-path	? with start being a constant on the empty dataset	PASS	
+property-path	Negated Property Set with both direct and inverse properties	PASS	
+property-path	Negated Property Set with inverse properties	PASS	
+property-path	Negated Property Set with the inverse rdf:type property written using '^a'	PASS	
+property-path	Negated Property Set with the rdf:type property written using 'a'	PASS	
 property-path	ZeroOrX property paths should only return terms in the graph and not also terms defined in the query	PASS	
 subquery	sq01 - Subquery within graph pattern	FAIL	named-graph
 subquery	sq02 - Subquery within graph pattern, graph variable is bound	FAIL	named-graph

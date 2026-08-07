@@ -205,6 +205,12 @@ pub enum PathExpression {
     OneOrMore(Box<PathExpression>),
     ZeroOrMore(Box<PathExpression>),
     ZeroOrOne(Box<PathExpression>),
+    /// SPARQL negated property set `!(p1 | ^p2 | a)`: matches triples whose
+    /// predicate is not in `forward` (and, in reverse, not in `reverse`).
+    NegatedPropertySet {
+        forward: Vec<Iri>,
+        reverse: Vec<Iri>,
+    },
 }
 
 /// SPARQL algebra (W3C-style subset used by the executor).
@@ -513,6 +519,16 @@ fn summarize_path(path: &PathExpression) -> String {
         PathExpression::OneOrMore(inner) => format!("{}+", summarize_path(inner)),
         PathExpression::ZeroOrMore(inner) => format!("{}*", summarize_path(inner)),
         PathExpression::ZeroOrOne(inner) => format!("{}?", summarize_path(inner)),
+        PathExpression::NegatedPropertySet { forward, reverse } => {
+            let mut parts = Vec::new();
+            for p in forward {
+                parts.push(format!("<{}>", p.as_str()));
+            }
+            for p in reverse {
+                parts.push(format!("^<{}>", p.as_str()));
+            }
+            format!("!({})", parts.join("|"))
+        }
     }
 }
 

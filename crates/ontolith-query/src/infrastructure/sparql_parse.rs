@@ -937,7 +937,7 @@ impl<'a> SparqlParser<'a> {
 
         self.skip();
         let pred_start = self.checkpoint();
-        let is_path = if self.peek_char() == Some('^') {
+        let is_path = if matches!(self.peek_char(), Some('^') | Some('!') | Some('(')) {
             true
         } else {
             match self.parse_var_or_term(false) {
@@ -1010,12 +1010,31 @@ impl<'a> SparqlParser<'a> {
 
     fn parse_path_unary(&mut self) -> Result<PathExpression, OntolithError> {
         self.skip();
-        let mut base = if self.peek_char() == Some('^') {
+        let mut base = if self.peek_char() == Some('!') {
+            self.bump();
+            self.parse_negated_property_set()?
+        } else if self.peek_char() == Some('(') {
             self.bump();
             self.skip();
-            match self.parse_var_or_term(false)? {
-                TermPattern::Iri(iri) => PathExpression::InversePredicate(iri),
-                _ => return Err(self.err("inverse property path requires IRI predicate")),
+            let inner = self.parse_path_alternative()?;
+            self.skip();
+            self.expect_char(')')?;
+            inner
+        } else if self.peek_char() == Some('^') {
+            self.bump();
+            self.skip();
+            if self.peek_char() == Some('(') {
+                self.bump();
+                self.skip();
+                let inner = self.parse_path_alternative()?;
+                self.skip();
+                self.expect_char(')')?;
+                invert_path(inner)
+            } else {
+                match self.parse_var_or_term(false)? {
+                    TermPattern::Iri(iri) => PathExpression::InversePredicate(iri),
+                    _ => return Err(self.err("inverse property path requires IRI predicate")),
+                }
             }
         } else {
             match self.parse_var_or_term(false)? {
@@ -1038,6 +1057,57 @@ impl<'a> SparqlParser<'a> {
         }
 
         Ok(base)
+    }
+
+    /// Negated property set after `!`: `a`, `^a`, `p`, `^p`, or
+    /// `(p1 | ^p2 | a | ...)` (each element forward or inverse).
+    fn parse_negated_property_set(&mut self) -> Result<PathExpression, OntolithError> {
+        self.skip();
+        let mut forward = Vec::new();
+        let mut reverse = Vec::new();
+        let in_parens = self.peek_char() == Some('(');
+        if in_parens {
+            self.bump();
+            self.skip();
+        }
+        loop {
+            self.skip();
+            let mut inverse = false;
+            if self.peek_char() == Some('^') {
+                self.bump();
+                self.skip();
+                inverse = true;
+            }
+            let iri = if self.looking_at_keyword("a") {
+                self.eat_bare_name();
+                Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+            } else if self.peek_char() == Some('<') {
+                let raw = self.parse_iriref()?;
+                Iri::parse(raw).map_err(|e| self.err(e.message()))?
+            } else {
+                let word = self.parse_word();
+                if word.is_empty() {
+                    return Err(self.err("negated property set requires an IRI"));
+                }
+                Iri::parse(self.expand_prefixed(&word)?).map_err(|e| self.err(e.message()))?
+            };
+            if inverse {
+                reverse.push(iri);
+            } else {
+                forward.push(iri);
+            }
+            if in_parens {
+                self.skip();
+                if self.peek_char() == Some('|') {
+                    self.bump();
+                    continue;
+                }
+                self.expect_char(')')?;
+                break;
+            }
+            break;
+        }
+        Ok(PathExpression::NegatedPropertySet { forward, reverse })
     }
 
     fn parse_subquery_select(&mut self) -> Result<Algebra, OntolithError> {
@@ -2075,8 +2145,26 @@ impl<'a> SparqlParser<'a> {
     }
 
     fn parse_word(&mut self) -> String {
-        let start = self.pos;
+        // PN_LOCAL_ESC characters that may follow a backslash in a prefixed
+        // name local part (e.g. `:d\?` is the IRI char `?`).
+        const PN_LOCAL_ESC: &[char] = &[
+            '_', '~', '.', '-', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', '/', '?',
+            '#', '@', '%',
+        ];
+        let mut out = String::new();
         while let Some(c) = self.peek_char() {
+            if c == '\\' {
+                let escaped = self.input[self.pos..].chars().nth(1);
+                if let Some(esc) = escaped.filter(|e| PN_LOCAL_ESC.contains(e)) {
+                    self.bump();
+                    self.bump();
+                    out.push(esc);
+                    continue;
+                }
+                self.bump();
+                out.push('\\');
+                continue;
+            }
             if c.is_whitespace()
                 || matches!(
                     c,
@@ -2099,13 +2187,15 @@ impl<'a> SparqlParser<'a> {
                         | '*'
                         | '&'
                         | '|'
+                        | '?'
                 )
             {
                 break;
             }
             self.bump();
+            out.push(c);
         }
-        self.input[start..self.pos].to_owned()
+        out
     }
 
     fn parse_usize(&mut self) -> Result<usize, OntolithError> {
@@ -2603,6 +2693,30 @@ fn collect_expr_vars(expr: &Expression, out: &mut BTreeSet<String>) {
         Expression::Function { args, .. } => {
             for a in args {
                 collect_expr_vars(a, out);
+            }
+        }
+    }
+}
+
+/// Mirror a path expression: `^(p/q)` becomes `^q/^p`, `!(p1|^p2)` becomes
+/// `!(^p1|p2)`, and modifiers carry through.
+fn invert_path(path: PathExpression) -> PathExpression {
+    match path {
+        PathExpression::Predicate(p) => PathExpression::InversePredicate(p),
+        PathExpression::InversePredicate(p) => PathExpression::Predicate(p),
+        PathExpression::Sequence(a, b) => {
+            PathExpression::Sequence(Box::new(invert_path(*b)), Box::new(invert_path(*a)))
+        }
+        PathExpression::Alternative(a, b) => {
+            PathExpression::Alternative(Box::new(invert_path(*a)), Box::new(invert_path(*b)))
+        }
+        PathExpression::OneOrMore(p) => PathExpression::OneOrMore(Box::new(invert_path(*p))),
+        PathExpression::ZeroOrMore(p) => PathExpression::ZeroOrMore(Box::new(invert_path(*p))),
+        PathExpression::ZeroOrOne(p) => PathExpression::ZeroOrOne(Box::new(invert_path(*p))),
+        PathExpression::NegatedPropertySet { forward, reverse } => {
+            PathExpression::NegatedPropertySet {
+                forward: reverse,
+                reverse: forward,
             }
         }
     }

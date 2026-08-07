@@ -1023,6 +1023,9 @@ fn eval_path_pattern(
     object: &TermPattern,
     ctx: &ExecCtx<'_>,
 ) -> Result<Vec<Solution>, OntolithError> {
+    if let PathExpression::NegatedPropertySet { forward, reverse } = path {
+        return eval_nps_pattern(subject, forward, reverse, object, ctx);
+    }
     let starts = enumerate_path_starts(subject, ctx)?;
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -1045,7 +1048,93 @@ fn eval_path_pattern(
         }
     }
 
+    // Zero-length match on an empty path: an unbound subject with a bound
+    // constant object resolves to start == end == that constant when the
+    // path accepts the empty string (e.g. `?s :p* :o` over empty data).
+    if path_accepts_empty(path)
+        && term_pattern_const_bound(subject).is_none()
+        && let Some(obj) = term_pattern_const_bound(object)
+    {
+        let zero = normalize_path_value(obj, ctx)?;
+        let mut row = Solution::new();
+        if bind_path_pattern(subject, &zero, &mut row, ctx)?
+            && bind_path_pattern(object, &zero, &mut row, ctx)?
+        {
+            let key = solution_key(&row);
+            if seen.insert(key) {
+                out.push(row);
+            }
+        }
+    }
+
     Ok(out)
+}
+
+/// Negated property set evaluation: data-driven over all triples. The forward
+/// part matches (x, p, y) with p not in `forward` (only when `forward` is
+/// non-empty); the reverse part matches (y, p, x) as (x, y) with p not in
+/// `reverse` (only when `reverse` is non-empty).
+fn eval_nps_pattern(
+    subject: &TermPattern,
+    forward: &[Iri],
+    reverse: &[Iri],
+    object: &TermPattern,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Solution>, OntolithError> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pairs = Vec::new();
+    if !forward.is_empty() {
+        for triple in ctx.read.matching(None, None, None, ctx.txn_id)? {
+            ctx.check()?;
+            if forward.contains(&triple.predicate) {
+                continue;
+            }
+            pairs.push((
+                normalize_path_value(BoundValue::Node(triple.subject), ctx)?,
+                normalize_path_value(BoundValue::from_term(&triple.object), ctx)?,
+            ));
+        }
+    }
+    if !reverse.is_empty() {
+        for triple in ctx.read.matching(None, None, None, ctx.txn_id)? {
+            ctx.check()?;
+            if reverse.contains(&triple.predicate) {
+                continue;
+            }
+            pairs.push((
+                normalize_path_value(BoundValue::from_term(&triple.object), ctx)?,
+                normalize_path_value(BoundValue::Node(triple.subject), ctx)?,
+            ));
+        }
+    }
+    for (s, o) in pairs {
+        let mut row = Solution::new();
+        if !bind_path_pattern(subject, &s, &mut row, ctx)? {
+            continue;
+        }
+        if !bind_path_pattern(object, &o, &mut row, ctx)? {
+            continue;
+        }
+        let key = solution_key(&row);
+        if seen.insert(key) {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a path expression accepts the empty string (zero-length match).
+fn path_accepts_empty(path: &PathExpression) -> bool {
+    match path {
+        PathExpression::Predicate(_)
+        | PathExpression::InversePredicate(_)
+        | PathExpression::OneOrMore(_) => false,
+        PathExpression::ZeroOrMore(_) | PathExpression::ZeroOrOne(_) => true,
+        PathExpression::Sequence(a, b) => path_accepts_empty(a) && path_accepts_empty(b),
+        PathExpression::Alternative(a, b) => path_accepts_empty(a) || path_accepts_empty(b),
+        PathExpression::NegatedPropertySet { .. } => false,
+    }
 }
 
 fn enumerate_path_starts(
@@ -1066,12 +1155,13 @@ fn enumerate_path_starts(
             out.push(subj);
         }
 
+        // Zero-length paths match every term in the graph, including literal
+        // objects (e.g. `:f foaf:name "test"` yields the ("test","test") pair
+        // under `foaf:knows*`).
         let obj = normalize_path_value(BoundValue::from_term(&triple.object), ctx)?;
-        if !matches!(obj, BoundValue::Literal(_)) {
-            let obj_key = path_value_key(&obj);
-            if seen.insert(obj_key) {
-                out.push(obj);
-            }
+        let obj_key = path_value_key(&obj);
+        if seen.insert(obj_key) {
+            out.push(obj);
         }
     }
     Ok(out)
@@ -1144,7 +1234,49 @@ fn eval_path_from_value(
             }
             Ok(out)
         }
+        PathExpression::NegatedPropertySet { forward, reverse } => {
+            eval_negated_property_set(forward, reverse, start, ctx)
+        }
     }
+}
+
+fn eval_negated_property_set(
+    forward: &[Iri],
+    reverse: &[Iri],
+    start: &BoundValue,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<BoundValue>, OntolithError> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for subject in subject_nodes_from_bound(start, ctx)? {
+        ctx.check()?;
+        for triple in ctx.read.matching(Some(subject), None, None, ctx.txn_id)? {
+            if forward.contains(&triple.predicate) {
+                continue;
+            }
+            let value = normalize_path_value(BoundValue::from_term(&triple.object), ctx)?;
+            let key = path_value_key(&value);
+            if seen.insert(key) {
+                out.push(value);
+            }
+        }
+    }
+    // Reverse edges: triples (y, p, x) with p not in `reverse`; endpoint is y.
+    let start_term = start.to_term();
+    for triple in ctx
+        .read
+        .matching(None, None, Some(&start_term), ctx.txn_id)?
+    {
+        if reverse.contains(&triple.predicate) {
+            continue;
+        }
+        let value = normalize_path_value(BoundValue::Node(triple.subject), ctx)?;
+        let key = path_value_key(&value);
+        if seen.insert(key) {
+            out.push(value);
+        }
+    }
+    Ok(out)
 }
 
 fn eval_one_or_more(
