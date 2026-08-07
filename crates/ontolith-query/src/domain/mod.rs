@@ -102,6 +102,11 @@ pub enum Expression {
     /// Aggregate function call — only valid inside HAVING; resolved to the
     /// matching projection alias before execution.
     Aggregate(AggregateFunction),
+    /// `EXISTS { pattern }` / `NOT EXISTS { pattern }` constraint (P3-05).
+    Exists {
+        negated: bool,
+        pattern: Box<Algebra>,
+    },
 }
 
 /// Aggregate function subset for SELECT projections (full aggregation).
@@ -114,14 +119,27 @@ pub enum AggregateFunction {
     },
     Sum {
         variable: String,
+        distinct: bool,
     },
     Avg {
         variable: String,
+        distinct: bool,
     },
     Min {
         variable: String,
+        distinct: bool,
     },
     Max {
+        variable: String,
+        distinct: bool,
+    },
+    /// `GROUP_CONCAT(?v)` / `GROUP_CONCAT(?v; SEPARATOR=", ")`.
+    GroupConcat {
+        variable: String,
+        separator: String,
+    },
+    /// `SAMPLE(?v)` — arbitrary value from the group.
+    Sample {
         variable: String,
     },
 }
@@ -203,6 +221,12 @@ pub enum Algebra {
         condition: Option<Expression>,
     },
     Union {
+        left: Box<Algebra>,
+        right: Box<Algebra>,
+    },
+    /// SPARQL MINUS: rows of `left` that share a compatible binding with any
+    /// row of `right` are removed (shared-variable semantics).
+    Minus {
         left: Box<Algebra>,
         right: Box<Algebra>,
     },
@@ -353,6 +377,11 @@ pub fn summarize_algebra(algebra: &Algebra) -> String {
                 summarize_algebra(right)
             )
         }
+        Algebra::Minus { left, right } => format!(
+            "Minus({}, {})",
+            summarize_algebra(left),
+            summarize_algebra(right)
+        ),
         Algebra::Filter { input, .. } => format!("Filter({})", summarize_algebra(input)),
         Algebra::Extend {
             variable, input, ..
@@ -432,10 +461,42 @@ fn summarize_aggregate(function: &AggregateFunction) -> String {
             variable: None,
             distinct: true,
         } => "COUNT(DISTINCT *)".to_string(),
-        AggregateFunction::Sum { variable } => format!("SUM(?{variable})"),
-        AggregateFunction::Avg { variable } => format!("AVG(?{variable})"),
-        AggregateFunction::Min { variable } => format!("MIN(?{variable})"),
-        AggregateFunction::Max { variable } => format!("MAX(?{variable})"),
+        AggregateFunction::Sum {
+            variable,
+            distinct: false,
+        } => format!("SUM(?{variable})"),
+        AggregateFunction::Sum {
+            variable,
+            distinct: true,
+        } => format!("SUM(DISTINCT ?{variable})"),
+        AggregateFunction::Avg {
+            variable,
+            distinct: false,
+        } => format!("AVG(?{variable})"),
+        AggregateFunction::Avg {
+            variable,
+            distinct: true,
+        } => format!("AVG(DISTINCT ?{variable})"),
+        AggregateFunction::Min {
+            variable,
+            distinct: false,
+        } => format!("MIN(?{variable})"),
+        AggregateFunction::Min {
+            variable,
+            distinct: true,
+        } => format!("MIN(DISTINCT ?{variable})"),
+        AggregateFunction::Max {
+            variable,
+            distinct: false,
+        } => format!("MAX(?{variable})"),
+        AggregateFunction::Max {
+            variable,
+            distinct: true,
+        } => format!("MAX(DISTINCT ?{variable})"),
+        AggregateFunction::GroupConcat { variable, .. } => {
+            format!("GROUP_CONCAT(?{variable})")
+        }
+        AggregateFunction::Sample { variable } => format!("SAMPLE(?{variable})"),
     }
 }
 

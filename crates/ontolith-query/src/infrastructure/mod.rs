@@ -1958,6 +1958,45 @@ mod tests {
     }
 
     #[test]
+    fn negation_exists_and_minus() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        // EXISTS: alice knows bob and has a name; bob knows carol but has none.
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s WHERE { ?s <http://ex.org/knows> ?b FILTER EXISTS { ?s <http://ex.org/name> ?n } }",
+            ))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 1);
+        assert_eq!(
+            r.solutions[0].get("s"),
+            Some(&BoundValue::Node(NodeId::new(1)))
+        );
+        // NOT EXISTS: bob has no name.
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s WHERE { ?s <http://ex.org/knows> ?b FILTER NOT EXISTS { ?s <http://ex.org/name> ?n } }",
+            ))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 1);
+        assert_eq!(
+            r.solutions[0].get("s"),
+            Some(&BoundValue::Node(NodeId::new(2)))
+        );
+        // MINUS: subjects who know someone, minus those with a name.
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s WHERE { ?s <http://ex.org/knows> ?b MINUS { ?s <http://ex.org/name> ?n } }",
+            ))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 1);
+        assert_eq!(
+            r.solutions[0].get("s"),
+            Some(&BoundValue::Node(NodeId::new(2)))
+        );
+    }
+
+    #[test]
     fn function_string_operators() {
         let (_e, repo) = seed();
         let p = pipeline(repo);

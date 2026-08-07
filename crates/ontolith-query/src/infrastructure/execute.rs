@@ -110,7 +110,7 @@ impl AlgebraExecutor {
                 cancelled,
             }),
             QueryKind::Construct => {
-                let triples = materialize_construct(&plan.construct_template, &solutions);
+                let triples = materialize_construct(&plan.construct_template, &solutions, &ctx);
                 Ok(QueryResult {
                     kind: plan.kind,
                     variables: Vec::new(),
@@ -133,7 +133,7 @@ impl AlgebraExecutor {
                 if !plan.projection_exprs.is_empty() {
                     for s in &mut solutions {
                         for pe in &plan.projection_exprs {
-                            if let Some(v) = eval_expr_value(&pe.expression, s) {
+                            if let Some(v) = eval_expr_value(&pe.expression, s, &ctx) {
                                 s.insert(pe.alias.clone(), v);
                             }
                         }
@@ -601,12 +601,17 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
             l.extend(r);
             Ok(l)
         }
+        Algebra::Minus { left, right } => {
+            let l = eval_algebra(left, ctx)?;
+            let r = eval_algebra(right, ctx)?;
+            Ok(minus_join(l, r, ctx))
+        }
         Algebra::Filter { expression, input } => {
             let rows = eval_algebra(input, ctx)?;
             let mut out = Vec::new();
             for s in rows {
                 ctx.check()?;
-                if eval_expr_bool(expression, &s).unwrap_or(false) {
+                if eval_expr_bool(expression, &s, ctx).unwrap_or(false) {
                     out.push(s);
                 }
             }
@@ -620,7 +625,7 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
             let mut rows = eval_algebra(input, ctx)?;
             for s in &mut rows {
                 ctx.check()?;
-                if let Some(v) = eval_expr_value(expression, s) {
+                if let Some(v) = eval_expr_value(expression, s, ctx) {
                     s.insert(variable.clone(), v);
                 }
             }
@@ -706,6 +711,37 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
     }
 }
 
+/// SPARQL MINUS: a left row survives unless some right row shares all of its
+/// bound variables with identical values (unbound variables never match).
+fn minus_join(left: Vec<Solution>, right: Vec<Solution>, ctx: &ExecCtx<'_>) -> Vec<Solution> {
+    let mut out = Vec::new();
+    for l in &left {
+        ctx.check().ok();
+        let mut remove = false;
+        for r in &right {
+            let shared: Vec<&String> = l
+                .bindings
+                .keys()
+                .filter(|k| r.bindings.contains_key(*k))
+                .collect();
+            if shared.is_empty() {
+                continue;
+            }
+            if shared
+                .iter()
+                .all(|k| l.bindings.get(*k) == r.bindings.get(*k))
+            {
+                remove = true;
+                break;
+            }
+        }
+        if !remove {
+            out.push(l.clone());
+        }
+    }
+    out
+}
+
 fn eval_aggregate(
     groups: &[String],
     aggregates: &[AggregateSpec],
@@ -755,7 +791,7 @@ fn eval_aggregate(
     }
 
     if let Some(having) = having {
-        out_rows.retain(|row| eval_expr_bool(having, row) == Some(true));
+        out_rows.retain(|row| eval_expr_bool(having, row, ctx) == Some(true));
     }
 
     Ok(out_rows)
@@ -777,12 +813,17 @@ fn eval_aggregate_spec(spec: &AggregateSpec, rows: &[Solution]) -> Option<BoundV
             };
             Some(BoundValue::Literal(LiteralValue::Integer(n as i64)))
         }
-        AggregateFunction::Sum { variable } => {
+        AggregateFunction::Sum { variable, distinct } => {
+            let rows = if *distinct {
+                distinct_rows(rows, variable)
+            } else {
+                rows.to_vec()
+            };
             let mut acc_i: i64 = 0;
             let mut acc_d: f64 = 0.0;
             let mut all_int = true;
             let mut any = false;
-            for s in rows {
+            for s in &rows {
                 let Some(bv) = s.get(variable) else { continue };
                 if let BoundValue::Literal(LiteralValue::Integer(x)) = bv {
                     acc_i += x;
@@ -802,10 +843,15 @@ fn eval_aggregate_spec(spec: &AggregateSpec, rows: &[Solution]) -> Option<BoundV
                 Some(BoundValue::Literal(LiteralValue::Decimal(acc_d)))
             }
         }
-        AggregateFunction::Avg { variable } => {
+        AggregateFunction::Avg { variable, distinct } => {
+            let rows = if *distinct {
+                distinct_rows(rows, variable)
+            } else {
+                rows.to_vec()
+            };
             let mut acc_d: f64 = 0.0;
             let mut n: i64 = 0;
-            for s in rows {
+            for s in &rows {
                 if let Some(x) = s.get(variable).and_then(numeric_value) {
                     acc_d += x;
                     n += 1;
@@ -817,8 +863,60 @@ fn eval_aggregate_spec(spec: &AggregateSpec, rows: &[Solution]) -> Option<BoundV
                 Some(BoundValue::Literal(LiteralValue::Decimal(acc_d / n as f64)))
             }
         }
-        AggregateFunction::Min { variable } => extremum(variable, rows, -1),
-        AggregateFunction::Max { variable } => extremum(variable, rows, 1),
+        AggregateFunction::Min { variable, distinct } => {
+            let rows = if *distinct {
+                distinct_rows(rows, variable)
+            } else {
+                rows.to_vec()
+            };
+            extremum(variable, &rows, -1)
+        }
+        AggregateFunction::Max { variable, distinct } => {
+            let rows = if *distinct {
+                distinct_rows(rows, variable)
+            } else {
+                rows.to_vec()
+            };
+            extremum(variable, &rows, 1)
+        }
+        AggregateFunction::GroupConcat {
+            variable,
+            separator,
+        } => {
+            let mut parts = Vec::new();
+            for s in rows {
+                if let Some(bv) = s.get(variable) {
+                    parts.push(string_of_bound(bv)?);
+                }
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(BoundValue::Literal(LiteralValue::String(
+                    parts.join(separator),
+                )))
+            }
+        }
+        AggregateFunction::Sample { variable } => {
+            rows.iter().find_map(|s| s.get(variable).cloned())
+        }
+    }
+}
+
+fn distinct_rows(rows: &[Solution], variable: &str) -> Vec<Solution> {
+    let mut seen = HashSet::new();
+    rows.iter()
+        .filter(|s| s.get(variable).is_some())
+        .filter(|s| seen.insert(format!("{:?}", s.get(variable).unwrap())))
+        .cloned()
+        .collect()
+}
+
+fn string_of_bound(bv: &BoundValue) -> Option<String> {
+    match bv {
+        BoundValue::Literal(l) => Some(l.lexical_form()),
+        BoundValue::Iri(i) => Some(i.as_str().to_owned()),
+        _ => None,
     }
 }
 
@@ -1235,6 +1333,10 @@ fn bind_pattern(
         },
         TermPattern::Iri(i) => match value {
             BoundValue::Iri(ref j) if j == i => Ok(Some(())),
+            BoundValue::Node(n) | BoundValue::Blank(n) => match ctx.read.node_for_iri(i)? {
+                Some(pid) if pid == n => Ok(Some(())),
+                _ => Ok(None),
+            },
             _ => Ok(None),
         },
         TermPattern::Literal(l) => match value {
@@ -1329,7 +1431,7 @@ fn left_join(
             ctx.check()?;
             if let Some(m) = merge_solutions_compatible(l, r, ctx)? {
                 let ok = condition
-                    .map(|c| eval_expr_bool(c, &m).unwrap_or(false))
+                    .map(|c| eval_expr_bool(c, &m, ctx).unwrap_or(false))
                     .unwrap_or(true);
                 if ok {
                     out.push(m);
@@ -1380,34 +1482,54 @@ fn bound_values_compatible(
     }
 }
 
-fn eval_expr_bool(expr: &Expression, sol: &Solution) -> Option<bool> {
+fn eval_expr_bool(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Option<bool> {
     match expr {
         Expression::Bound(v) => Some(sol.get(v).is_some()),
-        Expression::Not(e) => Some(!eval_expr_bool(e, sol)?),
-        Expression::And(a, b) => Some(eval_expr_bool(a, sol)? && eval_expr_bool(b, sol)?),
-        Expression::Or(a, b) => Some(eval_expr_bool(a, sol)? || eval_expr_bool(b, sol)?),
-        Expression::Equal(a, b) => Some(eval_expr_value(a, sol)? == eval_expr_value(b, sol)?),
-        Expression::NotEqual(a, b) => Some(eval_expr_value(a, sol)? != eval_expr_value(b, sol)?),
-        Expression::Less(a, b) => {
-            Some(compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? < 0)
+        Expression::Not(e) => Some(!eval_expr_bool(e, sol, ctx)?),
+        Expression::And(a, b) => Some(eval_expr_bool(a, sol, ctx)? && eval_expr_bool(b, sol, ctx)?),
+        Expression::Or(a, b) => Some(eval_expr_bool(a, sol, ctx)? || eval_expr_bool(b, sol, ctx)?),
+        Expression::Equal(a, b) => {
+            Some(eval_expr_value(a, sol, ctx)? == eval_expr_value(b, sol, ctx)?)
         }
-        Expression::LessEq(a, b) => {
-            Some(compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? <= 0)
+        Expression::NotEqual(a, b) => {
+            Some(eval_expr_value(a, sol, ctx)? != eval_expr_value(b, sol, ctx)?)
         }
-        Expression::Greater(a, b) => {
-            Some(compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? > 0)
-        }
-        Expression::GreaterEq(a, b) => {
-            Some(compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? >= 0)
-        }
-        Expression::Negate(e) => match eval_expr_value(e, sol)? {
+        Expression::Less(a, b) => Some(
+            compare_values(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+            )? < 0,
+        ),
+        Expression::LessEq(a, b) => Some(
+            compare_values(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+            )? <= 0,
+        ),
+        Expression::Greater(a, b) => Some(
+            compare_values(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+            )? > 0,
+        ),
+        Expression::GreaterEq(a, b) => Some(
+            compare_values(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+            )? >= 0,
+        ),
+        Expression::Negate(e) => match eval_expr_value(e, sol, ctx)? {
             BoundValue::Literal(LiteralValue::Integer(n)) => Some(n != 0),
             BoundValue::Literal(LiteralValue::Decimal(f)) => Some(f != 0.0),
             _ => None,
         },
+        Expression::Exists { negated, pattern } => {
+            let found = exists_in_solution(pattern, sol, ctx).unwrap_or(false);
+            Some(if *negated { !found } else { found })
+        }
         Expression::Arith { op, left, right } => {
-            let l = eval_expr_value(left, sol)?;
-            let r = eval_expr_value(right, sol)?;
+            let l = eval_expr_value(left, sol, ctx)?;
+            let r = eval_expr_value(right, sol, ctx)?;
             let ln = bound_as_f64(&l)?;
             let rn = bound_as_f64(&r)?;
             let v = match op {
@@ -1424,25 +1546,26 @@ fn eval_expr_bool(expr: &Expression, sol: &Solution) -> Option<bool> {
             };
             Some(v != 0.0)
         }
-        Expression::Function { .. } => match eval_expr_value(expr, sol)? {
+        Expression::Function { .. } => match eval_expr_value(expr, sol, ctx)? {
             BoundValue::Literal(LiteralValue::Boolean(b)) => Some(b),
             _ => None,
         },
-        Expression::IsIri(e) => Some(matches!(eval_expr_value(e, sol)?, BoundValue::Iri(_))),
-        Expression::IsLiteral(e) => {
-            Some(matches!(eval_expr_value(e, sol)?, BoundValue::Literal(_)))
-        }
+        Expression::IsIri(e) => Some(matches!(eval_expr_value(e, sol, ctx)?, BoundValue::Iri(_))),
+        Expression::IsLiteral(e) => Some(matches!(
+            eval_expr_value(e, sol, ctx)?,
+            BoundValue::Literal(_)
+        )),
         Expression::IsBlank(e) => Some(matches!(
-            eval_expr_value(e, sol)?,
+            eval_expr_value(e, sol, ctx)?,
             BoundValue::Blank(_) | BoundValue::Node(_)
         )),
         Expression::Variable(v) => sol.get(v).map(|_| true),
         Expression::Literal(LiteralValue::Boolean(b)) => Some(*b),
-        _ => eval_expr_value(expr, sol).map(|_| true),
+        _ => eval_expr_value(expr, sol, ctx).map(|_| true),
     }
 }
 
-fn eval_expr_value(expr: &Expression, sol: &Solution) -> Option<BoundValue> {
+fn eval_expr_value(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Option<BoundValue> {
     match expr {
         Expression::Variable(v) => sol.get(v).cloned(),
         Expression::Iri(i) => Some(BoundValue::Iri(i.clone())),
@@ -1451,45 +1574,57 @@ fn eval_expr_value(expr: &Expression, sol: &Solution) -> Option<BoundValue> {
             sol.get(v).is_some(),
         ))),
         Expression::Not(e) => Some(BoundValue::Literal(LiteralValue::Boolean(!eval_expr_bool(
-            e, sol,
+            e, sol, ctx,
         )?))),
         Expression::And(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            eval_expr_bool(a, sol)? && eval_expr_bool(b, sol)?,
+            eval_expr_bool(a, sol, ctx)? && eval_expr_bool(b, sol, ctx)?,
         ))),
         Expression::Or(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            eval_expr_bool(a, sol)? || eval_expr_bool(b, sol)?,
+            eval_expr_bool(a, sol, ctx)? || eval_expr_bool(b, sol, ctx)?,
         ))),
         Expression::Equal(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            eval_expr_value(a, sol)? == eval_expr_value(b, sol)?,
+            eval_expr_value(a, sol, ctx)? == eval_expr_value(b, sol, ctx)?,
         ))),
         Expression::NotEqual(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            eval_expr_value(a, sol)? != eval_expr_value(b, sol)?,
+            eval_expr_value(a, sol, ctx)? != eval_expr_value(b, sol, ctx)?,
         ))),
         Expression::IsIri(e) => Some(BoundValue::Literal(LiteralValue::Boolean(matches!(
-            eval_expr_value(e, sol)?,
+            eval_expr_value(e, sol, ctx)?,
             BoundValue::Iri(_)
         )))),
         Expression::IsLiteral(e) => Some(BoundValue::Literal(LiteralValue::Boolean(matches!(
-            eval_expr_value(e, sol)?,
+            eval_expr_value(e, sol, ctx)?,
             BoundValue::Literal(_)
         )))),
         Expression::IsBlank(e) => Some(BoundValue::Literal(LiteralValue::Boolean(matches!(
-            eval_expr_value(e, sol)?,
+            eval_expr_value(e, sol, ctx)?,
             BoundValue::Blank(_) | BoundValue::Node(_)
         )))),
         Expression::Less(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? < 0,
+            compare_values(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+            )? < 0,
         ))),
         Expression::LessEq(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? <= 0,
+            compare_values(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+            )? <= 0,
         ))),
         Expression::Greater(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? > 0,
+            compare_values(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+            )? > 0,
         ))),
         Expression::GreaterEq(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            compare_values(&eval_expr_value(a, sol)?, &eval_expr_value(b, sol)?)? >= 0,
+            compare_values(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+            )? >= 0,
         ))),
-        Expression::Negate(e) => match eval_expr_value(e, sol)? {
+        Expression::Negate(e) => match eval_expr_value(e, sol, ctx)? {
             BoundValue::Literal(LiteralValue::Integer(n)) => {
                 Some(BoundValue::Literal(LiteralValue::Integer(-n)))
             }
@@ -1498,9 +1633,12 @@ fn eval_expr_value(expr: &Expression, sol: &Solution) -> Option<BoundValue> {
             }
             _ => None,
         },
+        Expression::Exists { .. } => Some(BoundValue::Literal(LiteralValue::Boolean(
+            eval_expr_bool(expr, sol, ctx)?,
+        ))),
         Expression::Arith { op, left, right } => {
-            let l = eval_expr_value(left, sol)?;
-            let r = eval_expr_value(right, sol)?;
+            let l = eval_expr_value(left, sol, ctx)?;
+            let r = eval_expr_value(right, sol, ctx)?;
             let ln = bound_as_f64(&l)?;
             let rn = bound_as_f64(&r)?;
             let v = match op {
@@ -1523,7 +1661,7 @@ fn eval_expr_value(expr: &Expression, sol: &Solution) -> Option<BoundValue> {
                 _ => BoundValue::Literal(LiteralValue::Decimal(v)),
             })
         }
-        Expression::Function { name, args } => eval_function(name, args, sol),
+        Expression::Function { name, args } => eval_function(name, args, sol, ctx),
         // Aggregates are only valid in HAVING and are rewritten to their
         // projection alias before execution; a stray call is an error.
         Expression::Aggregate(_) => None,
@@ -1531,8 +1669,13 @@ fn eval_expr_value(expr: &Expression, sol: &Solution) -> Option<BoundValue> {
 }
 
 /// Built-in SPARQL function subset over the compact literal model (P3-05).
-fn eval_function(name: &str, args: &[Expression], sol: &Solution) -> Option<BoundValue> {
-    let arg = |i: usize| eval_expr_value(args.get(i)?, sol);
+fn eval_function(
+    name: &str,
+    args: &[Expression],
+    sol: &Solution,
+    ctx: &ExecCtx<'_>,
+) -> Option<BoundValue> {
+    let arg = |i: usize| eval_expr_value(args.get(i)?, sol, ctx);
     let string_of = |bv: &BoundValue| -> Option<String> {
         match bv {
             BoundValue::Literal(l) => Some(l.lexical_form()),
@@ -1559,6 +1702,18 @@ fn eval_function(name: &str, args: &[Expression], sol: &Solution) -> Option<Boun
     let strlit = |s: String| BoundValue::Literal(LiteralValue::String(s));
 
     match name {
+        "CAST" => {
+            let datatype = match arg(1)? {
+                BoundValue::Iri(i) => i,
+                _ => return None,
+            };
+            cast_value(&arg(0)?, &datatype, &strlit)
+        }
+        _ if name.starts_with("XSD:") => {
+            let suffix = name[4..].to_ascii_lowercase();
+            let datatype = Iri::new(format!("http://www.w3.org/2001/XMLSchema#{suffix}"));
+            cast_value(&arg(0)?, &datatype, &strlit)
+        }
         "STR" => match arg(0)? {
             BoundValue::Iri(i) => Some(strlit(i.as_str().to_owned())),
             BoundValue::Literal(l) => Some(strlit(l.lexical_form())),
@@ -1633,26 +1788,26 @@ fn eval_function(name: &str, args: &[Expression], sol: &Solution) -> Option<Boun
             BoundValue::Literal(LiteralValue::Integer(_) | LiteralValue::Decimal(_))
         ))),
         "IF" => {
-            let cond = eval_expr_bool(&args[0], sol)?;
+            let cond = eval_expr_bool(&args[0], sol, ctx)?;
             if cond {
-                eval_expr_value(args.get(1)?, sol)
+                eval_expr_value(args.get(1)?, sol, ctx)
             } else {
-                eval_expr_value(args.get(2)?, sol)
+                eval_expr_value(args.get(2)?, sol, ctx)
             }
         }
         "COALESCE" => {
             for a in args {
-                if let Some(v) = eval_expr_value(a, sol) {
+                if let Some(v) = eval_expr_value(a, sol, ctx) {
                     return Some(v);
                 }
             }
             None
         }
         "IN" | "NOT IN" => {
-            let needle = eval_expr_value(args.first()?, sol)?;
+            let needle = eval_expr_value(args.first()?, sol, ctx)?;
             let mut found = false;
             for a in args.iter().skip(1) {
-                if let Some(v) = eval_expr_value(a, sol)
+                if let Some(v) = eval_expr_value(a, sol, ctx)
                     && v == needle
                 {
                     found = true;
@@ -1696,6 +1851,81 @@ fn compare_values(a: &BoundValue, b: &BoundValue) -> Option<i8> {
             std::cmp::Ordering::Equal => 0,
             std::cmp::Ordering::Greater => 1,
         }),
+        _ => None,
+    }
+}
+
+/// SPARQL `CAST(expr AS datatype)` / `xsd:type(expr)` over the compact model.
+fn cast_value(
+    bv: &BoundValue,
+    datatype: &Iri,
+    strlit: &dyn Fn(String) -> BoundValue,
+) -> Option<BoundValue> {
+    let dt = datatype.as_str();
+    match dt {
+        "http://www.w3.org/2001/XMLSchema#string" => {
+            let s = match bv {
+                BoundValue::Literal(l) => l.lexical_form(),
+                BoundValue::Iri(i) => i.as_str().to_owned(),
+                _ => return None,
+            };
+            Some(strlit(s))
+        }
+        "http://www.w3.org/2001/XMLSchema#integer" => match bv {
+            BoundValue::Literal(LiteralValue::Integer(n)) => {
+                Some(BoundValue::Literal(LiteralValue::Integer(*n)))
+            }
+            BoundValue::Literal(LiteralValue::Decimal(f)) => {
+                Some(BoundValue::Literal(LiteralValue::Integer(f.round() as i64)))
+            }
+            BoundValue::Literal(LiteralValue::Boolean(b)) => {
+                Some(BoundValue::Literal(LiteralValue::Integer(*b as i64)))
+            }
+            BoundValue::Literal(LiteralValue::String(s)) => Some(BoundValue::Literal(
+                LiteralValue::Integer(s.trim().parse::<i64>().ok()?),
+            )),
+            _ => None,
+        },
+        "http://www.w3.org/2001/XMLSchema#decimal"
+        | "http://www.w3.org/2001/XMLSchema#double"
+        | "http://www.w3.org/2001/XMLSchema#float" => match bv {
+            BoundValue::Literal(LiteralValue::Integer(n)) => {
+                Some(BoundValue::Literal(LiteralValue::Decimal(*n as f64)))
+            }
+            BoundValue::Literal(LiteralValue::Decimal(f)) => {
+                Some(BoundValue::Literal(LiteralValue::Decimal(*f)))
+            }
+            BoundValue::Literal(LiteralValue::Boolean(b)) => {
+                Some(BoundValue::Literal(LiteralValue::Decimal(if *b {
+                    1.0
+                } else {
+                    0.0
+                })))
+            }
+            BoundValue::Literal(LiteralValue::String(s)) => s
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .map(|f| BoundValue::Literal(LiteralValue::Decimal(f))),
+            _ => None,
+        },
+        "http://www.w3.org/2001/XMLSchema#boolean" => match bv {
+            BoundValue::Literal(LiteralValue::Boolean(b)) => {
+                Some(BoundValue::Literal(LiteralValue::Boolean(*b)))
+            }
+            BoundValue::Literal(LiteralValue::Integer(n)) => {
+                Some(BoundValue::Literal(LiteralValue::Boolean(*n != 0)))
+            }
+            BoundValue::Literal(LiteralValue::Decimal(f)) => {
+                Some(BoundValue::Literal(LiteralValue::Boolean(*f != 0.0)))
+            }
+            BoundValue::Literal(LiteralValue::String(s)) => match s.trim() {
+                "true" | "1" => Some(BoundValue::Literal(LiteralValue::Boolean(true))),
+                "false" | "0" => Some(BoundValue::Literal(LiteralValue::Boolean(false))),
+                _ => None,
+            },
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1799,12 +2029,16 @@ fn collect_vars_from_solutions(solutions: &[Solution]) -> Vec<String> {
     set.into_iter().collect()
 }
 
-fn materialize_construct(template: &[TriplePattern], solutions: &[Solution]) -> Vec<Triple> {
+fn materialize_construct(
+    template: &[TriplePattern],
+    solutions: &[Solution],
+    ctx: &ExecCtx<'_>,
+) -> Vec<Triple> {
     let mut out = Vec::new();
     for sol in solutions {
         for pattern in template {
             if let (Some(s), Some(p), Some(o)) = (
-                instantiate_node(&pattern.subject, sol),
+                instantiate_node(&pattern.subject, sol, ctx),
                 instantiate_iri(&pattern.predicate, sol),
                 instantiate_term(&pattern.object, sol),
             ) {
@@ -1815,9 +2049,10 @@ fn materialize_construct(template: &[TriplePattern], solutions: &[Solution]) -> 
     out
 }
 
-fn instantiate_node(p: &TermPattern, sol: &Solution) -> Option<NodeId> {
+fn instantiate_node(p: &TermPattern, sol: &Solution, ctx: &ExecCtx<'_>) -> Option<NodeId> {
     match p {
         TermPattern::Node(n) => Some(*n),
+        TermPattern::Iri(i) => ctx.read.node_for_iri(i).ok().flatten(),
         TermPattern::Variable(v) | TermPattern::Blank(v) => match sol.get(v)? {
             BoundValue::Node(n) | BoundValue::Blank(n) => Some(*n),
             _ => None,
@@ -1847,5 +2082,36 @@ fn instantiate_term(p: &TermPattern, sol: &Solution) -> Option<Term> {
             BoundValue::Literal(l) => Some(Term::Literal(l.clone())),
             BoundValue::Node(n) | BoundValue::Blank(n) => Some(Term::BlankNode(*n)),
         },
+    }
+}
+
+/// `EXISTS { pattern }` evaluated with the current solution bindings:
+/// the solution becomes a single-row VALUES joined with the pattern.
+fn exists_in_solution(pattern: &Algebra, sol: &Solution, ctx: &ExecCtx<'_>) -> Option<bool> {
+    let variables: Vec<String> = sol.bindings.keys().cloned().collect();
+    let bindings = vec![
+        sol.bindings
+            .values()
+            .map(|v| Some(term_pattern_from_bound(v)))
+            .collect(),
+    ];
+    let combined = Algebra::Join {
+        left: Box::new(Algebra::Values {
+            variables,
+            bindings,
+        }),
+        right: Box::new(pattern.clone()),
+    };
+    eval_algebra(&combined, ctx)
+        .map(|rows| !rows.is_empty())
+        .ok()
+}
+
+fn term_pattern_from_bound(bv: &BoundValue) -> TermPattern {
+    match bv {
+        BoundValue::Node(n) => TermPattern::Node(*n),
+        BoundValue::Iri(i) => TermPattern::Iri(i.clone()),
+        BoundValue::Literal(l) => TermPattern::Literal(l.clone()),
+        BoundValue::Blank(n) => TermPattern::Node(*n),
     }
 }

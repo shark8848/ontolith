@@ -99,6 +99,10 @@ fn eliminate_identity(algebra: Algebra) -> Algebra {
             left: Box::new(eliminate_identity(*left)),
             right: Box::new(eliminate_identity(*right)),
         },
+        Algebra::Minus { left, right } => Algebra::Minus {
+            left: Box::new(eliminate_identity(*left)),
+            right: Box::new(eliminate_identity(*right)),
+        },
         Algebra::Filter { expression, input } => Algebra::Filter {
             expression,
             input: Box::new(eliminate_identity(*input)),
@@ -183,6 +187,10 @@ fn reorder_and_merge(algebra: Algebra) -> Algebra {
             condition,
         },
         Algebra::Union { left, right } => Algebra::Union {
+            left: Box::new(reorder_and_merge(*left)),
+            right: Box::new(reorder_and_merge(*right)),
+        },
+        Algebra::Minus { left, right } => Algebra::Minus {
             left: Box::new(reorder_and_merge(*left)),
             right: Box::new(reorder_and_merge(*right)),
         },

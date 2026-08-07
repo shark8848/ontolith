@@ -31,6 +31,7 @@ struct SparqlParser<'a> {
     prefixes: BTreeMap<String, String>,
     base: Option<String>,
     logical: Vec<String>,
+    blank_counter: u64,
 }
 
 impl<'a> SparqlParser<'a> {
@@ -53,6 +54,7 @@ impl<'a> SparqlParser<'a> {
             prefixes,
             base: None,
             logical: vec!["normalize_query".into()],
+            blank_counter: 0,
         }
     }
 
@@ -131,6 +133,7 @@ impl<'a> SparqlParser<'a> {
         let mut projection_exprs: Vec<ProjectionExpr> = Vec::new();
         let mut star_projection = false;
         let mut construct_template = Vec::new();
+        let mut construct_where_consumed = false;
 
         if kind == QueryKind::Select {
             self.skip();
@@ -163,7 +166,9 @@ impl<'a> SparqlParser<'a> {
                             || self.looking_at_keyword("SUM")
                             || self.looking_at_keyword("AVG")
                             || self.looking_at_keyword("MIN")
-                            || self.looking_at_keyword("MAX");
+                            || self.looking_at_keyword("MAX")
+                            || self.looking_at_keyword("GROUP_CONCAT")
+                            || self.looking_at_keyword("SAMPLE");
                         self.restore(save);
                         if is_aggregate {
                             let spec = self.parse_aggregate_spec()?;
@@ -220,7 +225,17 @@ impl<'a> SparqlParser<'a> {
             }
         } else if kind == QueryKind::Construct {
             self.skip();
-            if self.peek_char() == Some('{') {
+            if self.looking_at_keyword("WHERE") {
+                // CONSTRUCT WHERE { pattern } — the template is the pattern.
+                self.eat_keyword("WHERE");
+                self.skip();
+                if self.peek_char() == Some('{') {
+                    let tpl = self.parse_construct_template()?;
+                    construct_template = tpl.clone();
+                    self.logical.push(format!("construct_where:{}", tpl.len()));
+                    construct_where_consumed = true;
+                }
+            } else if self.peek_char() == Some('{') {
                 construct_template = self.parse_construct_template()?;
                 self.logical
                     .push(format!("construct_template:{}", construct_template.len()));
@@ -228,11 +243,15 @@ impl<'a> SparqlParser<'a> {
         }
 
         self.skip();
-        // WHERE is optional for ASK { } form
-        let _ = self.eat_keyword("WHERE");
+        // WHERE is optional for ASK { } form; CONSTRUCT WHERE already consumed it.
+        if !construct_where_consumed {
+            let _ = self.eat_keyword("WHERE");
+        }
         self.skip();
 
-        let mut body = if self.peek_char() == Some('{') {
+        let mut body = if construct_where_consumed {
+            Algebra::Bgp(construct_template.clone())
+        } else if self.peek_char() == Some('{') {
             self.parse_group_graph_pattern()?
         } else if let Some(hint_subj) = parse_subject_hint(self.input)? {
             // legacy full-scan with subject hint
@@ -298,16 +317,18 @@ impl<'a> SparqlParser<'a> {
             self.skip();
         }
 
-        // HAVING — filter applied to the grouped result (may reference aliases).
+        // HAVING — one or more constraints applied to the grouped result
+        // (may reference aggregate aliases).
         let mut having: Option<Expression> = None;
-        if self.looking_at_keyword("HAVING") {
-            self.eat_keyword("HAVING");
+        while self.eat_keyword("HAVING") {
             self.skip();
-            having = Some(rewrite_having_aggregates(
-                self.parse_constraint()?,
-                &aggregates,
-            )?);
+            let constraint = rewrite_having_aggregates(self.parse_constraint()?, &aggregates)?;
+            having = Some(match having {
+                None => constraint,
+                Some(prev) => Expression::And(Box::new(prev), Box::new(constraint)),
+            });
             self.logical.push("having".into());
+            self.skip();
         }
 
         if !aggregates.is_empty() && !plain_vars.is_empty() && groups.is_empty() {
@@ -480,7 +501,7 @@ impl<'a> SparqlParser<'a> {
         self.skip();
         while self.peek_char() != Some('}') && !self.eof() {
             if let Some(p) = self.try_parse_triple_pattern()? {
-                patterns.push(p);
+                patterns.extend(self.parse_triple_semicolon_chain(p)?);
             } else {
                 break;
             }
@@ -699,41 +720,66 @@ impl<'a> SparqlParser<'a> {
             Ok(AggregateFunction::Count { variable, distinct })
         } else if self.looking_at_keyword("SUM") {
             self.eat_keyword("SUM");
-            Ok(AggregateFunction::Sum {
-                variable: self.parse_aggregate_arg()?,
-            })
+            let (variable, distinct) = self.parse_aggregate_arg()?;
+            Ok(AggregateFunction::Sum { variable, distinct })
         } else if self.looking_at_keyword("AVG") {
             self.eat_keyword("AVG");
-            Ok(AggregateFunction::Avg {
-                variable: self.parse_aggregate_arg()?,
-            })
+            let (variable, distinct) = self.parse_aggregate_arg()?;
+            Ok(AggregateFunction::Avg { variable, distinct })
         } else if self.looking_at_keyword("MIN") {
             self.eat_keyword("MIN");
-            Ok(AggregateFunction::Min {
-                variable: self.parse_aggregate_arg()?,
-            })
+            let (variable, distinct) = self.parse_aggregate_arg()?;
+            Ok(AggregateFunction::Min { variable, distinct })
         } else if self.looking_at_keyword("MAX") {
             self.eat_keyword("MAX");
-            Ok(AggregateFunction::Max {
-                variable: self.parse_aggregate_arg()?,
+            let (variable, distinct) = self.parse_aggregate_arg()?;
+            Ok(AggregateFunction::Max { variable, distinct })
+        } else if self.looking_at_keyword("GROUP_CONCAT") {
+            self.eat_keyword("GROUP_CONCAT");
+            self.skip();
+            self.expect_char('(')?;
+            self.skip();
+            self.eat_keyword("DISTINCT");
+            self.skip();
+            let variable = self.parse_var_name()?;
+            self.skip();
+            let separator = if self.eat_operator(";") {
+                self.skip();
+                self.expect_keyword("SEPARATOR")?;
+                self.skip();
+                self.expect_char('=')?;
+                self.skip();
+                let sep = self.parse_string_literal()?;
+                self.skip();
+                self.expect_char(')')?;
+                sep.lexical_form()
+            } else {
+                self.expect_char(')')?;
+                " ".to_owned()
+            };
+            Ok(AggregateFunction::GroupConcat {
+                variable,
+                separator,
             })
+        } else if self.looking_at_keyword("SAMPLE") {
+            self.eat_keyword("SAMPLE");
+            let (variable, _) = self.parse_aggregate_arg()?;
+            Ok(AggregateFunction::Sample { variable })
         } else {
             Err(self.err("expected aggregate function COUNT/SUM/AVG/MIN/MAX"))
         }
     }
 
-    fn parse_aggregate_arg(&mut self) -> Result<String, OntolithError> {
+    fn parse_aggregate_arg(&mut self) -> Result<(String, bool), OntolithError> {
         self.skip();
         self.expect_char('(')?;
         self.skip();
-        if self.eat_keyword("DISTINCT") {
-            return Err(self.err("DISTINCT is only supported on COUNT"));
-        }
+        let distinct = self.eat_keyword("DISTINCT");
         self.skip();
         let variable = self.parse_var_name()?;
         self.skip();
         self.expect_char(')')?;
-        Ok(variable)
+        Ok((variable, distinct))
     }
 
     fn parse_group_graph_pattern(&mut self) -> Result<Algebra, OntolithError> {
@@ -770,6 +816,14 @@ impl<'a> SparqlParser<'a> {
                     right: Box::new(right),
                 };
                 self.logical.push("union".into());
+            } else if self.eat_keyword("MINUS") {
+                self.skip();
+                let right = self.parse_group_graph_pattern()?;
+                acc = Algebra::Minus {
+                    left: Box::new(acc),
+                    right: Box::new(right),
+                };
+                self.logical.push("minus".into());
             } else if self.eat_keyword("FILTER") {
                 self.skip();
                 let expr = self.parse_constraint()?;
@@ -833,7 +887,7 @@ impl<'a> SparqlParser<'a> {
                 acc = join(acc, path);
             } else if let Some(pattern) = self.try_parse_triple_pattern()? {
                 // collect consecutive triple patterns into one BGP
-                let mut bgp = vec![pattern];
+                let mut bgp = self.parse_triple_semicolon_chain(pattern)?;
                 self.skip();
                 while self.peek_char() == Some('.') {
                     self.bump();
@@ -849,7 +903,7 @@ impl<'a> SparqlParser<'a> {
                         break;
                     }
                     if let Some(p) = self.try_parse_triple_pattern()? {
-                        bgp.push(p);
+                        bgp.extend(self.parse_triple_semicolon_chain(p)?);
                         self.skip();
                     } else {
                         break;
@@ -1253,6 +1307,48 @@ impl<'a> SparqlParser<'a> {
         }
     }
 
+    /// Semicolon shorthand: `?s :p1 ?o1; :p2 ?o2` reuses the subject across
+    /// consecutive predicate-object pairs.
+    fn parse_triple_semicolon_chain(
+        &mut self,
+        mut pattern: TriplePattern,
+    ) -> Result<Vec<TriplePattern>, OntolithError> {
+        let mut out = vec![pattern.clone()];
+        self.skip();
+        loop {
+            if self.eat_operator(";") {
+                self.skip();
+                let subject = pattern.subject.clone();
+                let predicate = if self.eat_keyword("a") {
+                    TermPattern::Iri(Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"))
+                } else {
+                    self.parse_var_or_term(false)?
+                };
+                let object = self.parse_var_or_term(false)?;
+                pattern = TriplePattern {
+                    subject: subject.clone(),
+                    predicate: predicate.clone(),
+                    object,
+                };
+                out.push(pattern.clone());
+                self.skip();
+            } else if self.eat_operator(",") {
+                self.skip();
+                let object = self.parse_var_or_term(false)?;
+                pattern = TriplePattern {
+                    subject: pattern.subject.clone(),
+                    predicate: pattern.predicate.clone(),
+                    object,
+                };
+                out.push(pattern.clone());
+                self.skip();
+            } else {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     fn parse_triple_pattern_inner(&mut self) -> Result<TriplePattern, OntolithError> {
         let subject = self.parse_var_or_term(true)?;
         self.skip();
@@ -1283,6 +1379,13 @@ impl<'a> SparqlParser<'a> {
             // Blank labels are existential vars in BGP matching for R1.
             let _ = allow_blank_as_var;
             return Ok(TermPattern::Blank(label));
+        }
+        if self.input[self.pos..].starts_with("[]") {
+            // Blank node property list `[]` — anonymous, unique per occurrence.
+            self.bump();
+            self.bump();
+            self.blank_counter += 1;
+            return Ok(TermPattern::Blank(format!("_gen_{}", self.blank_counter)));
         }
         if self.input[self.pos..].starts_with("node:") {
             let start = self.pos + 5;
@@ -1528,7 +1631,22 @@ impl<'a> SparqlParser<'a> {
         self.skip();
         if self.eat_operator("!") || self.eat_keyword("NOT") {
             self.skip();
+            if self.eat_keyword("EXISTS") {
+                let pattern = self.parse_group_graph_pattern()?;
+                return Ok(Expression::Exists {
+                    negated: true,
+                    pattern: Box::new(pattern),
+                });
+            }
+            self.skip();
             return Ok(Expression::Not(Box::new(self.parse_unary()?)));
+        }
+        if self.eat_keyword("EXISTS") {
+            let pattern = self.parse_group_graph_pattern()?;
+            return Ok(Expression::Exists {
+                negated: false,
+                pattern: Box::new(pattern),
+            });
         }
         if self.peek_char() == Some('-') || self.peek_char() == Some('+') {
             self.bump();
@@ -1570,6 +1688,25 @@ impl<'a> SparqlParser<'a> {
             self.skip();
             self.expect_char(')')?;
             return Ok(Expression::IsBlank(Box::new(e)));
+        }
+        if self.eat_keyword("CAST") {
+            self.skip();
+            self.expect_char('(')?;
+            self.skip();
+            let expr = self.parse_expression()?;
+            self.skip();
+            self.expect_keyword("AS")?;
+            self.skip();
+            let datatype = match self.parse_graph_term()? {
+                TermPattern::Iri(i) => i,
+                _ => return Err(self.err("CAST target must be a datatype IRI")),
+            };
+            self.skip();
+            self.expect_char(')')?;
+            return Ok(Expression::Function {
+                name: "CAST".into(),
+                args: vec![expr, Expression::Iri(datatype)],
+            });
         }
         if self.looking_at_keyword("COUNT")
             || self.looking_at_keyword("SUM")
@@ -1779,6 +1916,26 @@ impl<'a> SparqlParser<'a> {
                 break;
             }
         }
+        // Prefixed function names: `xsd:integer`, `ex:fn`.
+        if self.input[pos..].starts_with(':') {
+            let p2 = pos + 1;
+            if self.input[p2..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            {
+                name.push(':');
+                pos = p2;
+                while let Some(c) = self.input[pos..].chars().next() {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        name.push(c);
+                        pos += c.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
         // Skip whitespace between the name and `(`.
         let mut rest = &self.input[pos..];
         while let Some(c) = rest.chars().next() {
@@ -1799,7 +1956,7 @@ impl<'a> SparqlParser<'a> {
     fn eat_bare_name(&mut self) {
         self.skip();
         while let Some(c) = self.peek_char() {
-            if c.is_ascii_alphanumeric() || c == '_' {
+            if c.is_ascii_alphanumeric() || c == '_' || c == ':' {
                 self.bump();
             } else {
                 break;
@@ -2068,6 +2225,11 @@ fn walk_physical(algebra: &Algebra, steps: &mut Vec<String>) {
             walk_physical(right, steps);
             steps.push("union".into());
         }
+        Algebra::Minus { left, right } => {
+            walk_physical(left, steps);
+            walk_physical(right, steps);
+            steps.push("minus".into());
+        }
         Algebra::Filter { input, .. } => {
             walk_physical(input, steps);
             steps.push("filter".into());
@@ -2125,10 +2287,14 @@ fn walk_physical(algebra: &Algebra, steps: &mut Vec<String>) {
                         variable: None,
                         distinct: true,
                     } => "COUNT(DISTINCT *)".to_string(),
-                    AggregateFunction::Sum { variable } => format!("SUM(?{variable})"),
-                    AggregateFunction::Avg { variable } => format!("AVG(?{variable})"),
-                    AggregateFunction::Min { variable } => format!("MIN(?{variable})"),
-                    AggregateFunction::Max { variable } => format!("MAX(?{variable})"),
+                    AggregateFunction::Sum { variable, .. } => format!("SUM(?{variable})"),
+                    AggregateFunction::Avg { variable, .. } => format!("AVG(?{variable})"),
+                    AggregateFunction::Min { variable, .. } => format!("MIN(?{variable})"),
+                    AggregateFunction::Max { variable, .. } => format!("MAX(?{variable})"),
+                    AggregateFunction::GroupConcat { variable, .. } => {
+                        format!("GROUP_CONCAT(?{variable})")
+                    }
+                    AggregateFunction::Sample { variable } => format!("SAMPLE(?{variable})"),
                 };
                 steps.push(format!("{fun}->?{}", spec.output));
             }
@@ -2326,8 +2492,14 @@ fn collect_algebra_vars(algebra: &Algebra, out: &mut BTreeSet<String>) {
             collect_algebra_vars(left, out);
             collect_algebra_vars(right, out);
         }
+        Algebra::Minus { left, right } => {
+            collect_algebra_vars(left, out);
+            collect_algebra_vars(right, out);
+        }
         Algebra::Filter { expression, input } => {
-            collect_expr_vars(expression, out);
+            // Filter expressions reference variables without binding them, so
+            // they do not count toward BIND scope checks.
+            let _ = expression;
             collect_algebra_vars(input, out);
         }
         Algebra::Extend {
@@ -2378,6 +2550,9 @@ fn collect_expr_vars(expr: &Expression, out: &mut BTreeSet<String>) {
         }
         Expression::Bound(v) => {
             out.insert(v.clone());
+        }
+        Expression::Exists { pattern, .. } => {
+            collect_algebra_vars(pattern, out);
         }
         Expression::Iri(_) | Expression::Literal(_) | Expression::Aggregate(_) => {}
         Expression::IsIri(e)

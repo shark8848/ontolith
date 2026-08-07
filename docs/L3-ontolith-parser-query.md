@@ -56,6 +56,7 @@ SPARQL / RDF text
 | 属性路径扩展（分组/嵌套更完整 1.1 语法） | ❌ 后续增强 |
 | 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合） | ✅ |
 | 内置函数子集 + SELECT 表达式投影 `(expr AS ?alias)` + 算术（`+ - * /`、一元负号） | ✅（函数：STR/UCASE/LCASE/STRLEN/CONCAT/SUBSTR/CONTAINS/STRSTARTS/STRENDS/STRAFTER/STRBEFORE/LANG/DATATYPE/IRI/URI/ABS/CEIL/FLOOR/ROUND/ISNUMERIC/IF/COALESCE/IN/NOT IN） |
+| EXISTS / NOT EXISTS / MINUS + 聚合扩展（GROUP_CONCAT/SEPARATOR、SAMPLE、DISTINCT 聚合）+ CAST（`xsd:`/`CAST(expr AS …)`）+ CONSTRUCT WHERE + 构造简写（`;`/`,`/`[]`） | ✅（compact 字面量模型下类型化语义受限） |
 | SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE） | ✅ |
 | 高级子查询（相关子查询等） / EXISTS / 服务联邦 | ❌ 后续增强 |
 | 流式 Result 协议（网络层） | ❌ 属 L5 接入层 |
@@ -317,3 +318,4 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 | 2026-08-07 | 2.12.0 | Explain 增成本信息：`QueryExplain`/`QueryPlan` 新增 `estimated_rows`（主导 BGP 乘积×总数）与 `pattern_costs`（逐模式 selectivity/estimated_rows，代价优化器填充）；HTTP `/explain` JSON 输出两字段；query 58→59 测，server explain HTTP 测试 +1（20 测） |
 | 2026-08-07 | 2.13.0 | 异步抢占 token：`PreemptionToken`（deadline + cancel 标志，`reason()` 区分 Timeout/Cancelled，`preempt()` 可跨线程触发）；执行器轮询粒度细化到 BGP 候选/join 行/FILTER/EXTEND/VALUES 行，Update 抢占返回 `timed_out`/`cancelled` 标志且不落写；query 59→63 测 |
 | 2026-08-07 | 2.14.0 | 新增内置函数子集与表达式投影：`Expression::Function`（STR/UCASE/LCASE/STRLEN/CONCAT/SUBSTR/CONTAINS/STRSTARTS/STRENDS/STRAFTER/STRBEFORE/LANG/DATATYPE/IRI/URI/ABS/CEIL/FLOOR/ROUND/ISNUMERIC/IF/COALESCE/IN/NOT IN）+ 一元负号与二进制算术（`Arith`：`+ - * /`，整数保精、除法十进制）+ SELECT 投影 `(expr AS ?alias)`（执行器 eval 前剥离 Project 层，按别名绑定后裁剪）+ 投影变量唯一性检查（`syn-bad-03` 类重复别名拒绝）+ BIND 变量与同组已绑定变量冲突检查（`syntax-BINDscope6/7` 拒绝）+ 数字词法吸收小数/指数（`1.5`/`2e3`）+ 表达式变量收集（BIND 作用域）；query 63→65 测，W3C 套件 169→192 PASS（functions 71 项 parse-error 全解除：13 PASS、余 62 semantic；project-expression 4 PASS；syntax oneof/BINDscope/select-expr 转正），drift=0 |
+| 2026-08-07 | 2.15.0 | 新增否定与聚合/类型能力：`Expression::Exists`/`Algebra::Minus`（EXISTS/NOT EXISTS 以当前绑定并入 VALUES+Join 求值，MINUS 共享变量差集，表达式求值链接入抢占 ctx）+ 聚合扩展（GROUP_CONCAT + SEPARATOR、SAMPLE、SUM/AVG/MIN/MAX DISTINCT、多 HAVING 合并）+ CAST（`xsd:type(expr)` 前缀函数与 `CAST(expr AS xsd:…)`，integer/decimal/double/float/boolean/string）+ CONSTRUCT WHERE（模板即 WHERE 模式）+ 构造/查询语法（`;` 与 `,` 简写、`[]` 空白节点属性列表、BIND scope 仅计真正绑定）+ IRI subject 字典桥匹配（`bind_pattern` Node↔IRI、`bound_node` 索引特化、模板实例化 `node_for_iri`）；negation 11→1、aggregates 12→3、construct 逗号/CONSTRUCT WHERE 转正、cast 6 项 parse-error 全解除；W3C 192→229 PASS（parse-error 109→56，drift=0） |
