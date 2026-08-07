@@ -485,7 +485,19 @@ fn norm_literal(lex: &str, datatype: Option<&str>, lang: Option<&str>) -> NormTe
         };
     }
     let dt = datatype.unwrap_or(XSD_STRING);
-    let normalized = match dt {
+    match dt {
+        XSD_BOOLEAN => {
+            let b = matches!(lex.trim(), "true" | "1");
+            NormTerm::Literal {
+                lex: if b {
+                    "true".to_owned()
+                } else {
+                    "false".to_owned()
+                },
+                dt: NormDt::Boolean,
+                lang: None,
+            }
+        }
         XSD_INTEGER
         | "http://www.w3.org/2001/XMLSchema#long"
         | "http://www.w3.org/2001/XMLSchema#int"
@@ -499,31 +511,73 @@ fn norm_literal(lex: &str, datatype: Option<&str>, lang: Option<&str>) -> NormTe
         | "http://www.w3.org/2001/XMLSchema#unsignedInt"
         | "http://www.w3.org/2001/XMLSchema#unsignedShort"
         | "http://www.w3.org/2001/XMLSchema#unsignedByte" => match lex.parse::<i64>() {
-            Ok(_) => NormDt::Integer,
-            Err(_) => NormDt::Other(dt.to_owned()),
+            Ok(_) => NormTerm::Literal {
+                lex: lex.to_owned(),
+                dt: NormDt::Integer,
+                lang: None,
+            },
+            Err(_) => NormTerm::Literal {
+                lex: lex.to_owned(),
+                dt: NormDt::Other(dt.to_owned()),
+                lang: None,
+            },
         },
-        XSD_DECIMAL | XSD_DOUBLE | XSD_FLOAT => match lex.parse::<f64>() {
+        XSD_FLOAT => match lex.parse::<f32>() {
             Ok(v) => {
+                let bits = (v as f64).to_bits();
                 if v.is_nan() {
-                    NormDt::Other("numeric-nan".to_owned())
+                    NormTerm::Literal {
+                        lex: lex.to_owned(),
+                        dt: NormDt::Other("numeric-nan".to_owned()),
+                        lang: None,
+                    }
                 } else {
-                    NormDt::Numeric(v.to_bits())
+                    NormTerm::Literal {
+                        lex: format!("n{bits}"),
+                        dt: NormDt::Numeric(bits),
+                        lang: None,
+                    }
                 }
             }
-            Err(_) => NormDt::Other(dt.to_owned()),
+            Err(_) => NormTerm::Literal {
+                lex: lex.to_owned(),
+                dt: NormDt::Other(dt.to_owned()),
+                lang: None,
+            },
         },
-        XSD_BOOLEAN => NormDt::Boolean,
-        XSD_STRING => NormDt::Plain,
-        _ => NormDt::Other(dt.to_owned()),
-    };
-    let norm_lex = match normalized {
-        NormDt::Numeric(_) => format!("n{}", lex.parse::<f64>().unwrap_or(0.0).to_bits()),
-        _ => lex.to_owned(),
-    };
-    NormTerm::Literal {
-        lex: norm_lex,
-        dt: normalized,
-        lang: None,
+        XSD_DECIMAL | XSD_DOUBLE => match lex.parse::<f64>() {
+            Ok(v) => {
+                let bits = v.to_bits();
+                if v.is_nan() {
+                    NormTerm::Literal {
+                        lex: lex.to_owned(),
+                        dt: NormDt::Other("numeric-nan".to_owned()),
+                        lang: None,
+                    }
+                } else {
+                    NormTerm::Literal {
+                        lex: format!("n{bits}"),
+                        dt: NormDt::Numeric(bits),
+                        lang: None,
+                    }
+                }
+            }
+            Err(_) => NormTerm::Literal {
+                lex: lex.to_owned(),
+                dt: NormDt::Other(dt.to_owned()),
+                lang: None,
+            },
+        },
+        XSD_STRING => NormTerm::Literal {
+            lex: lex.to_owned(),
+            dt: NormDt::Plain,
+            lang: None,
+        },
+        _ => NormTerm::Literal {
+            lex: lex.to_owned(),
+            dt: NormDt::Other(dt.to_owned()),
+            lang: None,
+        },
     }
 }
 
@@ -582,7 +636,27 @@ fn norm_from_engine(value: &BoundValue, dict: Option<&InMemoryDictionary>) -> No
 }
 
 fn norm_row(row: &BTreeMap<String, NormTerm>) -> Vec<(String, NormTerm)> {
-    let mut v: Vec<(String, NormTerm)> = row.iter().map(|(k, t)| (k.clone(), t.clone())).collect();
+    // Blank node labels in query results are arbitrary; map them to
+    // positionally stable tokens so comparison is label-insensitive.
+    let mut bnode_map: BTreeMap<String, String> = BTreeMap::new();
+    let mut counter = 0usize;
+    let mut v: Vec<(String, NormTerm)> = row
+        .iter()
+        .map(|(k, t)| {
+            let t = match t {
+                NormTerm::Blank(label) => {
+                    let token = bnode_map.entry(label.clone()).or_insert_with(|| {
+                        let tok = format!("b{counter}");
+                        counter += 1;
+                        tok
+                    });
+                    NormTerm::Blank(token.clone())
+                }
+                other => other.clone(),
+            };
+            (k.clone(), t)
+        })
+        .collect();
     v.sort();
     v
 }

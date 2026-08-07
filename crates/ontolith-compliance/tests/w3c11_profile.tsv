@@ -89,12 +89,12 @@ bindings	Post-query VALUES with subj-var, 1 row	FAIL	semantic
 bindings	Post-query VALUES with subj/obj-vars, 2 rows with UNDEF	PASS	
 bindings	Post-subquery VALUES	PASS	
 bindings	VALUES inside GRAPH binding the same variable as the graph name	FAIL	named-graph
-cast	xsd:boolean cast	FAIL	semantic
-cast	xsd:decimal cast	FAIL	semantic
-cast	xsd:double cast	FAIL	semantic
-cast	xsd:float cast	FAIL	semantic
-cast	xsd:integer cast	FAIL	semantic
-cast	xsd:string cast	FAIL	semantic
+cast	xsd:boolean cast	PASS	
+cast	xsd:decimal cast	PASS	
+cast	xsd:double cast	PASS	
+cast	xsd:float cast	PASS	
+cast	xsd:integer cast	PASS	
+cast	xsd:string cast	PASS	
 clear	CLEAR ALL	PASS	
 clear	CLEAR DEFAULT	PASS	
 clear	CLEAR GRAPH	FAIL	parse-error
@@ -112,8 +112,8 @@ copy	COPY 3	FAIL	semantic
 copy	COPY 4	FAIL	semantic
 copy	COPY 6	FAIL	semantic
 copy	COPY 7	FAIL	semantic
-csv-tsv-res	tsv01 - TSV Result Format	FAIL	semantic
-csv-tsv-res	tsv02 - TSV Result Format	FAIL	semantic
+csv-tsv-res	tsv01 - TSV Result Format	PASS	
+csv-tsv-res	tsv02 - TSV Result Format	PASS	
 csv-tsv-res	tsv03 - TSV Result Format	FAIL	semantic
 delete	Graph-specific DELETE 1	FAIL	semantic
 delete	Graph-specific DELETE 1 (USING)	FAIL	data-format
@@ -180,7 +180,7 @@ functions	CEIL()	PASS
 functions	COALESCE()	PASS	
 functions	COALESCE() without arguments	PASS	
 functions	CONCAT()	PASS	
-functions	CONCAT() 2	FAIL	semantic
+functions	CONCAT() 2	PASS	
 functions	CONCAT() with a single parameter	PASS	
 functions	CONCAT() without parameter	PASS	
 functions	CONTAINS()	PASS	
@@ -193,7 +193,7 @@ functions	IF()	PASS
 functions	IF() error propogation	PASS	
 functions	IN 1	PASS	
 functions	IN 2	PASS	
-functions	IRI()/URI()	FAIL	semantic
+functions	IRI()/URI()	PASS	
 functions	IRI()/URI() when the input is an IRI	FAIL	other
 functions	LCASE()	PASS	
 functions	LCASE() on non-BMP unicode strings	PASS	
@@ -219,15 +219,15 @@ functions	SHA384()	FAIL	semantic
 functions	SHA384() on Unicode data	FAIL	semantic
 functions	SHA512()	FAIL	semantic
 functions	SHA512() on Unicode data	FAIL	semantic
-functions	STRAFTER()	FAIL	semantic
-functions	STRAFTER() datatyping	FAIL	semantic
-functions	STRBEFORE()	FAIL	semantic
-functions	STRBEFORE() datatyping	FAIL	semantic
-functions	STRDT()	FAIL	semantic
+functions	STRAFTER()	PASS	
+functions	STRAFTER() datatyping	PASS	
+functions	STRBEFORE()	PASS	
+functions	STRBEFORE() datatyping	PASS	
+functions	STRDT()	PASS	
 functions	STRDT() TypeErrors (updated for RDF 1.1)	FAIL	semantic
 functions	STRDT(STR())	FAIL	semantic
 functions	STRENDS()	PASS	
-functions	STRLANG()	FAIL	semantic
+functions	STRLANG()	PASS	
 functions	STRLANG() TypeErrors (updated for RDF 1.1)	PASS	
 functions	STRLANG(STR())	FAIL	semantic
 functions	STRLEN()	PASS	
@@ -238,7 +238,7 @@ functions	SUBSTR() (2-argument)	PASS
 functions	SUBSTR() (2-argument) on non-BMP unicode strings	PASS	
 functions	SUBSTR() (3-argument)	PASS	
 functions	SUBSTR() (3-argument) on non-BMP unicode strings	PASS	
-functions	TIMEZONE()	FAIL	semantic
+functions	TIMEZONE()	PASS	
 functions	TZ()	PASS	
 functions	UCASE()	PASS	
 functions	UCASE() on non-BMP unicode strings	PASS	
@@ -246,8 +246,8 @@ functions	UUID() pattern match	FAIL	data-format
 functions	UUID() per binding	FAIL	data-format
 functions	YEAR()	PASS	
 functions	isNumeric()	PASS	
-functions	plus-1-corrected	FAIL	semantic
-functions	plus-2-corrected	FAIL	semantic
+functions	plus-1-corrected	PASS	
+functions	plus-2-corrected	PASS	
 grouping	Group-1	PASS	
 grouping	Group-3	PASS	
 grouping	Group-4	PASS	

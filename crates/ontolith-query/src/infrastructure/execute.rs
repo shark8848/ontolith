@@ -57,6 +57,7 @@ impl AlgebraExecutor {
             read: self.read.as_ref(),
             txn_id: request.txn_id,
             token: &token,
+            base: plan.base.as_deref(),
         };
 
         // Projection expressions must see every variable bound by the WHERE
@@ -165,6 +166,7 @@ struct ExecCtx<'a> {
     read: &'a dyn QueryReadService,
     txn_id: Option<TxnId>,
     token: &'a PreemptionToken,
+    base: Option<&'a str>,
 }
 
 impl ExecCtx<'_> {
@@ -212,6 +214,7 @@ pub fn execute_update(
         read,
         txn_id: Some(txn_id),
         token: &token,
+        base: None,
     };
     let mut affected: u64 = 0;
     let mut staged = false;
@@ -259,6 +262,7 @@ pub fn execute_update(
                             read: op_read,
                             txn_id: Some(txn_id),
                             token: &token,
+                            base: None,
                         };
                         let solutions = eval_algebra(where_pattern, &op_ctx)?;
                         let mut ops = Vec::new();
@@ -303,6 +307,7 @@ pub fn execute_update(
                             read: op_read,
                             txn_id: Some(txn_id),
                             token: &token,
+                            base: None,
                         };
                         let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &op_ctx)?;
                         let mut ops = Vec::new();
@@ -1745,26 +1750,20 @@ fn eval_function(
         "CONCAT" => {
             let mut out = String::new();
             let mut lang: Option<String> = None;
-            let mut lang_conflict = false;
+            let mut all_lang = true;
             for i in 0..args.len() {
                 let l = str_lit(i)?;
                 out.push_str(str_lit_lex(&l)?);
                 match l {
                     LiteralValue::Lang { lang: tag, .. } => match &lang {
                         None => lang = Some(tag.as_str().to_owned()),
-                        Some(existing) if existing == tag.as_str() => {}
-                        Some(_) => lang_conflict = true,
+                        Some(existing) if existing != tag.as_str() => lang = None,
+                        Some(_) => {}
                     },
-                    _ => {
-                        if lang.is_none() {
-                            lang = Some(String::new());
-                        }
-                    }
+                    _ => all_lang = false,
                 }
             }
-            let value = if lang_conflict || lang.as_deref() == Some("") {
-                strlit(out)
-            } else if let Some(tag) = lang {
+            let value = if all_lang && let Some(tag) = lang {
                 BoundValue::Literal(LiteralValue::Lang {
                     value: out,
                     lang: LanguageTag::parse(tag).ok()?,
@@ -1805,23 +1804,32 @@ fn eval_function(
         }
         "STRAFTER" => {
             let l = str_lit(0)?;
+            let needle_lit = str_lit(1)?;
+            if !str_args_compatible(&l, &needle_lit) {
+                return None;
+            }
             let s = str_lit_lex(&l)?.to_owned();
-            let needle = str_lit_lex(&str_lit(1)?)?.to_owned();
-            let out = match s.find(&needle) {
-                Some(idx) => s[idx + needle.len()..].to_owned(),
-                None => String::new(),
-            };
-            Some(BoundValue::Literal(str_result(&l, out)))
+            let needle = str_lit_lex(&needle_lit)?.to_owned();
+            match s.find(&needle) {
+                Some(idx) => Some(BoundValue::Literal(str_result(
+                    &l,
+                    s[idx + needle.len()..].to_owned(),
+                ))),
+                None => Some(strlit(String::new())),
+            }
         }
         "STRBEFORE" => {
             let l = str_lit(0)?;
+            let needle_lit = str_lit(1)?;
+            if !str_args_compatible(&l, &needle_lit) {
+                return None;
+            }
             let s = str_lit_lex(&l)?.to_owned();
-            let needle = str_lit_lex(&str_lit(1)?)?.to_owned();
-            let out = match s.find(&needle) {
-                Some(idx) => s[..idx].to_owned(),
-                None => String::new(),
-            };
-            Some(BoundValue::Literal(str_result(&l, out)))
+            let needle = str_lit_lex(&needle_lit)?.to_owned();
+            match s.find(&needle) {
+                Some(idx) => Some(BoundValue::Literal(str_result(&l, s[..idx].to_owned()))),
+                None => Some(strlit(String::new())),
+            }
         }
         "LANG" => match arg(0)? {
             BoundValue::Literal(LiteralValue::Lang { lang, .. }) => {
@@ -1830,13 +1838,22 @@ fn eval_function(
             BoundValue::Literal(_) => Some(strlit(String::new())),
             _ => None,
         },
+        "LANGMATCHES" => {
+            let tag = str_lit_lex(&str_lit(0)?)?.to_ascii_lowercase();
+            let range = str_lit_lex(&str_lit(1)?)?.to_ascii_lowercase();
+            Some(bool(lang_matches(&tag, &range)))
+        }
         "DATATYPE" => match arg(0)? {
             BoundValue::Literal(l) => Some(BoundValue::Iri(l.xsd_datatype_iri())),
             _ => None,
         },
         "IRI" | "URI" => {
             let s = string(0)?;
-            Iri::parse(s).ok().map(BoundValue::Iri)
+            let resolved = match ctx.base {
+                Some(base) => resolve_iri(&s, base),
+                None => Some(s),
+            }?;
+            Iri::parse(resolved).ok().map(BoundValue::Iri)
         }
         "STRDT" => {
             let lit = str_lit(0)?;
@@ -1951,6 +1968,9 @@ fn eval_function(
         }
         "TIMEZONE" => {
             let dt = datetime_of(&arg(0)?)?;
+            if matches!(dt.tz, TimezoneOffset::None) {
+                return None;
+            }
             let lex = format_duration(&dt.tz);
             Some(BoundValue::Literal(LiteralValue::Typed {
                 value: lex,
@@ -1977,6 +1997,22 @@ fn str_lit_lex(l: &LiteralValue) -> Option<&str> {
     }
 }
 
+/// SPARQL argument compatibility for STRBEFORE/STRAFTER: both simple or
+/// xsd:string; both plain literals with the same language tag; or left is a
+/// plain literal with a language tag and right is simple or xsd:string.
+fn str_args_compatible(l: &LiteralValue, r: &LiteralValue) -> bool {
+    let simple = |lit: &LiteralValue| match lit {
+        LiteralValue::String(_) => true,
+        LiteralValue::Typed { datatype, .. } if datatype.as_str() == XSD_STRING_IRI => true,
+        _ => false,
+    };
+    match (l, r) {
+        (LiteralValue::Lang { lang: a, .. }, LiteralValue::Lang { lang: b, .. }) => a == b,
+        (LiteralValue::Lang { .. }, _) => simple(r),
+        (_, _) => simple(l) && simple(r),
+    }
+}
+
 /// Result literal for string-preserving functions (lang carried over).
 fn str_result(orig: &LiteralValue, lex: String) -> LiteralValue {
     match orig {
@@ -1986,6 +2022,18 @@ fn str_result(orig: &LiteralValue, lex: String) -> LiteralValue {
         },
         _ => LiteralValue::String(lex),
     }
+}
+
+/// RFC 4647 basic filtering: `*` matches any tag; otherwise the tag equals
+/// the range or begins with `range-`.
+fn lang_matches(tag: &str, range: &str) -> bool {
+    if range == "*" {
+        return !tag.is_empty();
+    }
+    tag == range
+        || tag
+            .strip_prefix(range)
+            .is_some_and(|rest| rest.starts_with('-'))
 }
 
 /// CEIL/FLOOR/ROUND preserve the numeric datatype of the argument.
@@ -2014,6 +2062,71 @@ fn encode_for_uri(s: &str) -> String {
         }
     }
     out
+}
+
+/// Resolve a (possibly relative) IRI reference against a base IRI (RFC 3986
+/// §5.3 subset: absolute, network-path, root-relative, and relative refs).
+fn resolve_iri(reference: &str, base: &str) -> Option<String> {
+    if reference.contains(':') {
+        return Some(reference.to_owned());
+    }
+    if base.is_empty() {
+        return None;
+    }
+    let (scheme, rest) = base.split_once(':')?;
+    let no_fragment = rest.split('#').next().unwrap_or(rest);
+    let (authority, path) = match no_fragment.strip_prefix("//") {
+        Some(a) => match a.find('/') {
+            Some(idx) => (Some(&a[..idx]), &a[idx..]),
+            None => (Some(a), ""),
+        },
+        None => (None, no_fragment),
+    };
+    let path = match path.find(['?', '#']) {
+        Some(idx) => &path[..idx],
+        None => path,
+    };
+    let prefix = match authority {
+        Some(a) => format!("{scheme}://{a}"),
+        None => format!("{scheme}:"),
+    };
+    if reference.starts_with("//") {
+        return Some(format!("{scheme}:{reference}"));
+    }
+    if reference.starts_with('/') {
+        return Some(format!("{prefix}{}", remove_dot_segments(reference)));
+    }
+    if reference.starts_with('?') || reference.starts_with('#') {
+        return Some(format!("{prefix}{path}{reference}"));
+    }
+    let dir = match path.rfind('/') {
+        Some(idx) => &path[..=idx],
+        None => "",
+    };
+    Some(format!(
+        "{prefix}{}",
+        remove_dot_segments(&format!("{dir}{reference}"))
+    ))
+}
+
+fn remove_dot_segments(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "." => {}
+            ".." => {
+                out.pop();
+            }
+            "" if out.is_empty() => {}
+            other => out.push(other),
+        }
+    }
+    let joined = out.join("/");
+    if path.starts_with('/') && !joined.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    }
 }
 
 struct DateTimeParts {
