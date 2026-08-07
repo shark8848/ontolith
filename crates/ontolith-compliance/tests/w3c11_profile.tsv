@@ -11,7 +11,7 @@ add	ADD 8	PASS
 aggregates	AVG	PASS	
 aggregates	AVG DISTINCT with GROUP BY	PASS	
 aggregates	AVG with GROUP BY	PASS	
-aggregates	AVG with empty group (value defined to be 0)	FAIL	semantic
+aggregates	AVG with empty group (value defined to be 0)	PASS	
 aggregates	COUNT 1	PASS	
 aggregates	COUNT 10	PASS	
 aggregates	COUNT 11	PASS	
@@ -27,30 +27,30 @@ aggregates	COUNT 8b	PASS
 aggregates	COUNT 9	PASS	
 aggregates	COUNT DISTINCT with GROUP BY	PASS	
 aggregates	COUNT(DISTINCT *) with GROUP BY	PASS	
-aggregates	COUNT: no GROUP BY inside of GRAPH	FAIL	semantic
+aggregates	COUNT: no GROUP BY inside of GRAPH	PASS	
 aggregates	COUNT: no match, no group	PASS	
 aggregates	COUNT: no match, with group	PASS	
-aggregates	Error in AVG	FAIL	semantic
+aggregates	Error in AVG	PASS	
 aggregates	GROUP BY with a built-in function	PASS	
 aggregates	GROUP BY with a function	PASS	
 aggregates	GROUP_CONCAT 1	PASS	
 aggregates	GROUP_CONCAT 2	PASS	
-aggregates	GROUP_CONCAT DISTINCT	FAIL	semantic
+aggregates	GROUP_CONCAT DISTINCT	PASS	
 aggregates	GROUP_CONCAT with SEPARATOR	PASS	
 aggregates	GROUP_CONCAT with different language tags	PASS	
-aggregates	GROUP_CONCAT with one element	FAIL	semantic
-aggregates	GROUP_CONCAT with same language tag	FAIL	semantic
-aggregates	HAVING: multiple conditions	FAIL	other
+aggregates	GROUP_CONCAT with one element	PASS	
+aggregates	GROUP_CONCAT with same language tag	PASS	
+aggregates	HAVING: multiple conditions	PASS	
 aggregates	MAX	PASS	
 aggregates	MAX DISTINCT with GROUP BY	PASS	
 aggregates	MAX with GROUP BY	PASS	
 aggregates	MIN	PASS	
 aggregates	MIN DISTINCT with GROUP BY	PASS	
 aggregates	MIN with GROUP BY	PASS	
-aggregates	Protect from error in AVG	FAIL	parse-error
+aggregates	Protect from error in AVG	PASS	
 aggregates	SAMPLE	PASS	
 aggregates	SAMPLE DISTINCT	PASS	
-aggregates	SUM	FAIL	semantic
+aggregates	SUM	PASS	
 aggregates	SUM DISTINCT with GROUP BY	PASS	
 aggregates	SUM with GROUP BY	PASS	
 aggregates	agg on empty set, explicit grouping	PASS	
@@ -88,7 +88,7 @@ bindings	Post-query VALUES with pred-var, 1 row	PASS
 bindings	Post-query VALUES with subj-var, 1 row	PASS	
 bindings	Post-query VALUES with subj/obj-vars, 2 rows with UNDEF	PASS	
 bindings	Post-subquery VALUES	PASS	
-bindings	VALUES inside GRAPH binding the same variable as the graph name	FAIL	semantic
+bindings	VALUES inside GRAPH binding the same variable as the graph name	PASS	
 cast	xsd:boolean cast	PASS	
 cast	xsd:decimal cast	PASS	
 cast	xsd:double cast	PASS	
@@ -275,7 +275,7 @@ negation	Subsets by exclusion (MINUS)	PASS
 negation	Subsets by exclusion (NOT EXISTS)	PASS	
 negation	Subtraction with MINUS from a fully bound minuend	PASS	
 negation	Subtraction with MINUS from a partially bound minuend	PASS	
-negation	outer GRAPH operator does not affect MINUS disjointness	FAIL	semantic
+negation	outer GRAPH operator does not affect MINUS disjointness	PASS	
 project-expression	Expression has undefined variable	PASS	
 project-expression	Expression has variable that may be unbound	PASS	
 project-expression	Expression is equality	PASS	
@@ -287,7 +287,7 @@ property-path	(pp01) Simple path	PASS
 property-path	(pp02) Star path	PASS	
 property-path	(pp03) Simple path with loop	PASS	
 property-path	(pp06) Path with two graphs	PASS	
-property-path	(pp07) Path with one graph	FAIL	semantic
+property-path	(pp07) Path with one graph	PASS	
 property-path	(pp08) Reverse path	PASS	
 property-path	(pp09) Reverse sequence path	PASS	
 property-path	(pp10) Path with negation	PASS	
@@ -303,8 +303,8 @@ property-path	(pp30) Operator precedence 1	PASS
 property-path	(pp31) Operator precedence 2	PASS	
 property-path	(pp32) Operator precedence 3	PASS	
 property-path	(pp33) Operator precedence 4	PASS	
-property-path	(pp34) Named Graph 1	FAIL	semantic
-property-path	(pp35) Named Graph 2	FAIL	semantic
+property-path	(pp34) Named Graph 1	PASS	
+property-path	(pp35) Named Graph 2	PASS	
 property-path	(pp36) Arbitrary path with bound endpoints	PASS	
 property-path	(pp37) Nested (*)*	PASS	
 property-path	* with end being a constant on the empty dataset	PASS	
@@ -316,13 +316,13 @@ property-path	Negated Property Set with inverse properties	PASS
 property-path	Negated Property Set with the inverse rdf:type property written using '^a'	PASS	
 property-path	Negated Property Set with the rdf:type property written using 'a'	PASS	
 property-path	ZeroOrX property paths should only return terms in the graph and not also terms defined in the query	PASS	
-subquery	sq01 - Subquery within graph pattern	FAIL	semantic
-subquery	sq02 - Subquery within graph pattern, graph variable is bound	FAIL	semantic
-subquery	sq03 - Subquery within graph pattern, graph variable is not bound	FAIL	semantic
+subquery	sq01 - Subquery within graph pattern	FAIL	data-format
+subquery	sq02 - Subquery within graph pattern, graph variable is bound	FAIL	data-format
+subquery	sq03 - Subquery within graph pattern, graph variable is not bound	FAIL	data-format
 subquery	sq04 - Subquery within graph pattern, default graph does not apply	FAIL	data-format
-subquery	sq05 - Subquery within graph pattern, from named applies	FAIL	semantic
+subquery	sq05 - Subquery within graph pattern, from named applies	FAIL	data-format
 subquery	sq06 - Subquery with graph pattern, from named applies	FAIL	data-format
-subquery	sq07 - Subquery with from 	FAIL	semantic
+subquery	sq07 - Subquery with from 	FAIL	data-format
 subquery	sq08 - Subquery with aggregate	FAIL	data-format
 subquery	sq09 - Nested Subqueries	FAIL	data-format
 subquery	sq10 - Subquery with exists	FAIL	data-format

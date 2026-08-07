@@ -31,6 +31,15 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const RS_RESULT_SET: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#ResultSet";
+const RS_RESULT_VARIABLE: &str =
+    "http://www.w3.org/2001/sw/DataAccess/tests/result-set#resultVariable";
+const RS_SOLUTION: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#solution";
+const RS_BINDING: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#binding";
+const RS_VALUE: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#value";
+const RS_VARIABLE: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#variable";
+
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
@@ -292,25 +301,39 @@ fn collect_named_graphs(
 ) -> Vec<NamedGraphFile> {
     let mut out = Vec::new();
     for object in objects {
-        if let Term::BlankNode(id) = object
-            && let Some(triples) = map.get(id)
-        {
-            let mut file = None;
-            let mut name = None;
-            for (p, o) in triples {
-                if (p.as_str() == UT_GRAPH || p.as_str() == QT_GRAPH)
-                    && let Some(iri) = term_iri(o)
-                {
-                    file = Some(relative_path(base_dir, &iri));
-                } else if p.as_str() == RDFS_LABEL
-                    && let Some(label) = term_literal_str(o)
-                {
-                    name = Some(label);
+        let (file, label) = match object {
+            // Direct `qt:graphData <file.ttl>` declarations (no label).
+            Term::Iri(i) => (Some(relative_path(base_dir, i.as_str())), None),
+            Term::BlankNode(id) => {
+                let Some(triples) = map.get(id) else { continue };
+                let mut file = None;
+                let mut name = None;
+                for (p, o) in triples {
+                    if (p.as_str() == UT_GRAPH || p.as_str() == QT_GRAPH)
+                        && let Some(iri) = term_iri(o)
+                    {
+                        file = Some(relative_path(base_dir, &iri));
+                    } else if p.as_str() == RDFS_LABEL
+                        && let Some(label) = term_literal_str(o)
+                    {
+                        name = Some(label);
+                    }
                 }
+                (file, name)
             }
-            if let (Some(file), Some(name)) = (file, name) {
-                out.push(NamedGraphFile { name, file });
-            }
+            _ => continue,
+        };
+        if let Some(file) = file {
+            // Manifests without an rdfs:label (e.g.
+            // aggregates/agg-empty-group-count-graph) name the graph after
+            // the data file.
+            let name = label.unwrap_or_else(|| {
+                file.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("graph")
+                    .to_owned()
+            });
+            out.push(NamedGraphFile { name, file });
         }
     }
     out
@@ -1074,6 +1097,116 @@ fn graph_set(triples: &[Triple], dict: &InMemoryDictionary) -> BTreeSet<String> 
         .collect()
 }
 
+/// Parse a W3C `rs:ResultSet` Turtle table (used by some aggregate tests
+/// whose expected result is serialized as RDF rather than SRX/SRJ). The
+/// files use relative IRIs (`<singleton.ttl>`) for graph-name bindings, so
+/// the file's parent directory is used as the base IRI and relative values
+/// are normalized back to their file name to match the harness's graph names.
+fn parse_rdf_result_set(path: &Path) -> Result<ResultRows, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let parent = path
+        .parent()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let base = format!("file://{}/", parent.display().to_string().replace('\\', "/"));
+    let dict = InMemoryDictionary::new();
+    let parsed = BasicRdfParser::new()
+        .parse(
+            &ParseRequest::turtle("inline").with_base(base.clone()),
+            &text,
+            &dict,
+        )
+        .map_err(|e| format!("parse {}: {e:?}", path.display()))?;
+    let triples = parsed.dataset.default_graph;
+    let mut map: BTreeMap<NodeId, Vec<(Iri, Term)>> = BTreeMap::new();
+    for t in &triples {
+        map.entry(t.subject)
+            .or_default()
+            .push((t.predicate.clone(), t.object.clone()));
+    }
+    let mut root = None;
+    for (subject, props) in &map {
+        if props.iter().any(|(p, o)| {
+            p.as_str() == RDF_TYPE && term_iri(o).as_deref() == Some(RS_RESULT_SET)
+        }) {
+            root = Some(*subject);
+            break;
+        }
+    }
+    let root =
+        root.ok_or_else(|| format!("{} is not an rs:ResultSet", path.display()))?;
+    let props = map
+        .get(&root)
+        .ok_or_else(|| "rs:ResultSet node has no properties".to_owned())?;
+    let mut vars = Vec::new();
+    let mut solutions = Vec::new();
+    for (p, o) in props {
+        if p.as_str() == RS_RESULT_VARIABLE {
+            if let Some(v) = term_literal_str(o) {
+                vars.push(v);
+            }
+        } else if p.as_str() == RS_SOLUTION
+            && let Term::BlankNode(id) = o
+        {
+            solutions.push(*id);
+        }
+    }
+    let mut rows = Vec::new();
+    for sol in solutions {
+        let mut row = BTreeMap::new();
+        let Some(sol_props) = map.get(&sol) else { continue };
+        for (p, o) in sol_props {
+            if p.as_str() != RS_BINDING {
+                continue;
+            }
+            let Term::BlankNode(binding) = o else { continue };
+            let Some(bind_props) = map.get(binding) else { continue };
+            let mut var = None;
+            let mut value = None;
+            for (bp, bo) in bind_props {
+                if bp.as_str() == RS_VARIABLE {
+                    var = term_literal_str(bo);
+                } else if bp.as_str() == RS_VALUE {
+                    value = Some(bo.clone());
+                }
+            }
+            if let (Some(var), Some(value)) = (var, value) {
+                row.insert(var, term_to_norm(&value, &dict, &base));
+            }
+        }
+        rows.push(row);
+    }
+    Ok((vars, rows))
+}
+
+fn term_to_norm(term: &Term, dict: &InMemoryDictionary, base: &str) -> NormTerm {
+    match term {
+        Term::Iri(i) => {
+            let s = i.as_str();
+            let s = s.strip_prefix(base).unwrap_or(s);
+            NormTerm::Iri(s.to_owned())
+        }
+        Term::Literal(l) => match l {
+            LiteralValue::Lang { value, lang } => {
+                norm_literal(value, None, Some(lang.as_str()))
+            }
+            LiteralValue::Typed { value, datatype } => {
+                norm_literal(value, Some(datatype.as_str()), None)
+            }
+            other => norm_literal(
+                &other.lexical_form(),
+                Some(other.xsd_datatype_iri().as_str()),
+                None,
+            ),
+        },
+        Term::BlankNode(id) => match dict.decode_node(*id) {
+            Some(label) => NormTerm::Blank(label),
+            None => NormTerm::Blank(format!("_:b{}", id.get())),
+        },
+    }
+}
+
 fn parse_graph_file(path: &Path) -> Result<(Vec<Triple>, InMemoryDictionary), String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -1405,7 +1538,15 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
                     compare_table(&actual, &vars, &rows, &loaded).map_err(FailReason::Semantic)
                 }
                 Expected::Graph(path) => {
-                    compare_graph(&actual, path, &loaded).map_err(FailReason::Semantic)
+                    // W3C result tables serialized as RDF (`rs:ResultSet`,
+                    // aggregates/agg-empty-group-count-graph.ttl) compare as
+                    // tables despite the `.ttl` extension.
+                    if let Ok((vars, rows)) = parse_rdf_result_set(path) {
+                        compare_table(&actual, &vars, &rows, &loaded)
+                            .map_err(FailReason::Semantic)
+                    } else {
+                        compare_graph(&actual, path, &loaded).map_err(FailReason::Semantic)
+                    }
                 }
                 Expected::None => Ok(()),
                 other => fail(FailReason::Other(format!(

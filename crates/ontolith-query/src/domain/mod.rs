@@ -118,43 +118,52 @@ pub enum Expression {
     },
 }
 
+/// Aggregate argument: a bare variable (fast solution lookup) or an
+/// arbitrary expression evaluated per input row.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateExpr {
+    Variable(String),
+    Expression(Box<Expression>),
+}
+
 /// Aggregate function subset for SELECT projections (full aggregation).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AggregateFunction {
-    /// COUNT(*) when `variable` is None, COUNT(?v) otherwise.
+    /// COUNT(*) when `expr` is None, otherwise COUNT over the argument.
     Count {
-        variable: Option<String>,
+        expr: Option<AggregateExpr>,
         distinct: bool,
     },
     Sum {
-        variable: String,
+        expr: AggregateExpr,
         distinct: bool,
     },
     Avg {
-        variable: String,
+        expr: AggregateExpr,
         distinct: bool,
     },
     Min {
-        variable: String,
+        expr: AggregateExpr,
         distinct: bool,
     },
     Max {
-        variable: String,
+        expr: AggregateExpr,
         distinct: bool,
     },
     /// `GROUP_CONCAT(?v)` / `GROUP_CONCAT(?v; SEPARATOR=", ")`.
     GroupConcat {
-        variable: String,
+        expr: AggregateExpr,
+        distinct: bool,
         separator: String,
     },
     /// `SAMPLE(?v)` — arbitrary value from the group.
     Sample {
-        variable: String,
+        expr: AggregateExpr,
     },
 }
 
 /// One aggregate expression in the SELECT projection: `(AGG(?v) AS ?out)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AggregateSpec {
     pub function: AggregateFunction,
     pub output: String,
@@ -503,57 +512,72 @@ pub fn summarize_algebra(algebra: &Algebra) -> String {
 fn summarize_aggregate(function: &AggregateFunction) -> String {
     match function {
         AggregateFunction::Count {
-            variable: None,
+            expr: None,
             distinct: false,
         } => "COUNT(*)".to_string(),
         AggregateFunction::Count {
-            variable: Some(v),
+            expr: Some(expr),
             distinct: false,
-        } => format!("COUNT(?{v})"),
+        } => format!("COUNT({})", summarize_aggregate_expr(expr)),
         AggregateFunction::Count {
-            variable: Some(v),
+            expr: Some(expr),
             distinct: true,
-        } => format!("COUNT(DISTINCT ?{v})"),
+        } => format!("COUNT(DISTINCT {})", summarize_aggregate_expr(expr)),
         AggregateFunction::Count {
-            variable: None,
+            expr: None,
             distinct: true,
         } => "COUNT(DISTINCT *)".to_string(),
         AggregateFunction::Sum {
-            variable,
+            expr,
             distinct: false,
-        } => format!("SUM(?{variable})"),
+        } => format!("SUM({})", summarize_aggregate_expr(expr)),
         AggregateFunction::Sum {
-            variable,
+            expr,
             distinct: true,
-        } => format!("SUM(DISTINCT ?{variable})"),
+        } => format!("SUM(DISTINCT {})", summarize_aggregate_expr(expr)),
         AggregateFunction::Avg {
-            variable,
+            expr,
             distinct: false,
-        } => format!("AVG(?{variable})"),
+        } => format!("AVG({})", summarize_aggregate_expr(expr)),
         AggregateFunction::Avg {
-            variable,
+            expr,
             distinct: true,
-        } => format!("AVG(DISTINCT ?{variable})"),
+        } => format!("AVG(DISTINCT {})", summarize_aggregate_expr(expr)),
         AggregateFunction::Min {
-            variable,
+            expr,
             distinct: false,
-        } => format!("MIN(?{variable})"),
+        } => format!("MIN({})", summarize_aggregate_expr(expr)),
         AggregateFunction::Min {
-            variable,
+            expr,
             distinct: true,
-        } => format!("MIN(DISTINCT ?{variable})"),
+        } => format!("MIN(DISTINCT {})", summarize_aggregate_expr(expr)),
         AggregateFunction::Max {
-            variable,
+            expr,
             distinct: false,
-        } => format!("MAX(?{variable})"),
+        } => format!("MAX({})", summarize_aggregate_expr(expr)),
         AggregateFunction::Max {
-            variable,
+            expr,
             distinct: true,
-        } => format!("MAX(DISTINCT ?{variable})"),
-        AggregateFunction::GroupConcat { variable, .. } => {
-            format!("GROUP_CONCAT(?{variable})")
+        } => format!("MAX(DISTINCT {})", summarize_aggregate_expr(expr)),
+        AggregateFunction::GroupConcat {
+            expr, distinct, ..
+        } => {
+            if *distinct {
+                format!("GROUP_CONCAT(DISTINCT {})", summarize_aggregate_expr(expr))
+            } else {
+                format!("GROUP_CONCAT({})", summarize_aggregate_expr(expr))
+            }
         }
-        AggregateFunction::Sample { variable } => format!("SAMPLE(?{variable})"),
+        AggregateFunction::Sample { expr } => {
+            format!("SAMPLE({})", summarize_aggregate_expr(expr))
+        }
+    }
+}
+
+fn summarize_aggregate_expr(expr: &AggregateExpr) -> String {
+    match expr {
+        AggregateExpr::Variable(v) => format!("?{v}"),
+        AggregateExpr::Expression(e) => format!("{e:?}"),
     }
 }
 

@@ -1672,6 +1672,127 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_expression_argument_avg_if_coalesce() {
+        // agg-err-02 style: a non-numeric value is normalized via
+        // IF(isNumeric(...), ..., COALESCE(xsd:double(...), 0)).
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT (AVG(IF(isNumeric(?o), ?o, COALESCE(xsd:double(?o),0))) AS ?avg) WHERE { VALUES ?o { 1 \"not a number\" 3 } }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        let BoundValue::Literal(LiteralValue::Decimal(avg)) = result.solutions[0].get("avg").unwrap() else {
+            panic!("expected decimal avg");
+        };
+        // (1 + 0 + 3) / 3 = 4/3 -> 1.3333333333333333
+        assert!((avg - 4.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aggregate_sum_decimal_exact() {
+        // 1.0 + 2.2 + 3.5 + 2.2 + 2.2 must be exactly 11.1 (agg-sum-01), not
+        // the f64-accumulated 11.100000000000001.
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT (SUM(?o) AS ?sum) WHERE { VALUES ?o { 1.0 2.2 3.5 2.2 2.2 } }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("sum"),
+            Some(&BoundValue::Literal(LiteralValue::Decimal(11.1)))
+        );
+    }
+
+    #[test]
+    fn aggregate_avg_empty_group_is_zero() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT (AVG(?o) AS ?avg) WHERE { ?s <http://ex.org/nope> ?o }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("avg"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(0)))
+        );
+    }
+
+    #[test]
+    fn aggregate_avg_error_propagates() {
+        // A non-numeric value makes the whole AVG an error (agg-err-01).
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT (AVG(?o) AS ?avg) WHERE { VALUES ?o { 1 \"x\" 3 } }",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert!(result.solutions[0].get("avg").is_none());
+    }
+
+    #[test]
+    fn aggregate_group_concat_plain_and_distinct() {
+        // GROUP_CONCAT always yields a simple literal; DISTINCT dedupes.
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT (GROUP_CONCAT(DISTINCT ?o) AS ?g) WHERE {
+                       VALUES ?o { "1" "2" "1" }
+                   }"#,
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        match result.solutions[0].get("g") {
+            Some(BoundValue::Literal(LiteralValue::String(v))) => {
+                assert!(v == "1 2" || v == "2 1", "got {v:?}");
+            }
+            other => panic!("expected plain string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aggregate_group_concat_lang_dropped() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                r#"SELECT (GROUP_CONCAT(?o) AS ?g) WHERE {
+                       VALUES ?o { "1"@en "2"@en }
+                   }"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            result.solutions[0].get("g"),
+            Some(&BoundValue::Literal(LiteralValue::String("1 2".to_owned())))
+        );
+    }
+
+    #[test]
+    fn aggregate_having_multiple_constraints() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        let result = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s WHERE { VALUES ?s { 1 1 2 } } GROUP BY ?s HAVING (COUNT(*) > 1) (COUNT(*) < 3)",
+            ))
+            .unwrap();
+        assert_eq!(result.solutions.len(), 1);
+        assert_eq!(
+            result.solutions[0].get("s"),
+            Some(&BoundValue::Literal(LiteralValue::Integer(1)))
+        );
+    }
+
+    #[test]
     fn aggregate_group_by_expr_alias() {
         let (_e, repo) = seed_ages();
         let p = pipeline(repo);

@@ -2,7 +2,8 @@
 
 use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
-    AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, GraphRef, GraphTarget,
+    AggregateExpr, AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, GraphRef,
+    GraphTarget,
     PathExpression, PreemptionReason, PreemptionToken, QueryKind, QueryPlan, QueryRequest,
     QueryResult, Solution, TermPattern, TriplePattern, UpdateOp, UpdatePattern,
 };
@@ -1249,7 +1250,7 @@ fn eval_aggregate(
     if groups.is_empty() {
         let mut out = Solution::new();
         for spec in aggregates {
-            if let Some(v) = eval_aggregate_spec(spec, &rows) {
+            if let Some(v) = eval_aggregate_spec(spec, &rows, ctx) {
                 out.insert(spec.output.clone(), v);
             }
         }
@@ -1264,7 +1265,7 @@ fn eval_aggregate(
                 }
             }
             for spec in aggregates {
-                if let Some(v) = eval_aggregate_spec(spec, &group_rows) {
+                if let Some(v) = eval_aggregate_spec(spec, &group_rows, ctx) {
                     out.insert(spec.output.clone(), v);
                 }
             }
@@ -1279,174 +1280,438 @@ fn eval_aggregate(
     Ok(out_rows)
 }
 
-fn eval_aggregate_spec(spec: &AggregateSpec, rows: &[Solution]) -> Option<BoundValue> {
+fn eval_aggregate_spec(
+    spec: &AggregateSpec,
+    rows: &[Solution],
+    ctx: &ExecCtx<'_>,
+) -> Option<BoundValue> {
     match &spec.function {
-        AggregateFunction::Count { variable, distinct } => {
-            let n = match (variable.as_deref(), *distinct) {
+        AggregateFunction::Count { expr, distinct } => {
+            let n = match (expr, *distinct) {
                 (None, _) => rows.len(),
-                (Some(v), false) => rows.iter().filter(|s| s.get(v).is_some()).count(),
-                (Some(v), true) => {
+                (Some(e), false) => rows
+                    .iter()
+                    .filter(|s| aggregate_value(e, s, ctx).is_some())
+                    .count(),
+                (Some(e), true) => {
                     let mut seen = HashSet::new();
                     rows.iter()
-                        .filter_map(|s| s.get(v))
+                        .filter_map(|s| aggregate_value(e, s, ctx))
                         .filter(|bv| seen.insert(format!("{bv:?}")))
                         .count()
                 }
             };
             Some(BoundValue::Literal(LiteralValue::Integer(n as i64)))
         }
-        AggregateFunction::Sum { variable, distinct } => {
-            let rows = if *distinct {
-                distinct_rows(rows, variable)
-            } else {
-                rows.to_vec()
-            };
-            let mut acc = 0.0f64;
-            let mut acc_i = 0i64;
-            let mut rank = 0u8; // 0=int, 1=decimal, 2=float, 3=double
-            let mut any = false;
-            for s in &rows {
-                let Some(bv) = s.get(variable) else { continue };
-                let Some(n) = Numeric::from_bound(bv) else {
-                    continue;
-                };
-                rank = rank.max(n.rank());
-                acc += n.as_f64();
-                if let Numeric::Integer(x) = n {
-                    acc_i += x;
-                }
-                any = true;
-            }
-            if !any {
-                None
-            } else if rank == 0 {
-                Some(BoundValue::Literal(LiteralValue::Integer(acc_i)))
-            } else if rank == 2 {
-                Some(BoundValue::Literal(LiteralValue::Float(acc as f32)))
-            } else if rank == 3 {
-                Some(BoundValue::Literal(LiteralValue::Double(acc)))
-            } else {
-                Some(BoundValue::Literal(LiteralValue::Decimal(acc)))
-            }
+        AggregateFunction::Sum { expr, distinct } => sum_aggregate(expr, rows, *distinct, ctx),
+        AggregateFunction::Avg { expr, distinct } => avg_aggregate(expr, rows, *distinct, ctx),
+        AggregateFunction::Min { expr, distinct } => {
+            extremum_aggregate(expr, rows, *distinct, ctx, -1)
         }
-        AggregateFunction::Avg { variable, distinct } => {
-            let rows = if *distinct {
-                distinct_rows(rows, variable)
-            } else {
-                rows.to_vec()
-            };
-            let mut acc = 0.0f64;
-            let mut n: i64 = 0;
-            let mut rank = 0u8;
-            for s in &rows {
-                if let Some(bv) = s.get(variable)
-                    && let Some(x) = Numeric::from_bound(bv)
-                {
-                    rank = rank.max(x.rank());
-                    acc += x.as_f64();
-                    n += 1;
-                }
-            }
-            if n == 0 {
-                None
-            } else if rank == 3 {
-                Some(BoundValue::Literal(LiteralValue::Double(acc / n as f64)))
-            } else if rank == 2 {
-                Some(BoundValue::Literal(LiteralValue::Float(
-                    (acc / n as f64) as f32,
-                )))
-            } else {
-                Some(BoundValue::Literal(LiteralValue::Decimal(acc / n as f64)))
-            }
-        }
-        AggregateFunction::Min { variable, distinct } => {
-            let rows = if *distinct {
-                distinct_rows(rows, variable)
-            } else {
-                rows.to_vec()
-            };
-            extremum(variable, &rows, -1)
-        }
-        AggregateFunction::Max { variable, distinct } => {
-            let rows = if *distinct {
-                distinct_rows(rows, variable)
-            } else {
-                rows.to_vec()
-            };
-            extremum(variable, &rows, 1)
+        AggregateFunction::Max { expr, distinct } => {
+            extremum_aggregate(expr, rows, *distinct, ctx, 1)
         }
         AggregateFunction::GroupConcat {
-            variable,
+            expr,
+            distinct,
             separator,
-        } => {
-            let mut parts = Vec::new();
-            let mut lang: Option<String> = None;
-            let mut lang_conflict = false;
-            for s in rows {
-                if let Some(bv) = s.get(variable) {
-                    match bv {
-                        BoundValue::Literal(LiteralValue::Lang { value, lang: tag }) => {
-                            parts.push(value.clone());
-                            match &lang {
-                                None => lang = Some(tag.as_str().to_owned()),
-                                Some(existing) if existing == tag.as_str() => {}
-                                Some(_) => lang_conflict = true,
-                            }
-                        }
-                        BoundValue::Literal(LiteralValue::String(v)) => {
-                            parts.push(v.clone());
-                            if lang.is_none() {
-                                lang = Some(String::new());
-                            }
-                        }
-                        _ => return None,
-                    }
-                }
-            }
-            if parts.is_empty() {
-                None
-            } else if !lang_conflict && lang.as_deref().is_some_and(|l| !l.is_empty()) {
-                let joined = parts.join(separator);
-                Some(BoundValue::Literal(LiteralValue::Lang {
-                    value: joined,
-                    lang: LanguageTag::parse(lang.unwrap()).ok()?,
-                }))
-            } else {
-                Some(BoundValue::Literal(LiteralValue::String(
-                    parts.join(separator),
-                )))
-            }
-        }
-        AggregateFunction::Sample { variable } => {
-            rows.iter().find_map(|s| s.get(variable).cloned())
+        } => group_concat_aggregate(expr, rows, *distinct, ctx, separator),
+        AggregateFunction::Sample { expr } => {
+            rows.iter().find_map(|s| aggregate_value(expr, s, ctx))
         }
     }
 }
 
-fn distinct_rows(rows: &[Solution], variable: &str) -> Vec<Solution> {
-    let mut seen = HashSet::new();
-    rows.iter()
-        .filter(|s| s.get(variable).is_some())
-        .filter(|s| seen.insert(format!("{:?}", s.get(variable).unwrap())))
-        .cloned()
-        .collect()
+/// Evaluate an aggregate argument on one input row: a bare variable is a
+/// fast solution lookup, anything else is a full expression (`AVG(IF(...))`).
+fn aggregate_value(
+    expr: &AggregateExpr,
+    sol: &Solution,
+    ctx: &ExecCtx<'_>,
+) -> Option<BoundValue> {
+    match expr {
+        AggregateExpr::Variable(v) => sol.get(v).cloned(),
+        AggregateExpr::Expression(e) => eval_expr_value(e, sol, ctx),
+    }
 }
 
-/// `sign` of -1 keeps the smaller value (MIN), 1 keeps the larger (MAX).
-fn extremum(variable: &str, rows: &[Solution], sign: i8) -> Option<BoundValue> {
-    let mut best: Option<BoundValue> = None;
+/// Exact decimal accumulator (scaled i128) so `xsd:decimal` SUM/AVG do not
+/// accumulate binary floating point error (`1.0+2.2+3.5+2.2+2.2 = 11.1`).
+#[derive(Debug, Clone, Copy, Default)]
+struct ExactDecimal {
+    unscaled: i128,
+    scale: u32,
+}
+
+impl ExactDecimal {
+    fn from_i128(v: i128) -> Self {
+        Self {
+            unscaled: v,
+            scale: 0,
+        }
+    }
+
+    fn add_i128(&mut self, v: i128) -> bool {
+        let Some(shift) = pow10_i128(self.scale) else {
+            return false;
+        };
+        let Some(scaled) = v.checked_mul(shift) else {
+            return false;
+        };
+        let Some(sum) = self.unscaled.checked_add(scaled) else {
+            return false;
+        };
+        self.unscaled = sum;
+        true
+    }
+
+    fn add_f64(&mut self, v: f64) -> bool {
+        let Some((unscaled, scale)) = decimal_parts(v) else {
+            return false;
+        };
+        self.add_parts(unscaled, scale)
+    }
+
+    fn add_parts(&mut self, unscaled: i128, scale: u32) -> bool {
+        let aligned = if scale >= self.scale {
+            let Some(shift) = pow10_i128(scale - self.scale) else {
+                return false;
+            };
+            let Some(a) = self.unscaled.checked_mul(shift) else {
+                return false;
+            };
+            let Some(b) = a.checked_add(unscaled) else {
+                return false;
+            };
+            b
+        } else {
+            let Some(shift) = pow10_i128(self.scale - scale) else {
+                return false;
+            };
+            let Some(a) = unscaled.checked_mul(shift) else {
+                return false;
+            };
+            let Some(b) = self.unscaled.checked_add(a) else {
+                return false;
+            };
+            b
+        };
+        self.unscaled = aligned;
+        self.scale = scale.max(self.scale);
+        true
+    }
+
+    fn as_f64(self) -> f64 {
+        self.unscaled as f64 / pow10_i128(self.scale).unwrap_or(1) as f64
+    }
+
+    /// Exact decimal division by a positive integer, rounding half-up after
+    /// up to 28 extra digits for non-terminating decimals. AVG of a decimal
+    /// sum must divide in decimal space first: `11.1 / 5 = 2.22` (converting
+    /// the sum to `f64` before dividing would give `2.2199999999999998`).
+    fn div_i128(&self, n: i128) -> Option<(i128, u32)> {
+        if n == 0 {
+            return None;
+        }
+        let mut unscaled = self.unscaled;
+        let mut scale = self.scale;
+        let mut extra = 0u32;
+        while unscaled % n != 0 && extra < 28 {
+            unscaled = unscaled.checked_mul(10)?;
+            scale += 1;
+            extra += 1;
+        }
+        let q = unscaled / n;
+        let r = unscaled % n;
+        Some((if r * 2 >= n { q + 1 } else { q }, scale))
+    }
+}
+
+fn pow10_i128(exp: u32) -> Option<i128> {
+    let mut p: i128 = 1;
+    for _ in 0..exp {
+        p = p.checked_mul(10)?;
+    }
+    Some(p)
+}
+
+/// Decompose the shortest round-trip decimal form of an `f64` into a scaled
+/// integer pair (`2.2` -> `(22, 1)`). Rust's `Display` never uses exponent
+/// notation for `f64`, so the lexical form is plain digits with a dot.
+fn decimal_parts(v: f64) -> Option<(i128, u32)> {
+    if !v.is_finite() {
+        return None;
+    }
+    let text = format!("{v}");
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(rest) => (-1i128, rest),
+        None => (1i128, text.as_str()),
+    };
+    let (int_part, frac_part) = match digits.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (digits, None),
+    };
+    let scale = frac_part.map(str::len).unwrap_or(0) as u32;
+    let mut unscaled: i128 = 0;
+    for ch in int_part
+        .chars()
+        .chain(frac_part.into_iter().flat_map(|f| f.chars()))
+    {
+        let d = ch.to_digit(10)? as i128;
+        unscaled = unscaled.checked_mul(10)?.checked_add(d)?;
+    }
+    Some((sign * unscaled, scale))
+}
+
+/// Running SUM accumulator with exact decimal support (see `ExactDecimal`).
+#[derive(Debug, Clone, Copy)]
+enum SumAcc {
+    Int(i128),
+    Dec(ExactDecimal),
+    /// `(rank, acc)`: rank 2 = xsd:float, 3 = xsd:double (or a degraded
+    /// overflow fallback with rank 0/1 kept as xsd:decimal).
+    F64(u8, f64),
+}
+
+impl SumAcc {
+    fn add_numeric(self, n: Numeric) -> SumAcc {
+        match n {
+            Numeric::Integer(x) => self.add_integer(x as i128),
+            Numeric::Decimal(x) => self.add_decimal(x),
+            Numeric::Float(x) => self.add_float(x as f64, 2),
+            Numeric::Double(x) => self.add_float(x, 3),
+        }
+    }
+
+    fn add_integer(self, x: i128) -> SumAcc {
+        match self {
+            SumAcc::Int(i) => match i.checked_add(x) {
+                Some(s) => SumAcc::Int(s),
+                None => SumAcc::F64(0, i as f64 + x as f64),
+            },
+            SumAcc::Dec(mut d) => {
+                if d.add_i128(x) {
+                    SumAcc::Dec(d)
+                } else {
+                    SumAcc::F64(1, d.as_f64() + x as f64)
+                }
+            }
+            SumAcc::F64(rank, acc) => SumAcc::F64(rank, acc + x as f64),
+        }
+    }
+
+    fn add_decimal(self, x: f64) -> SumAcc {
+        match self {
+            SumAcc::Int(i) => {
+                let mut d = ExactDecimal::from_i128(i);
+                if d.add_f64(x) {
+                    SumAcc::Dec(d)
+                } else {
+                    SumAcc::F64(1, i as f64 + x)
+                }
+            }
+            SumAcc::Dec(mut d) => {
+                if d.add_f64(x) {
+                    SumAcc::Dec(d)
+                } else {
+                    SumAcc::F64(1, d.as_f64() + x)
+                }
+            }
+            SumAcc::F64(rank, acc) => SumAcc::F64(rank, acc + x),
+        }
+    }
+
+    fn add_float(self, x: f64, rank: u8) -> SumAcc {
+        let acc = match self {
+            SumAcc::Int(i) => i as f64,
+            SumAcc::Dec(d) => d.as_f64(),
+            SumAcc::F64(_, acc) => acc,
+        };
+        SumAcc::F64(rank.max(match self {
+            SumAcc::F64(r, _) => r,
+            _ => 0,
+        }), acc + x)
+    }
+
+    fn to_bound(self) -> BoundValue {
+        match self {
+            SumAcc::Int(i) => {
+                if let Ok(v) = i64::try_from(i) {
+                    BoundValue::Literal(LiteralValue::Integer(v))
+                } else {
+                    BoundValue::Literal(LiteralValue::Decimal(i as f64))
+                }
+            }
+            SumAcc::Dec(d) => BoundValue::Literal(LiteralValue::Decimal(d.as_f64())),
+            SumAcc::F64(2, acc) => BoundValue::Literal(LiteralValue::Float(acc as f32)),
+            SumAcc::F64(3, acc) => BoundValue::Literal(LiteralValue::Double(acc)),
+            SumAcc::F64(_, acc) => BoundValue::Literal(LiteralValue::Decimal(acc)),
+        }
+    }
+}
+
+fn sum_aggregate(
+    expr: &AggregateExpr,
+    rows: &[Solution],
+    distinct: bool,
+    ctx: &ExecCtx<'_>,
+) -> Option<BoundValue> {
+    let mut acc = SumAcc::Int(0);
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut any = false;
     for s in rows {
-        let Some(bv) = s.get(variable) else { continue };
+        let Some(bv) = aggregate_value(expr, s, ctx) else { continue };
+        let Some(n) = Numeric::from_bound(&bv) else { continue };
+        if distinct && !seen.insert(format!("{bv:?}")) {
+            continue;
+        }
+        any = true;
+        acc = acc.add_numeric(n);
+    }
+    if !any {
+        None
+    } else {
+        Some(acc.to_bound())
+    }
+}
+
+fn avg_aggregate(
+    expr: &AggregateExpr,
+    rows: &[Solution],
+    distinct: bool,
+    ctx: &ExecCtx<'_>,
+) -> Option<BoundValue> {
+    let mut acc = SumAcc::Int(0);
+    let mut n: i64 = 0;
+    let mut seen: HashSet<String> = HashSet::new();
+    for s in rows {
+        let Some(bv) = aggregate_value(expr, s, ctx) else {
+            // A non-numeric / erroring argument makes the whole AVG an error
+            // (W3C aggregates/agg-err-01): the result is unbound.
+            return None;
+        };
+        if distinct && !seen.insert(format!("{bv:?}")) {
+            continue;
+        }
+        let num = Numeric::from_bound(&bv)?;
+        acc = acc.add_numeric(num);
+        n += 1;
+    }
+    if n == 0 {
+        // AVG of an empty group is defined to be 0 (agg-avg-03).
+        return Some(BoundValue::Literal(LiteralValue::Integer(0)));
+    }
+    match acc {
+        SumAcc::Int(i) => {
+            let (q, scale) = ExactDecimal::from_i128(i).div_i128(n as i128)?;
+            Some(BoundValue::Literal(LiteralValue::Decimal(
+                q as f64 / pow10_i128(scale).unwrap_or(1) as f64,
+            )))
+        }
+        SumAcc::Dec(d) => {
+            let (q, scale) = d.div_i128(n as i128)?;
+            Some(BoundValue::Literal(LiteralValue::Decimal(
+                q as f64 / pow10_i128(scale).unwrap_or(1) as f64,
+            )))
+        }
+        SumAcc::F64(2, acc) => Some(BoundValue::Literal(LiteralValue::Float(
+            (acc / n as f64) as f32,
+        ))),
+        SumAcc::F64(3, acc) => Some(BoundValue::Literal(LiteralValue::Double(
+            acc / n as f64,
+        ))),
+        // Degraded overflow fallback: keep xsd:decimal typing.
+        SumAcc::F64(_, acc) => Some(BoundValue::Literal(LiteralValue::Decimal(
+            acc / n as f64,
+        ))),
+    }
+}
+
+fn extremum_aggregate(
+    expr: &AggregateExpr,
+    rows: &[Solution],
+    distinct: bool,
+    ctx: &ExecCtx<'_>,
+    sign: i8,
+) -> Option<BoundValue> {
+    let mut best: Option<BoundValue> = None;
+    let mut seen: HashSet<String> = HashSet::new();
+    for s in rows {
+        let Some(bv) = aggregate_value(expr, s, ctx) else { continue };
+        if distinct && !seen.insert(format!("{bv:?}")) {
+            continue;
+        }
         best = Some(match best {
-            None => bv.clone(),
-            Some(cur) => match compare_values(bv, &cur) {
-                Some(c) if c == sign => bv.clone(),
+            None => bv,
+            Some(cur) => match sparql_order_cmp(&bv, &cur) {
+                Some(c) if c == sign => bv,
                 _ => cur,
             },
         });
     }
     best
 }
+
+/// SPARQL ordering for MIN/MAX: blank nodes < IRIs < literals, with literals
+/// ordered by numeric value (numerics) or string ordering.
+fn sparql_order_cmp(a: &BoundValue, b: &BoundValue) -> Option<i8> {
+    let cat = |v: &BoundValue| match v {
+        BoundValue::Blank(_) | BoundValue::Node(_) => 0,
+        BoundValue::Iri(_) => 1,
+        BoundValue::Literal(_) => 2,
+    };
+    let (ca, cb) = (cat(a), cat(b));
+    if ca != cb {
+        return Some(if ca < cb { -1 } else { 1 });
+    }
+    match ca {
+        0 => match (a, b) {
+            (BoundValue::Blank(x), BoundValue::Blank(y)) => Some(ord(x.get().cmp(&y.get()))),
+            (BoundValue::Node(x), BoundValue::Node(y)) => Some(ord(x.get().cmp(&y.get()))),
+            (BoundValue::Blank(x), BoundValue::Node(y)) | (BoundValue::Node(x), BoundValue::Blank(y)) => {
+                Some(ord(x.get().cmp(&y.get())))
+            }
+            _ => None,
+        },
+        1 => match (a, b) {
+            (BoundValue::Iri(x), BoundValue::Iri(y)) => Some(ord(x.as_str().cmp(y.as_str()))),
+            _ => None,
+        },
+        _ => compare_values(a, b),
+    }
+}
+
+fn group_concat_aggregate(
+    expr: &AggregateExpr,
+    rows: &[Solution],
+    distinct: bool,
+    ctx: &ExecCtx<'_>,
+    separator: &str,
+) -> Option<BoundValue> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for s in rows {
+        let Some(bv) = aggregate_value(expr, s, ctx) else { continue };
+        if distinct && !seen.insert(format!("{bv:?}")) {
+            continue;
+        }
+        match &bv {
+            BoundValue::Literal(l) => parts.push(l.lexical_form()),
+            // IRIs/bnodes are not string values for GROUP_CONCAT: an error.
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        // GROUP_CONCAT always yields a simple literal (language tags are not
+        // preserved; W3C aggregates/agg-groupconcat-{4,5,6}).
+        Some(BoundValue::Literal(LiteralValue::String(
+            parts.join(separator),
+        )))
+    }
+}
+
 
 fn eval_path_pattern(
     subject: &TermPattern,
