@@ -59,6 +59,18 @@ pub enum Rule {
     SameAsSymmetric,
     /// x owl:sameAs y ∧ y owl:sameAs z → x owl:sameAs z (eq-trans).
     SameAsTransitive,
+    /// ?c owl:hasKey ?u ∧ LIST[?u, ?p1, …, ?pn] ∧ x/y share every key value → x owl:sameAs y (prp-key).
+    HasKey,
+    /// ?c1 owl:disjointWith ?c2 ∧ x rdf:type ?c1 ∧ x rdf:type ?c2 → ⊥ (cax-dw).
+    DisjointClasses,
+    /// x rdf:type owl:Nothing → ⊥ (cls-nothing1).
+    NothingTyping,
+    /// ?c rdfs:subClassOf owl:Nothing ∧ x rdf:type ?c → ⊥ (cls-nothing2).
+    NothingSubClass,
+    /// x owl:differentFrom x → ⊥ (eq-diff1).
+    DifferentFromSelf,
+    /// x owl:sameAs y ∧ x owl:differentFrom y → ⊥ (eq-diff2).
+    SameAsDifferentFrom,
 }
 
 impl Rule {
@@ -82,6 +94,12 @@ impl Rule {
             Self::UnionOf => "cls-uni",
             Self::SameAsSymmetric => "eq-sym",
             Self::SameAsTransitive => "eq-trans",
+            Self::HasKey => "prp-key",
+            Self::DisjointClasses => "cax-dw",
+            Self::NothingTyping => "cls-nothing1",
+            Self::NothingSubClass => "cls-nothing2",
+            Self::DifferentFromSelf => "eq-diff1",
+            Self::SameAsDifferentFrom => "eq-diff2",
         }
     }
 }
@@ -101,6 +119,9 @@ pub struct ReasoningReport {
     pub elapsed_ms: u64,
     /// True when the wall-clock budget was exhausted before convergence.
     pub timed_out: bool,
+    /// True when the rule set derived a contradiction (e.g., disjoint classes,
+    /// owl:Nothing typing, owl:differentFrom conflicts).
+    pub inconsistent: bool,
 }
 
 /// Outcome of a materialization run.
