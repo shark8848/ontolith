@@ -11,7 +11,8 @@ use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_storage::domain::WriteOperation;
 use ontolith_transaction::domain::TxnId;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -58,6 +59,7 @@ impl AlgebraExecutor {
             txn_id: request.txn_id,
             token: &token,
             base: plan.base.as_deref(),
+            bnode: RefCell::new(BnodeState::default()),
         };
 
         // Projection expressions must see every variable bound by the WHERE
@@ -167,6 +169,42 @@ struct ExecCtx<'a> {
     txn_id: Option<TxnId>,
     token: &'a PreemptionToken,
     base: Option<&'a str>,
+    bnode: RefCell<BnodeState>,
+}
+
+/// Per-query blank node state for `BNODE()` / `BNODE(str)` (SPARQL: the same
+/// simple literal yields the same bnode within a query; `BNODE()` yields a
+/// fresh bnode per call).
+struct BnodeState {
+    by_string: HashMap<String, NodeId>,
+    next: u64,
+}
+
+impl Default for BnodeState {
+    fn default() -> Self {
+        // Mint from a high offset so fresh ids never alias dictionary-assigned
+        // node ids in loaded data.
+        Self {
+            by_string: HashMap::new(),
+            next: 1 << 60,
+        }
+    }
+}
+
+impl BnodeState {
+    fn fresh(&mut self) -> NodeId {
+        let id = NodeId::new(self.next);
+        self.next += 1;
+        id
+    }
+
+    fn for_string(&mut self, s: &str) -> NodeId {
+        *self.by_string.entry(s.to_owned()).or_insert_with(|| {
+            let id = NodeId::new(self.next);
+            self.next += 1;
+            id
+        })
+    }
 }
 
 impl ExecCtx<'_> {
@@ -215,6 +253,7 @@ pub fn execute_update(
         txn_id: Some(txn_id),
         token: &token,
         base: None,
+        bnode: RefCell::new(BnodeState::default()),
     };
     let mut affected: u64 = 0;
     let mut staged = false;
@@ -263,6 +302,7 @@ pub fn execute_update(
                             txn_id: Some(txn_id),
                             token: &token,
                             base: None,
+                            bnode: RefCell::new(BnodeState::default()),
                         };
                         let solutions = eval_algebra(where_pattern, &op_ctx)?;
                         let mut ops = Vec::new();
@@ -308,6 +348,7 @@ pub fn execute_update(
                             txn_id: Some(txn_id),
                             token: &token,
                             base: None,
+                            bnode: RefCell::new(BnodeState::default()),
                         };
                         let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &op_ctx)?;
                         let mut ops = Vec::new();
@@ -1515,13 +1556,15 @@ fn eval_expr_bool(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Optio
         Expression::Not(e) => Some(!eval_expr_bool(e, sol, ctx)?),
         Expression::And(a, b) => Some(eval_expr_bool(a, sol, ctx)? && eval_expr_bool(b, sol, ctx)?),
         Expression::Or(a, b) => Some(eval_expr_bool(a, sol, ctx)? || eval_expr_bool(b, sol, ctx)?),
-        Expression::Equal(a, b) => value_equal(
+        Expression::Equal(a, b) => value_equal_ctx(
             &eval_expr_value(a, sol, ctx)?,
             &eval_expr_value(b, sol, ctx)?,
+            ctx,
         ),
-        Expression::NotEqual(a, b) => value_equal(
+        Expression::NotEqual(a, b) => value_equal_ctx(
             &eval_expr_value(a, sol, ctx)?,
             &eval_expr_value(b, sol, ctx)?,
+            ctx,
         )
         .map(|e| !e),
         Expression::Less(a, b) => Some(
@@ -1607,16 +1650,20 @@ fn eval_expr_value(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Opti
         Expression::Or(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
             eval_expr_bool(a, sol, ctx)? || eval_expr_bool(b, sol, ctx)?,
         ))),
-        Expression::Equal(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(value_equal(
-            &eval_expr_value(a, sol, ctx)?,
-            &eval_expr_value(b, sol, ctx)?,
-        )?))),
-        Expression::NotEqual(a, b) => {
-            Some(BoundValue::Literal(LiteralValue::Boolean(!value_equal(
+        Expression::Equal(a, b) => {
+            Some(BoundValue::Literal(LiteralValue::Boolean(value_equal_ctx(
                 &eval_expr_value(a, sol, ctx)?,
                 &eval_expr_value(b, sol, ctx)?,
+                ctx,
             )?)))
         }
+        Expression::NotEqual(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
+            !value_equal_ctx(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+                ctx,
+            )?,
+        ))),
         Expression::IsIri(e) => Some(BoundValue::Literal(LiteralValue::Boolean(matches!(
             eval_expr_value(e, sol, ctx)?,
             BoundValue::Iri(_)
@@ -1856,6 +1903,14 @@ fn eval_function(
             let out = regex_replace(&s, &pattern, &replacement, &flags)?;
             Some(BoundValue::Literal(str_result(&l, out)))
         }
+        "BNODE" => {
+            if args.is_empty() {
+                return Some(BoundValue::Blank(ctx.bnode.borrow_mut().fresh()));
+            }
+            let l = str_lit(0)?;
+            let s = str_lit_lex(&l)?;
+            Some(BoundValue::Blank(ctx.bnode.borrow_mut().for_string(s)))
+        }
         "LANG" => match arg(0)? {
             BoundValue::Literal(LiteralValue::Lang { lang, .. }) => {
                 Some(strlit(lang.as_str().to_owned()))
@@ -1947,7 +2002,7 @@ fn eval_function(
                     error = true;
                     continue;
                 };
-                match value_equal(&v, &needle) {
+                match value_equal_ctx(&v, &needle, ctx) {
                     Some(true) => {
                         found = true;
                         break;
@@ -2471,6 +2526,18 @@ fn value_equal(a: &BoundValue, b: &BoundValue) -> Option<bool> {
         (BoundValue::Blank(_) | BoundValue::Node(_), _)
         | (_, BoundValue::Blank(_) | BoundValue::Node(_)) => Some(false),
         (BoundValue::Literal(x), BoundValue::Literal(y)) => literal_equal(x, y),
+    }
+}
+
+/// RDFterm-equal with dictionary resolution: a subject bound as
+/// `Node(NodeId)` compares equal to its IRI (`FILTER (?s = :iri)`).
+fn value_equal_ctx(a: &BoundValue, b: &BoundValue, ctx: &ExecCtx<'_>) -> Option<bool> {
+    match (a, b) {
+        (BoundValue::Iri(_), BoundValue::Node(_) | BoundValue::Blank(_))
+        | (BoundValue::Node(_) | BoundValue::Blank(_), BoundValue::Iri(_)) => {
+            iri_node_compatible(a, b, ctx).ok()
+        }
+        _ => value_equal(a, b),
     }
 }
 

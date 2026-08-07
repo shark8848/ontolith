@@ -174,8 +174,8 @@ exists	GRAPH variable inside of EXISTS is bound to external variable	FAIL	named-
 exists	Nested negative exists in positive exists	FAIL	semantic
 exists	Nested positive exists	FAIL	semantic
 functions	ABS()	PASS	
-functions	BNODE()	FAIL	semantic
-functions	BNODE(str)	FAIL	semantic
+functions	BNODE()	PASS	
+functions	BNODE(str)	PASS	
 functions	CEIL()	PASS	
 functions	COALESCE()	PASS	
 functions	COALESCE() without arguments	PASS	
