@@ -5,18 +5,22 @@
 use crate::application::{DictionaryCodec, StorageEngine, WriteAheadLog};
 use crate::domain::{
     SnapshotRef, StorageKey, StorageStats, WalPhase, WalRecord, WriteBatch, WriteOperation,
+    encode_osp_key, encode_osp_object_prefix, encode_pos_key, encode_pos_predicate_prefix,
+    encode_spo_key, encode_spo_subject_prefix,
 };
 use crate::infrastructure::codec::{
     decode_quad, decode_triple, decode_u64, decode_wal_record, encode_quad, encode_triple,
     encode_u64, encode_wal_record,
 };
-use crate::infrastructure::indexes::{GraphIndex, TripleIndexes, quad_key, triple_key};
+use crate::infrastructure::indexes::{quad_graph_prefix, quad_key, triple_key};
 use ontolith_core::domain::{ConsistencyLevel, Iri, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_transaction::domain::TxnId;
-use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options, WriteBatch as RocksBatch};
-use std::collections::HashMap;
+use rocksdb::{
+    ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options, WriteBatch as RocksBatch,
+};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -27,15 +31,15 @@ const CF_DICT_REV: &str = "dict_rev";
 const CF_TRIPLES: &str = "triples";
 const CF_QUADS: &str = "quads";
 const CF_WAL: &str = "wal";
+const CF_SPO_INDEX: &str = "spo_index";
+const CF_POS_INDEX: &str = "pos_index";
+const CF_OSP_INDEX: &str = "osp_index";
 
 const META_NEXT_NODE: &[u8] = b"next_node_id";
 const META_WAL_SEQ: &[u8] = b"wal_seq";
 const META_DICT_EPOCH: &[u8] = b"dict_epoch";
 
 struct EngineState {
-    default_graph: Vec<Triple>,
-    indexes: TripleIndexes,
-    graph_index: GraphIndex,
     pending_writes: HashMap<TxnId, Vec<WriteOperation>>,
 }
 
@@ -73,6 +77,9 @@ impl RocksDbStorageEngine {
             CF_TRIPLES,
             CF_QUADS,
             CF_WAL,
+            CF_SPO_INDEX,
+            CF_POS_INDEX,
+            CF_OSP_INDEX,
         ]
         .into_iter()
         .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
@@ -85,9 +92,6 @@ impl RocksDbStorageEngine {
             db,
             path,
             state: RwLock::new(EngineState {
-                default_graph: Vec::new(),
-                indexes: TripleIndexes::default(),
-                graph_index: GraphIndex::default(),
                 pending_writes: HashMap::new(),
             }),
             commit_lock: Mutex::new(()),
@@ -102,7 +106,7 @@ impl RocksDbStorageEngine {
             aborted_txn_count: AtomicU64::new(0),
         };
         engine.load_meta()?;
-        engine.rebuild_memory_from_disk()?;
+        engine.ensure_index_column_families()?;
         Ok(engine)
     }
 
@@ -130,33 +134,39 @@ impl RocksDbStorageEngine {
         Ok(())
     }
 
-    fn rebuild_memory_from_disk(&self) -> Result<(), OntolithError> {
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| OntolithError::InvalidState("storage state lock poisoned"))?;
-        state.default_graph.clear();
-        state.indexes.clear();
-        state.graph_index.clear();
-
+    /// Backfill SPO/POS/OSP index column families for a database created
+    /// before index CFs existed (triples present, index CFs empty).
+    fn ensure_index_column_families(&self) -> Result<(), OntolithError> {
         let cf_t = self.cf(CF_TRIPLES)?;
-        let iter = self.db.iterator_cf(cf_t, IteratorMode::Start);
-        for item in iter {
+        let cf_spo = self.cf(CF_SPO_INDEX)?;
+        if self.db.iterator_cf(cf_t, IteratorMode::Start).count() == 0
+            || self.db.iterator_cf(cf_spo, IteratorMode::Start).count() > 0
+        {
+            return Ok(());
+        }
+        let cf_pos = self.cf(CF_POS_INDEX)?;
+        let cf_osp = self.cf(CF_OSP_INDEX)?;
+        let mut batch = RocksBatch::default();
+        for item in self.db.iterator_cf(cf_t, IteratorMode::Start) {
             let (_k, v) = item.map_err(rocks_err)?;
             let triple = decode_triple(&v)?;
-            if state.indexes.insert(&triple) {
-                state.default_graph.push(triple);
-            }
+            batch.put_cf(
+                cf_spo,
+                encode_spo_key(triple.subject, &triple.predicate, &triple.object),
+                encode_triple(&triple),
+            );
+            batch.put_cf(
+                cf_pos,
+                encode_pos_key(&triple.predicate, &triple.object, triple.subject),
+                encode_triple(&triple),
+            );
+            batch.put_cf(
+                cf_osp,
+                encode_osp_key(&triple.object, triple.subject, &triple.predicate),
+                encode_triple(&triple),
+            );
         }
-
-        let cf_q = self.cf(CF_QUADS)?;
-        let iter = self.db.iterator_cf(cf_q, IteratorMode::Start);
-        for item in iter {
-            let (_k, v) = item.map_err(rocks_err)?;
-            let quad = decode_quad(&v)?;
-            let _ = state.graph_index.insert(&quad);
-        }
-        Ok(())
+        self.db.write(batch).map_err(rocks_err)
     }
 
     fn apply_ops_to_triple_projection(
@@ -196,49 +206,123 @@ impl RocksDbStorageEngine {
         }
     }
 
-    fn apply_memory_op(state: &mut EngineState, op: &WriteOperation) {
-        match op {
-            WriteOperation::PutTriple(triple) => {
-                if state.indexes.insert(triple) {
-                    state.default_graph.push(triple.clone());
-                }
+    /// Scan a column family decoding triples; `prefix` restricts to keys
+    /// starting with the given bytes (index CF prefix lookups).
+    fn scan_triples_with_prefix(
+        &self,
+        cf_name: &str,
+        prefix: Option<&[u8]>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        let cf = self.cf(cf_name)?;
+        let iter = match prefix {
+            Some(p) => self
+                .db
+                .iterator_cf(cf, IteratorMode::From(p, Direction::Forward)),
+            None => self.db.iterator_cf(cf, IteratorMode::Start),
+        };
+        let mut out = Vec::new();
+        for item in iter {
+            let (k, v) = item.map_err(rocks_err)?;
+            if let Some(p) = prefix
+                && !k.starts_with(p)
+            {
+                break;
             }
-            WriteOperation::PutQuad(quad) => {
-                let _ = state.graph_index.insert(quad);
-            }
-            WriteOperation::DeleteTriple(triple) => {
-                if state.indexes.remove_exact(triple) {
-                    state.default_graph.retain(|t| t != triple);
-                }
-            }
-            WriteOperation::DeleteQuad(quad) => {
-                let _ = state.graph_index.remove_exact(quad);
-            }
-            WriteOperation::DeleteKey(key) => {
-                if let Some(subject_id) = key.components.first().copied() {
-                    let _ = state.indexes.remove_by_subject(subject_id);
-                    state.default_graph.retain(|t| t.subject != subject_id);
-                    let _ = state.graph_index.remove_by_subject(subject_id);
-                }
-            }
+            out.push(decode_triple(&v)?);
         }
+        Ok(out)
     }
 
+    /// Scan the quads column family decoding quads, optionally restricted to a
+    /// named-graph prefix.
+    fn scan_quads_with_prefix(&self, prefix: Option<&[u8]>) -> Result<Vec<Quad>, OntolithError> {
+        let cf = self.cf(CF_QUADS)?;
+        let iter = match prefix {
+            Some(p) => self
+                .db
+                .iterator_cf(cf, IteratorMode::From(p, Direction::Forward)),
+            None => self.db.iterator_cf(cf, IteratorMode::Start),
+        };
+        let mut out = Vec::new();
+        for item in iter {
+            let (k, v) = item.map_err(rocks_err)?;
+            if let Some(p) = prefix
+                && !k.starts_with(p)
+            {
+                break;
+            }
+            out.push(decode_quad(&v)?);
+        }
+        Ok(out)
+    }
+
+    /// Committed triples/quads matching a subject (delete-by-key pre-image).
+    fn scan_doomed_by_subject(
+        &self,
+        subject_id: NodeId,
+    ) -> Result<(Vec<Triple>, Vec<Quad>), OntolithError> {
+        let triples = self
+            .scan_triples_with_prefix(CF_SPO_INDEX, Some(&encode_spo_subject_prefix(subject_id)))?;
+        let quads = self
+            .scan_quads_with_prefix(None)?
+            .into_iter()
+            .filter(|q| q.triple.subject == subject_id)
+            .collect();
+        Ok((triples, quads))
+    }
+
+    /// Clone of the staged operations of `txn_id` (empty when not staged).
+    fn pending_ops(&self, txn_id: Option<TxnId>) -> Vec<WriteOperation> {
+        txn_id
+            .and_then(|id| {
+                self.state
+                    .read()
+                    .ok()
+                    .and_then(|s| s.pending_writes.get(&id).cloned())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Apply operations to the durable batch. Maintains the primary CFs plus
+    /// the SPO/POS/OSP index CFs (RFC-0001 §4). Returns the number of
+    /// committed entries removed by `DeleteKey` operations.
     fn durable_apply_ops(
         &self,
         batch: &mut RocksBatch,
         operations: &[WriteOperation],
-    ) -> Result<(), OntolithError> {
+    ) -> Result<usize, OntolithError> {
         let cf_t = self.cf(CF_TRIPLES)?;
         let cf_q = self.cf(CF_QUADS)?;
+        let cf_spo = self.cf(CF_SPO_INDEX)?;
+        let cf_pos = self.cf(CF_POS_INDEX)?;
+        let cf_osp = self.cf(CF_OSP_INDEX)?;
+        let mut removed = 0usize;
         for op in operations {
             match op {
                 WriteOperation::PutTriple(t) => {
-                    let k = triple_key(t);
-                    batch.put_cf(cf_t, k, encode_triple(t));
+                    let encoded = encode_triple(t);
+                    batch.put_cf(cf_t, triple_key(t), &encoded);
+                    batch.put_cf(
+                        cf_spo,
+                        encode_spo_key(t.subject, &t.predicate, &t.object),
+                        &encoded,
+                    );
+                    batch.put_cf(
+                        cf_pos,
+                        encode_pos_key(&t.predicate, &t.object, t.subject),
+                        &encoded,
+                    );
+                    batch.put_cf(
+                        cf_osp,
+                        encode_osp_key(&t.object, t.subject, &t.predicate),
+                        &encoded,
+                    );
                 }
                 WriteOperation::DeleteTriple(t) => {
                     batch.delete_cf(cf_t, triple_key(t));
+                    batch.delete_cf(cf_spo, encode_spo_key(t.subject, &t.predicate, &t.object));
+                    batch.delete_cf(cf_pos, encode_pos_key(&t.predicate, &t.object, t.subject));
+                    batch.delete_cf(cf_osp, encode_osp_key(&t.object, t.subject, &t.predicate));
                 }
                 WriteOperation::PutQuad(q) => {
                     batch.put_cf(cf_q, quad_key(q), encode_quad(q));
@@ -248,27 +332,22 @@ impl RocksDbStorageEngine {
                 }
                 WriteOperation::DeleteKey(key) => {
                     if let Some(subject_id) = key.components.first().copied() {
-                        // Read current memory view under commit lock for keys to delete.
-                        let state = self
-                            .state
-                            .read()
-                            .map_err(|_| OntolithError::InvalidState("lock poisoned"))?;
-                        let doomed: Vec<Triple> = state
-                            .default_graph
-                            .iter()
-                            .filter(|t| t.subject == subject_id)
-                            .cloned()
-                            .collect();
-                        let doomed_q: Vec<Quad> = state
-                            .graph_index
-                            .all
-                            .iter()
-                            .filter(|q| q.triple.subject == subject_id)
-                            .cloned()
-                            .collect();
-                        drop(state);
+                        let (doomed, doomed_q) = self.scan_doomed_by_subject(subject_id)?;
+                        removed += doomed.len() + doomed_q.len();
                         for t in doomed {
                             batch.delete_cf(cf_t, triple_key(&t));
+                            batch.delete_cf(
+                                cf_spo,
+                                encode_spo_key(t.subject, &t.predicate, &t.object),
+                            );
+                            batch.delete_cf(
+                                cf_pos,
+                                encode_pos_key(&t.predicate, &t.object, t.subject),
+                            );
+                            batch.delete_cf(
+                                cf_osp,
+                                encode_osp_key(&t.object, t.subject, &t.predicate),
+                            );
                         }
                         for q in doomed_q {
                             batch.delete_cf(cf_q, quad_key(&q));
@@ -277,7 +356,7 @@ impl RocksDbStorageEngine {
                 }
             }
         }
-        Ok(())
+        Ok(removed)
     }
 
     fn append_wal_record(
@@ -441,7 +520,6 @@ impl StorageEngine for RocksDbStorageEngine {
         };
 
         let mut rocks_batch = RocksBatch::default();
-        // Note: DeleteKey needs pre-image from memory before memory apply.
         self.durable_apply_ops(&mut rocks_batch, &operations)?;
         self.append_wal_record(
             &mut rocks_batch,
@@ -457,13 +535,6 @@ impl StorageEngine for RocksDbStorageEngine {
             rocks_err(e)
         })?;
 
-        let mut guard = self
-            .state
-            .write()
-            .map_err(|_| OntolithError::InvalidState("storage state lock poisoned"))?;
-        for op in &operations {
-            Self::apply_memory_op(&mut guard, op);
-        }
         self.committed_txn_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -501,16 +572,11 @@ impl StorageEngine for RocksDbStorageEngine {
         }
         let mut rocks_batch = RocksBatch::default();
         let op = WriteOperation::DeleteKey(key.clone());
-        self.durable_apply_ops(&mut rocks_batch, std::slice::from_ref(&op))?;
-        self.db.write(rocks_batch).map_err(rocks_err)?;
-        let mut guard = self
-            .state
-            .write()
-            .map_err(|_| OntolithError::InvalidState("lock poisoned"))?;
-        let before = guard.default_graph.len() + guard.graph_index.all.len();
-        Self::apply_memory_op(&mut guard, &op);
-        let after = guard.default_graph.len() + guard.graph_index.all.len();
-        Ok(before.saturating_sub(after))
+        let removed = self.durable_apply_ops(&mut rocks_batch, std::slice::from_ref(&op))?;
+        if removed > 0 {
+            self.db.write(rocks_batch).map_err(rocks_err)?;
+        }
+        Ok(removed)
     }
 
     fn snapshot_with(
@@ -527,22 +593,42 @@ impl StorageEngine for RocksDbStorageEngine {
     }
 
     fn stats(&self) -> StorageStats {
-        let guard = match self.state.read() {
-            Ok(s) => s,
-            Err(_) => return StorageStats::default(),
-        };
-        let (subjects, predicates, objects) = guard.indexes.distinct_counts();
+        let triples = self
+            .scan_triples_with_prefix(CF_TRIPLES, None)
+            .unwrap_or_default();
+        let quads = self.scan_quads_with_prefix(None).unwrap_or_default();
+        let mut subjects = HashSet::new();
+        let mut predicates = HashSet::new();
+        let mut objects: Vec<Term> = Vec::new();
+        let mut named_graphs = HashSet::new();
+        for triple in &triples {
+            subjects.insert(triple.subject);
+            predicates.insert(triple.predicate.clone());
+            if !objects.iter().any(|o| o == &triple.object) {
+                objects.push(triple.object.clone());
+            }
+        }
+        for quad in &quads {
+            if let Some(g) = &quad.graph_name {
+                named_graphs.insert(g.clone());
+            }
+        }
+        let pending_transactions = self
+            .state
+            .read()
+            .map(|s| s.pending_writes.len() as u64)
+            .unwrap_or(0);
         StorageStats {
-            triple_count: guard.default_graph.len() as u64,
-            quad_count: guard.graph_index.all.len() as u64,
-            distinct_subjects: subjects,
-            distinct_predicates: predicates,
-            distinct_objects: objects,
-            named_graph_count: guard.graph_index.by_graph.len() as u64,
+            triple_count: triples.len() as u64,
+            quad_count: quads.len() as u64,
+            distinct_subjects: subjects.len() as u64,
+            distinct_predicates: predicates.len() as u64,
+            distinct_objects: objects.len() as u64,
+            named_graph_count: named_graphs.len() as u64,
             dictionary_entries: self.len() as u64,
-            pending_transactions: guard.pending_writes.len() as u64,
+            pending_transactions,
             wal_records: self.entries().len() as u64,
-            index_kinds_active: 6,
+            index_kinds_active: 3,
             committed_versions: 0,
             pruned_versions: 0,
             pinned_snapshots: 0,
@@ -550,101 +636,72 @@ impl StorageEngine for RocksDbStorageEngine {
     }
 
     fn default_graph_triples_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Triple> {
-        let guard = match self.state.read() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let mut triples = guard.default_graph.clone();
-        if let Some(txn_id) = txn_id
-            && let Some(ops) = guard.pending_writes.get(&txn_id)
-        {
-            Self::apply_ops_to_triple_projection(&mut triples, ops, None, None, None);
-        }
+        let mut triples = self
+            .scan_triples_with_prefix(CF_TRIPLES, None)
+            .unwrap_or_default();
+        let ops = self.pending_ops(txn_id);
+        Self::apply_ops_to_triple_projection(&mut triples, &ops, None, None, None);
         triples
     }
 
     fn triples_by_subject_in_txn(&self, subject: NodeId, txn_id: Option<TxnId>) -> Vec<Triple> {
-        let guard = match self.state.read() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let mut triples = guard.indexes.by_subject(subject);
-        if let Some(txn_id) = txn_id
-            && let Some(ops) = guard.pending_writes.get(&txn_id)
-        {
-            Self::apply_ops_to_triple_projection(&mut triples, ops, Some(subject), None, None);
-        }
+        let mut triples = self
+            .scan_triples_with_prefix(CF_SPO_INDEX, Some(&encode_spo_subject_prefix(subject)))
+            .unwrap_or_default();
+        let ops = self.pending_ops(txn_id);
+        Self::apply_ops_to_triple_projection(&mut triples, &ops, Some(subject), None, None);
         triples
     }
 
     fn triples_by_predicate_in_txn(&self, predicate: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
-        let guard = match self.state.read() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let mut triples = guard.indexes.by_predicate(predicate);
-        if let Some(txn_id) = txn_id
-            && let Some(ops) = guard.pending_writes.get(&txn_id)
-        {
-            Self::apply_ops_to_triple_projection(&mut triples, ops, None, Some(predicate), None);
-        }
+        let mut triples = self
+            .scan_triples_with_prefix(CF_POS_INDEX, Some(&encode_pos_predicate_prefix(predicate)))
+            .unwrap_or_default();
+        let ops = self.pending_ops(txn_id);
+        Self::apply_ops_to_triple_projection(&mut triples, &ops, None, Some(predicate), None);
         triples
     }
 
     fn triples_by_object_in_txn(&self, object: &Term, txn_id: Option<TxnId>) -> Vec<Triple> {
-        let guard = match self.state.read() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let mut triples = guard.indexes.by_object(object);
-        if let Some(txn_id) = txn_id
-            && let Some(ops) = guard.pending_writes.get(&txn_id)
-        {
-            Self::apply_ops_to_triple_projection(&mut triples, ops, None, None, Some(object));
-        }
+        let mut triples = self
+            .scan_triples_with_prefix(CF_OSP_INDEX, Some(&encode_osp_object_prefix(object)))
+            .unwrap_or_default();
+        let ops = self.pending_ops(txn_id);
+        Self::apply_ops_to_triple_projection(&mut triples, &ops, None, None, Some(object));
         triples
     }
 
     fn named_graph_quads(&self) -> Vec<Quad> {
-        self.state
-            .read()
-            .map(|s| s.graph_index.all.clone())
-            .unwrap_or_default()
+        self.scan_quads_with_prefix(None).unwrap_or_default()
     }
 
     fn quads_by_graph_in_txn(&self, graph_name: Option<&Iri>, txn_id: Option<TxnId>) -> Vec<Quad> {
-        let guard = match self.state.read() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
         let mut quads = match graph_name {
-            Some(g) => guard.graph_index.by_graph_name(g),
-            None => guard
-                .default_graph
-                .iter()
-                .cloned()
+            Some(g) => self
+                .scan_quads_with_prefix(Some(&quad_graph_prefix(g)))
+                .unwrap_or_default(),
+            None => self
+                .scan_triples_with_prefix(CF_TRIPLES, None)
+                .unwrap_or_default()
+                .into_iter()
                 .map(Quad::in_default_graph)
                 .collect(),
         };
-        if let Some(txn_id) = txn_id
-            && let Some(ops) = guard.pending_writes.get(&txn_id)
-        {
-            for op in ops {
-                match op {
-                    WriteOperation::PutQuad(q)
-                        if graph_name
-                            .map(|g| q.graph_name.as_ref() == Some(g))
-                            .unwrap_or(q.graph_name.is_none()) =>
-                    {
-                        if !quads.iter().any(|x| x == q) {
-                            quads.push(q.clone());
-                        }
+        for op in &self.pending_ops(txn_id) {
+            match op {
+                WriteOperation::PutQuad(q)
+                    if graph_name
+                        .map(|g| q.graph_name.as_ref() == Some(g))
+                        .unwrap_or(q.graph_name.is_none()) =>
+                {
+                    if !quads.iter().any(|x| x == q) {
+                        quads.push(q.clone());
                     }
-                    WriteOperation::DeleteQuad(q) => {
-                        quads.retain(|x| x != q);
-                    }
-                    _ => {}
                 }
+                WriteOperation::DeleteQuad(q) => {
+                    quads.retain(|x| x != q);
+                }
+                _ => {}
             }
         }
         quads
@@ -659,13 +716,19 @@ impl StorageEngine for RocksDbStorageEngine {
         txn_id: Option<TxnId>,
     ) -> Vec<Quad> {
         let _ = txn_id;
-        self.state
-            .read()
-            .map(|s| {
-                s.graph_index
-                    .matching_in_named_graphs(Some(graph_name), subject, predicate, object)
-            })
-            .unwrap_or_default()
+        let mut quads = self
+            .scan_quads_with_prefix(Some(&quad_graph_prefix(graph_name)))
+            .unwrap_or_default();
+        if let Some(s) = subject {
+            quads.retain(|q| q.triple.subject == s);
+        }
+        if let Some(p) = predicate {
+            quads.retain(|q| &q.triple.predicate == p);
+        }
+        if let Some(o) = object {
+            quads.retain(|q| &q.triple.object == o);
+        }
+        quads
     }
 }
 
@@ -780,5 +843,210 @@ mod tests {
         drop(engine);
         let engine = RocksDbStorageEngine::open(path).unwrap();
         assert_eq!(engine.stats().triple_count, 0);
+    }
+
+    #[test]
+    fn rocksdb_cf_index_scans_serve_bound_reads_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        {
+            let engine = RocksDbStorageEngine::open(path).unwrap();
+            let txn = TxnId::new(1);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![
+                        WriteOperation::PutTriple(Triple {
+                            subject: NodeId::new(1),
+                            predicate: Iri::new("urn:p"),
+                            object: Term::Iri(Iri::new("urn:o1")),
+                        }),
+                        WriteOperation::PutTriple(Triple {
+                            subject: NodeId::new(1),
+                            predicate: Iri::new("urn:q"),
+                            object: Term::Iri(Iri::new("urn:o2")),
+                        }),
+                        WriteOperation::PutTriple(Triple {
+                            subject: NodeId::new(2),
+                            predicate: Iri::new("urn:p"),
+                            object: Term::Iri(Iri::new("urn:o2")),
+                        }),
+                    ],
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+
+            assert_eq!(
+                engine.triples_by_subject_in_txn(NodeId::new(1), None).len(),
+                2
+            );
+            assert_eq!(
+                engine
+                    .triples_by_predicate_in_txn(&Iri::new("urn:p"), None)
+                    .len(),
+                2
+            );
+            assert_eq!(
+                engine
+                    .triples_by_object_in_txn(&Term::Iri(Iri::new("urn:o2")), None)
+                    .len(),
+                2
+            );
+            assert_eq!(engine.default_graph_triples().len(), 3);
+
+            let graph = Iri::new("urn:graph:cf");
+            let quad_txn = TxnId::new(2);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: quad_txn,
+                    operations: vec![WriteOperation::PutQuad(Quad::in_named_graph(
+                        Triple::new(
+                            NodeId::new(1),
+                            Iri::new("urn:p"),
+                            Term::Iri(Iri::new("urn:o1")),
+                        ),
+                        graph.clone(),
+                    ))],
+                })
+                .unwrap();
+            engine.commit_transaction(quad_txn).unwrap();
+            assert_eq!(
+                engine
+                    .quads_matching_in_graph(&graph, Some(NodeId::new(1)), None, None, None)
+                    .len(),
+                1
+            );
+            assert_eq!(engine.quads_by_graph_in_txn(Some(&graph), None).len(), 1);
+        }
+        // Reopen without any in-memory index cache: CF scans serve reads.
+        let engine = RocksDbStorageEngine::open(path).unwrap();
+        assert_eq!(
+            engine.triples_by_subject_in_txn(NodeId::new(1), None).len(),
+            2
+        );
+        assert_eq!(
+            engine
+                .triples_by_predicate_in_txn(&Iri::new("urn:p"), None)
+                .len(),
+            2
+        );
+        assert_eq!(
+            engine
+                .triples_by_object_in_txn(&Term::Iri(Iri::new("urn:o2")), None)
+                .len(),
+            2
+        );
+        assert_eq!(engine.default_graph_triples().len(), 3);
+        let graph = Iri::new("urn:graph:cf");
+        assert_eq!(
+            engine
+                .quads_matching_in_graph(&graph, Some(NodeId::new(1)), None, None, None)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rocksdb_delete_by_key_clears_position_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        let txn = TxnId::new(7);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![
+                    WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(5),
+                        predicate: Iri::new("urn:p"),
+                        object: Term::Iri(Iri::new("urn:o1")),
+                    }),
+                    WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(5),
+                        predicate: Iri::new("urn:q"),
+                        object: Term::Iri(Iri::new("urn:o2")),
+                    }),
+                    WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(9),
+                        predicate: Iri::new("urn:p"),
+                        object: Term::Iri(Iri::new("urn:o3")),
+                    }),
+                ],
+            })
+            .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let removed = engine
+            .delete_by_key(&StorageKey::spo_subject(NodeId::new(5)))
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert!(
+            engine
+                .triples_by_subject_in_txn(NodeId::new(5), None)
+                .is_empty()
+        );
+        assert_eq!(
+            engine.triples_by_subject_in_txn(NodeId::new(9), None).len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .triples_by_predicate_in_txn(&Iri::new("urn:p"), None)
+                .len(),
+            1
+        );
+        assert_eq!(engine.default_graph_triples().len(), 1);
+
+        drop(engine);
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        assert!(
+            engine
+                .triples_by_subject_in_txn(NodeId::new(5), None)
+                .is_empty()
+        );
+        assert_eq!(engine.default_graph_triples().len(), 1);
+    }
+
+    #[test]
+    fn rocksdb_permutation_keys_land_in_index_column_families() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        let t = Triple {
+            subject: NodeId::new(3),
+            predicate: Iri::new("urn:p"),
+            object: Term::Iri(Iri::new("urn:o")),
+        };
+        let txn = TxnId::new(11);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![WriteOperation::PutTriple(t.clone())],
+            })
+            .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let spo = engine.cf(CF_SPO_INDEX).unwrap();
+        assert!(
+            engine
+                .db
+                .get_cf(spo, encode_spo_key(t.subject, &t.predicate, &t.object))
+                .unwrap()
+                .is_some()
+        );
+        let pos = engine.cf(CF_POS_INDEX).unwrap();
+        assert!(
+            engine
+                .db
+                .get_cf(pos, encode_pos_key(&t.predicate, &t.object, t.subject))
+                .unwrap()
+                .is_some()
+        );
+        let osp = engine.cf(CF_OSP_INDEX).unwrap();
+        assert!(
+            engine
+                .db
+                .get_cf(osp, encode_osp_key(&t.object, t.subject, &t.predicate))
+                .unwrap()
+                .is_some()
+        );
     }
 }
