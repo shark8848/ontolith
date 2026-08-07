@@ -2045,11 +2045,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             r.solutions[0].get("a"),
-            Some(&BoundValue::Literal(LiteralValue::Decimal(5.0)))
+            Some(&BoundValue::Literal(LiteralValue::Integer(5)))
         );
         assert_eq!(
             r.solutions[0].get("c"),
-            Some(&BoundValue::Literal(LiteralValue::Integer(2)))
+            Some(&BoundValue::Literal(LiteralValue::Decimal(2.0)))
         );
         assert_eq!(
             r.solutions[0].get("i"),
@@ -2062,6 +2062,49 @@ mod tests {
         assert_eq!(
             r.solutions[0].get("nin"),
             Some(&BoundValue::Literal(LiteralValue::Boolean(false)))
+        );
+    }
+
+    #[test]
+    fn literal_model_lang_cast_and_value_equality() {
+        let (_e, repo) = seed();
+        let p = pipeline(repo);
+        // Language tags survive data round-trip; UCASE preserves them; CAST
+        // and cross-type numeric equality follow SPARQL semantics.
+        let r = p
+            .execute(&QueryRequest::new(
+                "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+                 SELECT (UCASE(\"bar\"@en) AS ?u) (STRLANG(\"x\", \"fr\") AS ?sl)
+                        (xsd:decimal(\"+33.3300\") AS ?d) (1 = 1.0 AS ?eq)
+                        (\"abc\"^^xsd:string = \"abc\" AS ?sq)
+                 WHERE { ?s ?p ?o } LIMIT 1",
+            ))
+            .unwrap();
+        assert_eq!(
+            r.solutions[0].get("u"),
+            Some(&BoundValue::Literal(LiteralValue::Lang {
+                value: "BAR".into(),
+                lang: ontolith_core::domain::LanguageTag::parse("en").unwrap(),
+            }))
+        );
+        assert_eq!(
+            r.solutions[0].get("sl"),
+            Some(&BoundValue::Literal(LiteralValue::Lang {
+                value: "x".into(),
+                lang: ontolith_core::domain::LanguageTag::parse("fr").unwrap(),
+            }))
+        );
+        assert_eq!(
+            r.solutions[0].get("d"),
+            Some(&BoundValue::Literal(LiteralValue::Decimal(33.33)))
+        );
+        assert_eq!(
+            r.solutions[0].get("eq"),
+            Some(&BoundValue::Literal(LiteralValue::Boolean(true)))
+        );
+        assert_eq!(
+            r.solutions[0].get("sq"),
+            Some(&BoundValue::Literal(LiteralValue::Boolean(true)))
         );
     }
 }

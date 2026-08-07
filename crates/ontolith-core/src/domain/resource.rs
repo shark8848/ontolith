@@ -142,14 +142,35 @@ impl std::fmt::Display for LanguageTag {
     }
 }
 
-/// Compact literal payload used by current storage/query paths.
+/// Literal payload used by storage/query paths.
 ///
-/// Prefer [`Literal`] when datatype / language must be preserved.
+/// The compact numeric/string variants carry their implicit XSD datatype
+/// ([`LiteralValue::xsd_datatype_iri`]); [`LiteralValue::Lang`] and
+/// [`LiteralValue::Typed`] preserve language tags and explicit datatypes
+/// that the compact forms cannot represent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
+    /// Plain string literal (`xsd:string`); also the RDF 1.1 default for
+    /// bare quoted strings.
     String(String),
+    /// Language-tagged string (`rdf:langString`).
+    Lang {
+        value: String,
+        lang: LanguageTag,
+    },
+    /// Typed literal with an explicit (possibly non-numeric) datatype,
+    /// preserved lexically.
+    Typed {
+        value: String,
+        datatype: Iri,
+    },
     Integer(i64),
+    /// `xsd:decimal`.
     Decimal(f64),
+    /// `xsd:float`.
+    Float(f32),
+    /// `xsd:double`.
+    Double(f64),
     Boolean(bool),
 }
 
@@ -157,8 +178,12 @@ impl LiteralValue {
     pub fn lexical_form(&self) -> String {
         match self {
             Self::String(v) => v.clone(),
+            Self::Lang { value, .. } => value.clone(),
+            Self::Typed { value, .. } => value.clone(),
             Self::Integer(v) => v.to_string(),
             Self::Decimal(v) => format_decimal_bits(*v),
+            Self::Float(v) => format_float_bits(*v),
+            Self::Double(v) => format_double_bits(*v),
             Self::Boolean(v) => {
                 if *v {
                     "true".to_owned()
@@ -172,9 +197,21 @@ impl LiteralValue {
     pub fn xsd_datatype_iri(&self) -> Iri {
         match self {
             Self::String(_) => Iri::new("http://www.w3.org/2001/XMLSchema#string"),
+            Self::Lang { .. } => Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"),
+            Self::Typed { datatype, .. } => datatype.clone(),
             Self::Integer(_) => Iri::new("http://www.w3.org/2001/XMLSchema#integer"),
-            Self::Decimal(_) => Iri::new("http://www.w3.org/2001/XMLSchema#double"),
+            Self::Decimal(_) => Iri::new("http://www.w3.org/2001/XMLSchema#decimal"),
+            Self::Float(_) => Iri::new("http://www.w3.org/2001/XMLSchema#float"),
+            Self::Double(_) => Iri::new("http://www.w3.org/2001/XMLSchema#double"),
             Self::Boolean(_) => Iri::new("http://www.w3.org/2001/XMLSchema#boolean"),
+        }
+    }
+
+    /// Language tag of a language-tagged literal, if any.
+    pub fn language_tag(&self) -> Option<&LanguageTag> {
+        match self {
+            Self::Lang { lang, .. } => Some(lang),
+            _ => None,
         }
     }
 }
@@ -189,6 +226,54 @@ fn format_decimal_bits(value: f64) -> String {
     }
 }
 
+fn format_float_bits(value: f32) -> String {
+    // XSD float canonical-ish form: shortest round-trip decimal, with the
+    // exponent marker normalized to the `E` form used by the W3C suite.
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "INF".to_owned()
+        } else {
+            "-INF".to_owned()
+        };
+    }
+    let simple = format!("{value}");
+    if simple.contains('e') || simple.contains('E') {
+        normalize_exp(&simple)
+    } else {
+        simple
+    }
+}
+
+fn format_double_bits(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "INF".to_owned()
+        } else {
+            "-INF".to_owned()
+        };
+    }
+    let simple = format!("{value}");
+    if simple.contains('e') || simple.contains('E') {
+        normalize_exp(&simple)
+    } else {
+        simple
+    }
+}
+
+/// Convert a Rust exponent form like `1.02e4` into `1.02E4`.
+fn normalize_exp(s: &str) -> String {
+    let mut parts = s.splitn(2, ['e', 'E']);
+    let mantissa = parts.next().unwrap_or("");
+    let exponent = parts.next().unwrap_or("");
+    format!("{mantissa}E{exponent}")
+}
+
 impl CanonicalEncode for LiteralValue {
     fn write_canonical(&self, out: &mut CanonicalWriter) {
         match self {
@@ -196,12 +281,30 @@ impl CanonicalEncode for LiteralValue {
                 out.write_tag(b"LS");
                 out.write_str(v);
             }
+            Self::Lang { value, lang } => {
+                out.write_tag(b"LG");
+                out.write_str(value);
+                out.write_str(lang.as_str());
+            }
+            Self::Typed { value, datatype } => {
+                out.write_tag(b"LT");
+                out.write_str(value);
+                out.write_str(datatype.as_str());
+            }
             Self::Integer(v) => {
                 out.write_tag(b"LI");
                 out.write_str(&v.to_string());
             }
             Self::Decimal(v) => {
                 out.write_tag(b"LD");
+                out.write_u64(v.to_bits());
+            }
+            Self::Float(v) => {
+                out.write_tag(b"LF");
+                out.write_u64(v.to_bits() as u64);
+            }
+            Self::Double(v) => {
+                out.write_tag(b"LQ");
                 out.write_u64(v.to_bits());
             }
             Self::Boolean(v) => {

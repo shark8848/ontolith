@@ -1,6 +1,6 @@
 //! Shared RDF term / Turtle token helpers.
 
-use ontolith_core::domain::{Iri, LiteralValue, NodeId};
+use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::Term;
 use ontolith_storage::application::DictionaryCodec;
@@ -151,24 +151,38 @@ pub fn unescape_string(raw: &str) -> String {
 
 pub fn coerce_typed_literal(content: String, datatype: &str) -> LiteralValue {
     match datatype {
+        "http://www.w3.org/2001/XMLSchema#string" => LiteralValue::String(content),
         "http://www.w3.org/2001/XMLSchema#integer"
         | "http://www.w3.org/2001/XMLSchema#int"
         | "http://www.w3.org/2001/XMLSchema#long" => content
             .parse::<i64>()
             .map(LiteralValue::Integer)
-            .unwrap_or(LiteralValue::String(content)),
-        "http://www.w3.org/2001/XMLSchema#double"
-        | "http://www.w3.org/2001/XMLSchema#float"
-        | "http://www.w3.org/2001/XMLSchema#decimal" => content
+            .unwrap_or_else(|_| typed(content, datatype)),
+        "http://www.w3.org/2001/XMLSchema#decimal" => content
             .parse::<f64>()
             .map(LiteralValue::Decimal)
-            .unwrap_or(LiteralValue::String(content)),
+            .unwrap_or_else(|_| typed(content, datatype)),
+        "http://www.w3.org/2001/XMLSchema#float" => content
+            .parse::<f32>()
+            .map(LiteralValue::Float)
+            .unwrap_or_else(|_| typed(content, datatype)),
+        "http://www.w3.org/2001/XMLSchema#double" => content
+            .parse::<f64>()
+            .map(LiteralValue::Double)
+            .unwrap_or_else(|_| typed(content, datatype)),
         "http://www.w3.org/2001/XMLSchema#boolean" => match content.as_str() {
             "true" | "1" => LiteralValue::Boolean(true),
             "false" | "0" => LiteralValue::Boolean(false),
-            _ => LiteralValue::String(content),
+            _ => typed(content, datatype),
         },
-        _ => LiteralValue::String(content),
+        _ => typed(content, datatype),
+    }
+}
+
+fn typed(content: String, datatype: &str) -> LiteralValue {
+    LiteralValue::Typed {
+        value: content,
+        datatype: Iri::new(datatype),
     }
 }
 
@@ -246,7 +260,12 @@ pub fn object_term(
             datatype,
         } => {
             if language.is_some() {
-                return Ok(Term::Literal(LiteralValue::String(value.clone())));
+                let lang = LanguageTag::parse(language.as_deref().unwrap_or(""))
+                    .map_err(|e| OntolithError::parse_at(line, col, e.message()))?;
+                return Ok(Term::Literal(LiteralValue::Lang {
+                    value: value.clone(),
+                    lang,
+                }));
             }
             if let Some(dt) = datatype {
                 let dt_iri = if dt.starts_with('<') {
@@ -601,8 +620,12 @@ impl<'a> Lexer<'a> {
             }),
             _ if word.contains(':') => Tok::Term(TurtleTerm::Prefixed(word.to_owned())),
             _ if is_number(word) => {
-                let dt = if word.contains('.') || word.contains('e') || word.contains('E') {
+                // Turtle numeric grammar: exponent -> xsd:double, else dot
+                // present -> xsd:decimal, else xsd:integer.
+                let dt = if word.contains(['e', 'E']) {
                     "<http://www.w3.org/2001/XMLSchema#double>"
+                } else if word.contains('.') {
+                    "<http://www.w3.org/2001/XMLSchema#decimal>"
                 } else {
                     "<http://www.w3.org/2001/XMLSchema#integer>"
                 };

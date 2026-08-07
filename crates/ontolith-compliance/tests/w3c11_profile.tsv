@@ -10,7 +10,7 @@ add	ADD 7	FAIL	semantic
 add	ADD 8	FAIL	semantic
 aggregates	AVG	PASS	
 aggregates	AVG DISTINCT with GROUP BY	PASS	
-aggregates	AVG with GROUP BY	FAIL	semantic
+aggregates	AVG with GROUP BY	PASS	
 aggregates	AVG with empty group (value defined to be 0)	FAIL	data-format
 aggregates	COUNT 1	PASS	
 aggregates	COUNT 10	PASS	
@@ -31,8 +31,8 @@ aggregates	COUNT: no GROUP BY inside of GRAPH	FAIL	named-graph
 aggregates	COUNT: no match, no group	FAIL	data-format
 aggregates	COUNT: no match, with group	FAIL	data-format
 aggregates	Error in AVG	FAIL	semantic
-aggregates	GROUP BY with a built-in function	FAIL	semantic
-aggregates	GROUP BY with a function	FAIL	semantic
+aggregates	GROUP BY with a built-in function	PASS	
+aggregates	GROUP BY with a function	PASS	
 aggregates	GROUP_CONCAT 1	PASS	
 aggregates	GROUP_CONCAT 2	PASS	
 aggregates	GROUP_CONCAT DISTINCT	FAIL	data-format
@@ -41,18 +41,18 @@ aggregates	GROUP_CONCAT with different language tags	FAIL	data-format
 aggregates	GROUP_CONCAT with one element	FAIL	data-format
 aggregates	GROUP_CONCAT with same language tag	FAIL	data-format
 aggregates	HAVING: multiple conditions	FAIL	other
-aggregates	MAX	FAIL	semantic
-aggregates	MAX DISTINCT with GROUP BY	FAIL	semantic
-aggregates	MAX with GROUP BY	FAIL	semantic
-aggregates	MIN	FAIL	semantic
-aggregates	MIN DISTINCT with GROUP BY	FAIL	semantic
-aggregates	MIN with GROUP BY	FAIL	semantic
+aggregates	MAX	PASS	
+aggregates	MAX DISTINCT with GROUP BY	PASS	
+aggregates	MAX with GROUP BY	PASS	
+aggregates	MIN	PASS	
+aggregates	MIN DISTINCT with GROUP BY	PASS	
+aggregates	MIN with GROUP BY	PASS	
 aggregates	Protect from error in AVG	FAIL	parse-error
 aggregates	SAMPLE	PASS	
 aggregates	SAMPLE DISTINCT	PASS	
 aggregates	SUM	FAIL	semantic
 aggregates	SUM DISTINCT with GROUP BY	PASS	
-aggregates	SUM with GROUP BY	FAIL	semantic
+aggregates	SUM with GROUP BY	PASS	
 aggregates	agg on empty set, explicit grouping	FAIL	data-format
 aggregates	agg on empty set, no grouping	FAIL	data-format
 basic-update	INSERT 01	PASS	
@@ -173,44 +173,44 @@ exists	Exists within graph pattern	FAIL	named-graph
 exists	GRAPH variable inside of EXISTS is bound to external variable	FAIL	named-graph
 exists	Nested negative exists in positive exists	FAIL	semantic
 exists	Nested positive exists	FAIL	semantic
-functions	ABS()	FAIL	semantic
+functions	ABS()	PASS	
 functions	BNODE()	FAIL	semantic
 functions	BNODE(str)	FAIL	semantic
-functions	CEIL()	FAIL	semantic
-functions	COALESCE()	FAIL	semantic
+functions	CEIL()	PASS	
+functions	COALESCE()	PASS	
 functions	COALESCE() without arguments	PASS	
 functions	CONCAT()	PASS	
 functions	CONCAT() 2	FAIL	semantic
 functions	CONCAT() with a single parameter	PASS	
 functions	CONCAT() without parameter	PASS	
-functions	CONTAINS()	FAIL	semantic
-functions	DAY()	FAIL	semantic
-functions	ENCODE_FOR_URI()	FAIL	semantic
-functions	ENCODE_FOR_URI() on non-BMP unicode strings	FAIL	semantic
-functions	FLOOR()	FAIL	semantic
-functions	HOURS()	FAIL	semantic
-functions	IF()	FAIL	semantic
+functions	CONTAINS()	PASS	
+functions	DAY()	PASS	
+functions	ENCODE_FOR_URI()	PASS	
+functions	ENCODE_FOR_URI() on non-BMP unicode strings	PASS	
+functions	FLOOR()	PASS	
+functions	HOURS()	PASS	
+functions	IF()	PASS	
 functions	IF() error propogation	PASS	
 functions	IN 1	PASS	
 functions	IN 2	PASS	
 functions	IRI()/URI()	FAIL	semantic
 functions	IRI()/URI() when the input is an IRI	FAIL	other
-functions	LCASE()	FAIL	semantic
+functions	LCASE()	PASS	
 functions	LCASE() on non-BMP unicode strings	PASS	
 functions	MD5()	FAIL	semantic
 functions	MD5() over Unicode data	FAIL	semantic
-functions	MINUTES()	FAIL	semantic
-functions	MONTH()	FAIL	semantic
+functions	MINUTES()	PASS	
+functions	MONTH()	PASS	
 functions	NOT IN 1	PASS	
 functions	NOT IN 2	PASS	
-functions	NOW()	FAIL	semantic
-functions	RAND()	FAIL	semantic
+functions	NOW()	PASS	
+functions	RAND()	PASS	
 functions	REPLACE()	FAIL	semantic
 functions	REPLACE() with captured substring	FAIL	semantic
 functions	REPLACE() with overlapping pattern	FAIL	semantic
 functions	REPLACE() with the 'i' option	FAIL	data-format
-functions	ROUND()	FAIL	semantic
-functions	SECONDS()	FAIL	semantic
+functions	ROUND()	PASS	
+functions	SECONDS()	PASS	
 functions	SHA1()	FAIL	semantic
 functions	SHA1() on Unicode data	FAIL	semantic
 functions	SHA256()	FAIL	semantic
@@ -228,29 +228,29 @@ functions	STRDT() TypeErrors (updated for RDF 1.1)	FAIL	semantic
 functions	STRDT(STR())	FAIL	semantic
 functions	STRENDS()	PASS	
 functions	STRLANG()	FAIL	semantic
-functions	STRLANG() TypeErrors (updated for RDF 1.1)	FAIL	semantic
+functions	STRLANG() TypeErrors (updated for RDF 1.1)	PASS	
 functions	STRLANG(STR())	FAIL	semantic
-functions	STRLEN()	FAIL	semantic
+functions	STRLEN()	PASS	
 functions	STRLEN() on non-BMP unicode strings	PASS	
 functions	STRSTARTS()	PASS	
 functions	STRUUID() pattern match	FAIL	data-format
-functions	SUBSTR() (2-argument)	FAIL	semantic
+functions	SUBSTR() (2-argument)	PASS	
 functions	SUBSTR() (2-argument) on non-BMP unicode strings	PASS	
-functions	SUBSTR() (3-argument)	FAIL	semantic
+functions	SUBSTR() (3-argument)	PASS	
 functions	SUBSTR() (3-argument) on non-BMP unicode strings	PASS	
 functions	TIMEZONE()	FAIL	semantic
-functions	TZ()	FAIL	semantic
-functions	UCASE()	FAIL	semantic
+functions	TZ()	PASS	
+functions	UCASE()	PASS	
 functions	UCASE() on non-BMP unicode strings	PASS	
 functions	UUID() pattern match	FAIL	data-format
 functions	UUID() per binding	FAIL	data-format
-functions	YEAR()	FAIL	semantic
+functions	YEAR()	PASS	
 functions	isNumeric()	PASS	
 functions	plus-1-corrected	FAIL	semantic
 functions	plus-2-corrected	FAIL	semantic
 grouping	Group-1	PASS	
 grouping	Group-3	PASS	
-grouping	Group-4	FAIL	semantic
+grouping	Group-4	PASS	
 grouping	Group-5	PASS	
 grouping	Group-6	PASS	
 grouping	Group-7	PASS	
@@ -268,7 +268,7 @@ negation	Calculate proper subset	PASS
 negation	Calculate which sets are subsets of others (exclude A subsetOf A)	PASS	
 negation	Calculate which sets are subsets of others (include A subsetOf A)	PASS	
 negation	Calculate which sets have the same elements	FAIL	semantic
-negation	Medical, temporal proximity by exclusion (NOT EXISTS)	FAIL	semantic
+negation	Medical, temporal proximity by exclusion (NOT EXISTS)	PASS	
 negation	Positive EXISTS 1	PASS	
 negation	Positive EXISTS 2	PASS	
 negation	Subsets by exclusion (MINUS)	PASS	

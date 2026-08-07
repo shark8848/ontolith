@@ -261,8 +261,42 @@ ex:dbl ex:p 1.0E2, 2E-1, 1.5e3 .
         assert_eq!(doubles.len(), 3);
         assert!(doubles.iter().all(|t| matches!(
             t.object,
-            ontolith_rdf::domain::Term::Literal(ontolith_core::domain::LiteralValue::Decimal(_))
+            ontolith_rdf::domain::Term::Literal(ontolith_core::domain::LiteralValue::Double(_))
         )));
+    }
+
+    #[test]
+    fn parses_language_and_typed_literals() {
+        let dict = InMemoryDictionary::new();
+        let input = r#"
+@prefix ex: <http://ex.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:lang ex:p "hello"@en-US .
+ex:typed ex:p "abc"^^xsd:token .
+ex:bad ex:p "oops"^^xsd:integer .
+"#;
+        let out = parse_turtle_doc(input, &dict).expect("turtle literals");
+        let mut langs = Vec::new();
+        let mut typs = Vec::new();
+        for t in &out.dataset.default_graph {
+            match &t.object {
+                ontolith_rdf::domain::Term::Literal(
+                    ontolith_core::domain::LiteralValue::Lang { lang, .. },
+                ) => langs.push(lang.as_str().to_owned()),
+                ontolith_rdf::domain::Term::Literal(
+                    ontolith_core::domain::LiteralValue::Typed { datatype, .. },
+                ) => typs.push(datatype.as_str().to_owned()),
+                _ => {}
+            }
+        }
+        assert_eq!(langs, vec!["en-us"]);
+        assert_eq!(
+            typs,
+            vec![
+                "http://www.w3.org/2001/XMLSchema#token".to_owned(),
+                "http://www.w3.org/2001/XMLSchema#integer".to_owned(),
+            ]
+        );
     }
 
     #[test]

@@ -87,6 +87,9 @@ fn render_literal(literal: &LiteralValue) -> String {
     match literal {
         // Plain string literals use the simple (datatype-free) N-Triples form.
         LiteralValue::String(value) => format!("\"{}\"", escape_literal(value)),
+        LiteralValue::Lang { value, lang } => {
+            format!("\"{}\"@{}", escape_literal(value), lang.as_str())
+        }
         _ => format!(
             "\"{}\"^^<{}>",
             escape_literal(&literal.lexical_form()),

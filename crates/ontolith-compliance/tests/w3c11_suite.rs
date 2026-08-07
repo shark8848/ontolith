@@ -503,15 +503,25 @@ fn norm_literal(lex: &str, datatype: Option<&str>, lang: Option<&str>) -> NormTe
             Err(_) => NormDt::Other(dt.to_owned()),
         },
         XSD_DECIMAL | XSD_DOUBLE | XSD_FLOAT => match lex.parse::<f64>() {
-            Ok(v) => NormDt::Numeric(v.to_bits()),
+            Ok(v) => {
+                if v.is_nan() {
+                    NormDt::Other("numeric-nan".to_owned())
+                } else {
+                    NormDt::Numeric(v.to_bits())
+                }
+            }
             Err(_) => NormDt::Other(dt.to_owned()),
         },
         XSD_BOOLEAN => NormDt::Boolean,
         XSD_STRING => NormDt::Plain,
         _ => NormDt::Other(dt.to_owned()),
     };
+    let norm_lex = match normalized {
+        NormDt::Numeric(_) => format!("n{}", lex.parse::<f64>().unwrap_or(0.0).to_bits()),
+        _ => lex.to_owned(),
+    };
     NormTerm::Literal {
-        lex: lex.to_owned(),
+        lex: norm_lex,
         dt: normalized,
         lang: None,
     }
@@ -532,8 +542,28 @@ fn norm_from_engine(value: &BoundValue, dict: Option<&InMemoryDictionary>) -> No
                 lang: None,
             },
             LiteralValue::Decimal(d) => NormTerm::Literal {
-                lex: format!("{d}"),
+                lex: format!("n{}", d.to_bits()),
                 dt: NormDt::Numeric(d.to_bits()),
+                lang: None,
+            },
+            LiteralValue::Double(d) => NormTerm::Literal {
+                lex: format!("n{}", d.to_bits()),
+                dt: NormDt::Numeric(d.to_bits()),
+                lang: None,
+            },
+            LiteralValue::Float(f) => NormTerm::Literal {
+                lex: format!("n{}", (*f as f64).to_bits()),
+                dt: NormDt::Numeric((*f as f64).to_bits()),
+                lang: None,
+            },
+            LiteralValue::Lang { value, lang } => NormTerm::Literal {
+                lex: value.clone(),
+                dt: NormDt::Lang,
+                lang: Some(lang.as_str().to_owned()),
+            },
+            LiteralValue::Typed { value, datatype } => NormTerm::Literal {
+                lex: value.clone(),
+                dt: NormDt::Other(datatype.as_str().to_owned()),
                 lang: None,
             },
             LiteralValue::Boolean(b) => NormTerm::Literal {
@@ -850,8 +880,18 @@ fn term_label(term: &Term, dict: &InMemoryDictionary) -> String {
 fn literal_canon(l: &LiteralValue) -> String {
     match l {
         LiteralValue::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
+        LiteralValue::Lang { value, lang } => {
+            format!("\"{}\"@{}", value.replace('"', "\\\""), lang.as_str())
+        }
+        LiteralValue::Typed { value, datatype } => format!(
+            "\"{}\"^^<{}>",
+            value.replace('"', "\\\""),
+            datatype.as_str()
+        ),
         LiteralValue::Integer(n) => format!("num:i:{n}"),
         LiteralValue::Decimal(d) => format!("num:f:{}", d.to_bits()),
+        LiteralValue::Float(f) => format!("num:f:{}", (*f as f64).to_bits()),
+        LiteralValue::Double(d) => format!("num:f:{}", d.to_bits()),
         LiteralValue::Boolean(b) => format!("bool:{b}"),
     }
 }

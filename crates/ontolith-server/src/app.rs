@@ -1116,31 +1116,21 @@ fn bound_value_json(val: &BoundValue) -> String {
             format!(r#"{{"type":"uri","value":{}}}"#, json_string(iri.as_str()))
         }
         BoundValue::Literal(lit) => {
-            let s = match lit {
-                ontolith_core::domain::LiteralValue::String(s) => s.clone(),
-                ontolith_core::domain::LiteralValue::Integer(v) => v.to_string(),
-                ontolith_core::domain::LiteralValue::Decimal(v) => v.to_string(),
-                ontolith_core::domain::LiteralValue::Boolean(v) => v.to_string(),
-            };
-            let dt = match lit {
-                ontolith_core::domain::LiteralValue::String(_) => None,
-                ontolith_core::domain::LiteralValue::Integer(_) => {
-                    Some("http://www.w3.org/2001/XMLSchema#integer")
-                }
-                ontolith_core::domain::LiteralValue::Decimal(_) => {
-                    Some("http://www.w3.org/2001/XMLSchema#double")
-                }
-                ontolith_core::domain::LiteralValue::Boolean(_) => {
-                    Some("http://www.w3.org/2001/XMLSchema#boolean")
-                }
-            };
-            match dt {
-                Some(d) => format!(
+            let s = lit.lexical_form();
+            if let Some(lang) = lit.language_tag() {
+                format!(
+                    r#"{{"type":"literal","value":{},"xml:lang":{}}}"#,
+                    json_string(&s),
+                    json_string(lang.as_str())
+                )
+            } else if lit.xsd_datatype_iri().as_str() == "http://www.w3.org/2001/XMLSchema#string" {
+                format!(r#"{{"type":"literal","value":{}}}"#, json_string(&s))
+            } else {
+                format!(
                     r#"{{"type":"literal","value":{},"datatype":{}}}"#,
                     json_string(&s),
-                    json_string(d)
-                ),
-                None => format!(r#"{{"type":"literal","value":{}}}"#, json_string(&s)),
+                    json_string(lit.xsd_datatype_iri().as_str())
+                )
             }
         }
         BoundValue::Node(n) | BoundValue::Blank(n) => {
@@ -1153,15 +1143,7 @@ fn term_json(term: &ontolith_rdf::domain::Term) -> String {
     match term {
         ontolith_rdf::domain::Term::Iri(i) => json_string(i.as_str()),
         ontolith_rdf::domain::Term::BlankNode(n) => json_string(&format!("n{}", n.get())),
-        ontolith_rdf::domain::Term::Literal(l) => {
-            let s = match l {
-                ontolith_core::domain::LiteralValue::String(s) => s.clone(),
-                ontolith_core::domain::LiteralValue::Integer(v) => v.to_string(),
-                ontolith_core::domain::LiteralValue::Decimal(v) => v.to_string(),
-                ontolith_core::domain::LiteralValue::Boolean(v) => v.to_string(),
-            };
-            json_string(&s)
-        }
+        ontolith_rdf::domain::Term::Literal(l) => json_string(&l.lexical_form()),
     }
 }
 

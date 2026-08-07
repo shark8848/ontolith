@@ -11,7 +11,7 @@
 //! Streaming via [`parse_document_streaming`]. RDF-star is not supported.
 
 use crate::domain::{RdfEvent, RdfEventSink};
-use ontolith_core::domain::{Iri, LiteralValue, NodeId};
+use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_storage::application::DictionaryCodec;
@@ -337,10 +337,18 @@ fn parse_literal_value(token: &str, line_no: usize) -> Result<LiteralValue, Onto
         return Err(line_err(line_no, "invalid literal"));
     }
 
-    // language / datatype suffix ignored for compact LiteralValue payload except
-    // when datatype is a known XSD numeric/boolean.
+    // Preserve language tags and datatypes so query results round-trip
+    // exactly; known XSD numeric/boolean coercions keep their compact forms.
     if i < bytes.len() && bytes[i] == b'@' {
-        return Ok(LiteralValue::String(content));
+        let lang = token[i + 1..].trim().to_ascii_lowercase();
+        let lang = match LanguageTag::parse(lang) {
+            Ok(l) => l,
+            Err(e) => return Err(OntolithError::parse_at(line_no, 0, e.to_string())),
+        };
+        return Ok(LiteralValue::Lang {
+            value: content,
+            lang,
+        });
     }
     if i + 1 < bytes.len() && bytes[i] == b'^' && bytes[i + 1] == b'^' {
         let dt = &token[i + 2..];
@@ -354,24 +362,38 @@ fn parse_literal_value(token: &str, line_no: usize) -> Result<LiteralValue, Onto
 
 fn coerce_typed_literal(content: String, datatype: &str) -> LiteralValue {
     match datatype {
+        "http://www.w3.org/2001/XMLSchema#string" => LiteralValue::String(content),
         "http://www.w3.org/2001/XMLSchema#integer"
         | "http://www.w3.org/2001/XMLSchema#int"
         | "http://www.w3.org/2001/XMLSchema#long" => content
             .parse::<i64>()
             .map(LiteralValue::Integer)
-            .unwrap_or(LiteralValue::String(content)),
-        "http://www.w3.org/2001/XMLSchema#double"
-        | "http://www.w3.org/2001/XMLSchema#float"
-        | "http://www.w3.org/2001/XMLSchema#decimal" => content
+            .unwrap_or_else(|_| typed(content, datatype)),
+        "http://www.w3.org/2001/XMLSchema#decimal" => content
             .parse::<f64>()
             .map(LiteralValue::Decimal)
-            .unwrap_or(LiteralValue::String(content)),
+            .unwrap_or_else(|_| typed(content, datatype)),
+        "http://www.w3.org/2001/XMLSchema#float" => content
+            .parse::<f32>()
+            .map(LiteralValue::Float)
+            .unwrap_or_else(|_| typed(content, datatype)),
+        "http://www.w3.org/2001/XMLSchema#double" => content
+            .parse::<f64>()
+            .map(LiteralValue::Double)
+            .unwrap_or_else(|_| typed(content, datatype)),
         "http://www.w3.org/2001/XMLSchema#boolean" => match content.as_str() {
             "true" | "1" => LiteralValue::Boolean(true),
             "false" | "0" => LiteralValue::Boolean(false),
-            _ => LiteralValue::String(content),
+            _ => typed(content, datatype),
         },
-        _ => LiteralValue::String(content),
+        _ => typed(content, datatype),
+    }
+}
+
+fn typed(content: String, datatype: &str) -> LiteralValue {
+    LiteralValue::Typed {
+        value: content,
+        datatype: Iri::new(datatype),
     }
 }
 

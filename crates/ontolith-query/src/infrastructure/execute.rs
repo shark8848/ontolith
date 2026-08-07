@@ -6,7 +6,7 @@ use crate::domain::{
     PreemptionReason, PreemptionToken, QueryKind, QueryPlan, QueryRequest, QueryResult, Solution,
     TermPattern, TriplePattern, UpdateOp,
 };
-use ontolith_core::domain::{Iri, LiteralValue, NodeId};
+use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_storage::domain::WriteOperation;
@@ -819,28 +819,32 @@ fn eval_aggregate_spec(spec: &AggregateSpec, rows: &[Solution]) -> Option<BoundV
             } else {
                 rows.to_vec()
             };
-            let mut acc_i: i64 = 0;
-            let mut acc_d: f64 = 0.0;
-            let mut all_int = true;
+            let mut acc = 0.0f64;
+            let mut acc_i = 0i64;
+            let mut rank = 0u8; // 0=int, 1=decimal, 2=float, 3=double
             let mut any = false;
             for s in &rows {
                 let Some(bv) = s.get(variable) else { continue };
-                if let BoundValue::Literal(LiteralValue::Integer(x)) = bv {
+                let Some(n) = Numeric::from_bound(bv) else {
+                    continue;
+                };
+                rank = rank.max(n.rank());
+                acc += n.as_f64();
+                if let Numeric::Integer(x) = n {
                     acc_i += x;
-                    acc_d += *x as f64;
-                    any = true;
-                } else if let Some(x) = numeric_value(bv) {
-                    acc_d += x;
-                    all_int = false;
-                    any = true;
                 }
+                any = true;
             }
             if !any {
                 None
-            } else if all_int {
+            } else if rank == 0 {
                 Some(BoundValue::Literal(LiteralValue::Integer(acc_i)))
+            } else if rank == 2 {
+                Some(BoundValue::Literal(LiteralValue::Float(acc as f32)))
+            } else if rank == 3 {
+                Some(BoundValue::Literal(LiteralValue::Double(acc)))
             } else {
-                Some(BoundValue::Literal(LiteralValue::Decimal(acc_d)))
+                Some(BoundValue::Literal(LiteralValue::Decimal(acc)))
             }
         }
         AggregateFunction::Avg { variable, distinct } => {
@@ -849,18 +853,28 @@ fn eval_aggregate_spec(spec: &AggregateSpec, rows: &[Solution]) -> Option<BoundV
             } else {
                 rows.to_vec()
             };
-            let mut acc_d: f64 = 0.0;
+            let mut acc = 0.0f64;
             let mut n: i64 = 0;
+            let mut rank = 0u8;
             for s in &rows {
-                if let Some(x) = s.get(variable).and_then(numeric_value) {
-                    acc_d += x;
+                if let Some(bv) = s.get(variable)
+                    && let Some(x) = Numeric::from_bound(bv)
+                {
+                    rank = rank.max(x.rank());
+                    acc += x.as_f64();
                     n += 1;
                 }
             }
             if n == 0 {
                 None
+            } else if rank == 3 {
+                Some(BoundValue::Literal(LiteralValue::Double(acc / n as f64)))
+            } else if rank == 2 {
+                Some(BoundValue::Literal(LiteralValue::Float(
+                    (acc / n as f64) as f32,
+                )))
             } else {
-                Some(BoundValue::Literal(LiteralValue::Decimal(acc_d / n as f64)))
+                Some(BoundValue::Literal(LiteralValue::Decimal(acc / n as f64)))
             }
         }
         AggregateFunction::Min { variable, distinct } => {
@@ -884,13 +898,37 @@ fn eval_aggregate_spec(spec: &AggregateSpec, rows: &[Solution]) -> Option<BoundV
             separator,
         } => {
             let mut parts = Vec::new();
+            let mut lang: Option<String> = None;
+            let mut lang_conflict = false;
             for s in rows {
                 if let Some(bv) = s.get(variable) {
-                    parts.push(string_of_bound(bv)?);
+                    match bv {
+                        BoundValue::Literal(LiteralValue::Lang { value, lang: tag }) => {
+                            parts.push(value.clone());
+                            match &lang {
+                                None => lang = Some(tag.as_str().to_owned()),
+                                Some(existing) if existing == tag.as_str() => {}
+                                Some(_) => lang_conflict = true,
+                            }
+                        }
+                        BoundValue::Literal(LiteralValue::String(v)) => {
+                            parts.push(v.clone());
+                            if lang.is_none() {
+                                lang = Some(String::new());
+                            }
+                        }
+                        _ => return None,
+                    }
                 }
             }
             if parts.is_empty() {
                 None
+            } else if !lang_conflict && lang.as_deref().is_some_and(|l| !l.is_empty()) {
+                let joined = parts.join(separator);
+                Some(BoundValue::Literal(LiteralValue::Lang {
+                    value: joined,
+                    lang: LanguageTag::parse(lang.unwrap()).ok()?,
+                }))
             } else {
                 Some(BoundValue::Literal(LiteralValue::String(
                     parts.join(separator),
@@ -910,22 +948,6 @@ fn distinct_rows(rows: &[Solution], variable: &str) -> Vec<Solution> {
         .filter(|s| seen.insert(format!("{:?}", s.get(variable).unwrap())))
         .cloned()
         .collect()
-}
-
-fn string_of_bound(bv: &BoundValue) -> Option<String> {
-    match bv {
-        BoundValue::Literal(l) => Some(l.lexical_form()),
-        BoundValue::Iri(i) => Some(i.as_str().to_owned()),
-        _ => None,
-    }
-}
-
-fn numeric_value(bv: &BoundValue) -> Option<f64> {
-    match bv {
-        BoundValue::Literal(LiteralValue::Integer(x)) => Some(*x as f64),
-        BoundValue::Literal(LiteralValue::Decimal(x)) => Some(*x),
-        _ => None,
-    }
 }
 
 /// `sign` of -1 keeps the smaller value (MIN), 1 keeps the larger (MAX).
@@ -1488,12 +1510,15 @@ fn eval_expr_bool(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Optio
         Expression::Not(e) => Some(!eval_expr_bool(e, sol, ctx)?),
         Expression::And(a, b) => Some(eval_expr_bool(a, sol, ctx)? && eval_expr_bool(b, sol, ctx)?),
         Expression::Or(a, b) => Some(eval_expr_bool(a, sol, ctx)? || eval_expr_bool(b, sol, ctx)?),
-        Expression::Equal(a, b) => {
-            Some(eval_expr_value(a, sol, ctx)? == eval_expr_value(b, sol, ctx)?)
-        }
-        Expression::NotEqual(a, b) => {
-            Some(eval_expr_value(a, sol, ctx)? != eval_expr_value(b, sol, ctx)?)
-        }
+        Expression::Equal(a, b) => value_equal(
+            &eval_expr_value(a, sol, ctx)?,
+            &eval_expr_value(b, sol, ctx)?,
+        ),
+        Expression::NotEqual(a, b) => value_equal(
+            &eval_expr_value(a, sol, ctx)?,
+            &eval_expr_value(b, sol, ctx)?,
+        )
+        .map(|e| !e),
         Expression::Less(a, b) => Some(
             compare_values(
                 &eval_expr_value(a, sol, ctx)?,
@@ -1521,6 +1546,8 @@ fn eval_expr_bool(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Optio
         Expression::Negate(e) => match eval_expr_value(e, sol, ctx)? {
             BoundValue::Literal(LiteralValue::Integer(n)) => Some(n != 0),
             BoundValue::Literal(LiteralValue::Decimal(f)) => Some(f != 0.0),
+            BoundValue::Literal(LiteralValue::Float(f)) => Some(f != 0.0),
+            BoundValue::Literal(LiteralValue::Double(f)) => Some(f != 0.0),
             _ => None,
         },
         Expression::Exists { negated, pattern } => {
@@ -1530,21 +1557,14 @@ fn eval_expr_bool(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Optio
         Expression::Arith { op, left, right } => {
             let l = eval_expr_value(left, sol, ctx)?;
             let r = eval_expr_value(right, sol, ctx)?;
-            let ln = bound_as_f64(&l)?;
-            let rn = bound_as_f64(&r)?;
-            let v = match op {
-                '+' => ln + rn,
-                '-' => ln - rn,
-                '*' => ln * rn,
-                '/' => {
-                    if rn == 0.0 {
-                        return None;
-                    }
-                    ln / rn
-                }
-                _ => return None,
-            };
-            Some(v != 0.0)
+            let v = arithmetic(*op, &l, &r)?;
+            match v {
+                BoundValue::Literal(LiteralValue::Integer(n)) => Some(n != 0),
+                BoundValue::Literal(LiteralValue::Decimal(f)) => Some(f != 0.0),
+                BoundValue::Literal(LiteralValue::Float(f)) => Some(f != 0.0),
+                BoundValue::Literal(LiteralValue::Double(f)) => Some(f != 0.0),
+                _ => None,
+            }
         }
         Expression::Function { .. } => match eval_expr_value(expr, sol, ctx)? {
             BoundValue::Literal(LiteralValue::Boolean(b)) => Some(b),
@@ -1582,12 +1602,16 @@ fn eval_expr_value(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Opti
         Expression::Or(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
             eval_expr_bool(a, sol, ctx)? || eval_expr_bool(b, sol, ctx)?,
         ))),
-        Expression::Equal(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            eval_expr_value(a, sol, ctx)? == eval_expr_value(b, sol, ctx)?,
-        ))),
-        Expression::NotEqual(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(
-            eval_expr_value(a, sol, ctx)? != eval_expr_value(b, sol, ctx)?,
-        ))),
+        Expression::Equal(a, b) => Some(BoundValue::Literal(LiteralValue::Boolean(value_equal(
+            &eval_expr_value(a, sol, ctx)?,
+            &eval_expr_value(b, sol, ctx)?,
+        )?))),
+        Expression::NotEqual(a, b) => {
+            Some(BoundValue::Literal(LiteralValue::Boolean(!value_equal(
+                &eval_expr_value(a, sol, ctx)?,
+                &eval_expr_value(b, sol, ctx)?,
+            )?)))
+        }
         Expression::IsIri(e) => Some(BoundValue::Literal(LiteralValue::Boolean(matches!(
             eval_expr_value(e, sol, ctx)?,
             BoundValue::Iri(_)
@@ -1631,6 +1655,12 @@ fn eval_expr_value(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Opti
             BoundValue::Literal(LiteralValue::Decimal(f)) => {
                 Some(BoundValue::Literal(LiteralValue::Decimal(-f)))
             }
+            BoundValue::Literal(LiteralValue::Float(f)) => {
+                Some(BoundValue::Literal(LiteralValue::Float(-f)))
+            }
+            BoundValue::Literal(LiteralValue::Double(f)) => {
+                Some(BoundValue::Literal(LiteralValue::Double(-f)))
+            }
             _ => None,
         },
         Expression::Exists { .. } => Some(BoundValue::Literal(LiteralValue::Boolean(
@@ -1639,27 +1669,7 @@ fn eval_expr_value(expr: &Expression, sol: &Solution, ctx: &ExecCtx<'_>) -> Opti
         Expression::Arith { op, left, right } => {
             let l = eval_expr_value(left, sol, ctx)?;
             let r = eval_expr_value(right, sol, ctx)?;
-            let ln = bound_as_f64(&l)?;
-            let rn = bound_as_f64(&r)?;
-            let v = match op {
-                '+' => ln + rn,
-                '-' => ln - rn,
-                '*' => ln * rn,
-                '/' => {
-                    if rn == 0.0 {
-                        return None;
-                    }
-                    ln / rn
-                }
-                _ => return None,
-            };
-            Some(match (l, r) {
-                (
-                    BoundValue::Literal(LiteralValue::Integer(_)),
-                    BoundValue::Literal(LiteralValue::Integer(_)),
-                ) if *op != '/' => BoundValue::Literal(LiteralValue::Integer(v as i64)),
-                _ => BoundValue::Literal(LiteralValue::Decimal(v)),
-            })
+            arithmetic(*op, &l, &r)
         }
         Expression::Function { name, args } => eval_function(name, args, sol, ctx),
         // Aggregates are only valid in HAVING and are rewritten to their
@@ -1676,6 +1686,7 @@ fn eval_function(
     ctx: &ExecCtx<'_>,
 ) -> Option<BoundValue> {
     let arg = |i: usize| eval_expr_value(args.get(i)?, sol, ctx);
+    // STR accepts IRIs; other string functions require plain/lang/string literals.
     let string_of = |bv: &BoundValue| -> Option<String> {
         match bv {
             BoundValue::Literal(l) => Some(l.lexical_form()),
@@ -1684,20 +1695,15 @@ fn eval_function(
         }
     };
     let string = |i: usize| string_of(&arg(i)?);
-    let int_of = |bv: &BoundValue| -> Option<i64> {
-        match bv {
-            BoundValue::Literal(LiteralValue::Integer(n)) => Some(*n),
-            BoundValue::Literal(LiteralValue::Decimal(f)) if f.fract() == 0.0 => Some(*f as i64),
+    let str_lit = |i: usize| -> Option<LiteralValue> {
+        let bv = arg(i)?;
+        match &bv {
+            BoundValue::Literal(l) => str_lit_lex(l).map(|_| l.clone()),
             _ => None,
         }
     };
-    let num_of = |bv: &BoundValue| -> Option<f64> {
-        match bv {
-            BoundValue::Literal(LiteralValue::Integer(n)) => Some(*n as f64),
-            BoundValue::Literal(LiteralValue::Decimal(f)) => Some(*f),
-            _ => None,
-        }
-    };
+    let int_of =
+        |bv: &BoundValue| -> Option<i64> { Numeric::from_bound(bv).map(|n| n.as_f64() as i64) };
     let bool = |b: bool| BoundValue::Literal(LiteralValue::Boolean(b));
     let strlit = |s: String| BoundValue::Literal(LiteralValue::String(s));
 
@@ -1719,20 +1725,58 @@ fn eval_function(
             BoundValue::Literal(l) => Some(strlit(l.lexical_form())),
             _ => None,
         },
-        "UCASE" => Some(strlit(string(0)?.to_uppercase())),
-        "LCASE" => Some(strlit(string(0)?.to_lowercase())),
+        "UCASE" => {
+            let l = str_lit(0)?;
+            Some(BoundValue::Literal(str_result(
+                &l,
+                str_lit_lex(&l)?.to_uppercase(),
+            )))
+        }
+        "LCASE" => {
+            let l = str_lit(0)?;
+            Some(BoundValue::Literal(str_result(
+                &l,
+                str_lit_lex(&l)?.to_lowercase(),
+            )))
+        }
         "STRLEN" => Some(BoundValue::Literal(LiteralValue::Integer(
-            string(0)?.chars().count() as i64,
+            str_lit_lex(&str_lit(0)?)?.chars().count() as i64,
         ))),
         "CONCAT" => {
             let mut out = String::new();
+            let mut lang: Option<String> = None;
+            let mut lang_conflict = false;
             for i in 0..args.len() {
-                out.push_str(&string(i)?);
+                let l = str_lit(i)?;
+                out.push_str(str_lit_lex(&l)?);
+                match l {
+                    LiteralValue::Lang { lang: tag, .. } => match &lang {
+                        None => lang = Some(tag.as_str().to_owned()),
+                        Some(existing) if existing == tag.as_str() => {}
+                        Some(_) => lang_conflict = true,
+                    },
+                    _ => {
+                        if lang.is_none() {
+                            lang = Some(String::new());
+                        }
+                    }
+                }
             }
-            Some(strlit(out))
+            let value = if lang_conflict || lang.as_deref() == Some("") {
+                strlit(out)
+            } else if let Some(tag) = lang {
+                BoundValue::Literal(LiteralValue::Lang {
+                    value: out,
+                    lang: LanguageTag::parse(tag).ok()?,
+                })
+            } else {
+                strlit(out)
+            };
+            Some(value)
         }
         "SUBSTR" => {
-            let s = string(0)?;
+            let l = str_lit(0)?;
+            let s = str_lit_lex(&l)?.to_owned();
             let start = int_of(&arg(1)?)?;
             let chars: Vec<char> = s.chars().collect();
             let from = (start.max(1) as usize - 1).min(chars.len());
@@ -1742,51 +1786,100 @@ fn eval_function(
             } else {
                 chars.iter().skip(from).collect()
             };
-            Some(strlit(out))
+            Some(BoundValue::Literal(str_result(&l, out)))
         }
-        "CONTAINS" => Some(bool(string(0)?.contains(&string(1)?))),
-        "STRSTARTS" => Some(bool(string(0)?.starts_with(&string(1)?))),
-        "STRENDS" => Some(bool(string(0)?.ends_with(&string(1)?))),
+        "CONTAINS" => {
+            let a = str_lit_lex(&str_lit(0)?)?.to_owned();
+            let b = str_lit_lex(&str_lit(1)?)?.to_owned();
+            Some(bool(a.contains(&b)))
+        }
+        "STRSTARTS" => {
+            let a = str_lit_lex(&str_lit(0)?)?.to_owned();
+            let b = str_lit_lex(&str_lit(1)?)?.to_owned();
+            Some(bool(a.starts_with(&b)))
+        }
+        "STRENDS" => {
+            let a = str_lit_lex(&str_lit(0)?)?.to_owned();
+            let b = str_lit_lex(&str_lit(1)?)?.to_owned();
+            Some(bool(a.ends_with(&b)))
+        }
         "STRAFTER" => {
-            let s = string(0)?;
-            let needle = string(1)?;
-            match s.find(&needle) {
-                Some(idx) => Some(strlit(s[idx + needle.len()..].to_owned())),
-                None => Some(strlit(String::new())),
-            }
+            let l = str_lit(0)?;
+            let s = str_lit_lex(&l)?.to_owned();
+            let needle = str_lit_lex(&str_lit(1)?)?.to_owned();
+            let out = match s.find(&needle) {
+                Some(idx) => s[idx + needle.len()..].to_owned(),
+                None => String::new(),
+            };
+            Some(BoundValue::Literal(str_result(&l, out)))
         }
         "STRBEFORE" => {
-            let s = string(0)?;
-            let needle = string(1)?;
-            match s.find(&needle) {
-                Some(idx) => Some(strlit(s[..idx].to_owned())),
-                None => Some(strlit(String::new())),
-            }
+            let l = str_lit(0)?;
+            let s = str_lit_lex(&l)?.to_owned();
+            let needle = str_lit_lex(&str_lit(1)?)?.to_owned();
+            let out = match s.find(&needle) {
+                Some(idx) => s[..idx].to_owned(),
+                None => String::new(),
+            };
+            Some(BoundValue::Literal(str_result(&l, out)))
         }
-        "LANG" => Some(strlit(String::new())),
+        "LANG" => match arg(0)? {
+            BoundValue::Literal(LiteralValue::Lang { lang, .. }) => {
+                Some(strlit(lang.as_str().to_owned()))
+            }
+            BoundValue::Literal(_) => Some(strlit(String::new())),
+            _ => None,
+        },
         "DATATYPE" => match arg(0)? {
             BoundValue::Literal(l) => Some(BoundValue::Iri(l.xsd_datatype_iri())),
             _ => None,
         },
-        "IRI" | "URI" => Some(BoundValue::Iri(Iri::new(string(0)?))),
-        "ABS" => match num_of(&arg(0)?) {
-            Some(f) if f >= 0.0 => Some(BoundValue::Literal(LiteralValue::Decimal(f))),
-            Some(f) => Some(BoundValue::Literal(LiteralValue::Decimal(-f))),
-            None => None,
-        },
-        "CEIL" => Some(BoundValue::Literal(LiteralValue::Integer(
-            num_of(&arg(0)?)?.ceil() as i64,
-        ))),
-        "FLOOR" => Some(BoundValue::Literal(LiteralValue::Integer(
-            num_of(&arg(0)?)?.floor() as i64,
-        ))),
-        "ROUND" => Some(BoundValue::Literal(LiteralValue::Integer(
-            num_of(&arg(0)?)?.round() as i64,
-        ))),
-        "ISNUMERIC" => Some(bool(matches!(
-            arg(0)?,
-            BoundValue::Literal(LiteralValue::Integer(_) | LiteralValue::Decimal(_))
-        ))),
+        "IRI" | "URI" => {
+            let s = string(0)?;
+            Iri::parse(s).ok().map(BoundValue::Iri)
+        }
+        "STRDT" => {
+            let lit = str_lit(0)?;
+            if matches!(lit, LiteralValue::Lang { .. }) {
+                return None;
+            }
+            let datatype = match arg(1)? {
+                BoundValue::Iri(i) => i,
+                _ => return None,
+            };
+            Some(BoundValue::Literal(LiteralValue::Typed {
+                value: str_lit_lex(&lit)?.to_owned(),
+                datatype,
+            }))
+        }
+        "STRLANG" => {
+            let lit = str_lit(0)?;
+            if matches!(lit, LiteralValue::Lang { .. }) {
+                return None;
+            }
+            let lang = match arg(1)? {
+                BoundValue::Literal(LiteralValue::String(s)) => LanguageTag::parse(s).ok()?,
+                _ => return None,
+            };
+            Some(BoundValue::Literal(LiteralValue::Lang {
+                value: str_lit_lex(&lit)?.to_owned(),
+                lang,
+            }))
+        }
+        "ABS" => {
+            let n = Numeric::from_bound(&arg(0)?)?;
+            let v = match n {
+                Numeric::Integer(x) => LiteralValue::Integer(x.abs()),
+                Numeric::Decimal(x) => LiteralValue::Decimal(x.abs()),
+                Numeric::Float(x) => LiteralValue::Float(x.abs()),
+                Numeric::Double(x) => LiteralValue::Double(x.abs()),
+            };
+            Some(BoundValue::Literal(v))
+        }
+        "CEIL" => numeric_unary(&arg(0)?, |f| f.ceil(), |f| f.ceil(), |f| f.ceil() as i64),
+        "FLOOR" => numeric_unary(&arg(0)?, |f| f.floor(), |f| f.floor(), |f| f.floor() as i64),
+        "ROUND" => numeric_unary(&arg(0)?, |f| f.round(), |f| f.round(), |f| f.round() as i64),
+        "ISNUMERIC" => Some(bool(Numeric::from_bound(&arg(0)?).is_some())),
         "IF" => {
             let cond = eval_expr_bool(&args[0], sol, ctx)?;
             if cond {
@@ -1806,56 +1899,509 @@ fn eval_function(
         "IN" | "NOT IN" => {
             let needle = eval_expr_value(args.first()?, sol, ctx)?;
             let mut found = false;
+            let mut error = false;
             for a in args.iter().skip(1) {
-                if let Some(v) = eval_expr_value(a, sol, ctx)
-                    && v == needle
-                {
-                    found = true;
-                    break;
+                let Some(v) = eval_expr_value(a, sol, ctx) else {
+                    error = true;
+                    continue;
+                };
+                match value_equal(&v, &needle) {
+                    Some(true) => {
+                        found = true;
+                        break;
+                    }
+                    Some(false) => {}
+                    None => error = true,
                 }
             }
+            if !found && error {
+                return None;
+            }
             Some(bool(if name == "IN" { found } else { !found }))
+        }
+        "ENCODE_FOR_URI" => Some(strlit(encode_for_uri(&string(0)?))),
+        "NOW" => Some(BoundValue::Literal(LiteralValue::Typed {
+            value: now_datetime(),
+            datatype: Iri::new("http://www.w3.org/2001/XMLSchema#dateTime"),
+        })),
+        "RAND" => {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .subsec_nanos();
+            let x = (nanos as f64) / 1_000_000_000_f64;
+            Some(BoundValue::Literal(LiteralValue::Double(x)))
+        }
+        "YEAR" | "MONTH" | "DAY" | "HOURS" | "MINUTES" | "SECONDS" => {
+            let dt = datetime_of(&arg(0)?)?;
+            let part = match name {
+                "YEAR" => dt.year,
+                "MONTH" => dt.month,
+                "DAY" => dt.day,
+                "HOURS" => dt.hour,
+                "MINUTES" => dt.minute,
+                _ => dt.second_trunc,
+            };
+            let v = if name == "SECONDS" {
+                LiteralValue::Decimal(part as f64)
+            } else {
+                LiteralValue::Integer(part)
+            };
+            Some(BoundValue::Literal(v))
+        }
+        "TIMEZONE" => {
+            let dt = datetime_of(&arg(0)?)?;
+            let lex = format_duration(&dt.tz);
+            Some(BoundValue::Literal(LiteralValue::Typed {
+                value: lex,
+                datatype: Iri::new("http://www.w3.org/2001/XMLSchema#dayTimeDuration"),
+            }))
+        }
+        "TZ" => {
+            let dt = datetime_of(&arg(0)?)?;
+            Some(strlit(dt.tz.to_string()))
         }
         _ => None,
     }
 }
 
-fn compare_values(a: &BoundValue, b: &BoundValue) -> Option<i8> {
-    match (a, b) {
-        (
-            BoundValue::Literal(LiteralValue::Integer(x)),
-            BoundValue::Literal(LiteralValue::Integer(y)),
-        ) => Some(match x.cmp(y) {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
-        }),
-        (
-            BoundValue::Literal(LiteralValue::Decimal(x)),
-            BoundValue::Literal(LiteralValue::Decimal(y)),
-        ) => x.partial_cmp(y).map(|o| match o {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
-        }),
-        (
-            BoundValue::Literal(LiteralValue::String(x)),
-            BoundValue::Literal(LiteralValue::String(y)),
-        ) => Some(match x.cmp(y) {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
-        }),
-        (BoundValue::Iri(x), BoundValue::Iri(y)) => Some(match x.as_str().cmp(y.as_str()) {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
-        }),
+/// Lexical string of a string-usable literal (plain / lang / xsd:string).
+fn str_lit_lex(l: &LiteralValue) -> Option<&str> {
+    match l {
+        LiteralValue::String(s) => Some(s),
+        LiteralValue::Lang { value, .. } => Some(value),
+        LiteralValue::Typed { value, datatype } if datatype.as_str() == XSD_STRING_IRI => {
+            Some(value)
+        }
         _ => None,
     }
 }
 
-/// SPARQL `CAST(expr AS datatype)` / `xsd:type(expr)` over the compact model.
+/// Result literal for string-preserving functions (lang carried over).
+fn str_result(orig: &LiteralValue, lex: String) -> LiteralValue {
+    match orig {
+        LiteralValue::Lang { lang, .. } => LiteralValue::Lang {
+            value: lex,
+            lang: lang.clone(),
+        },
+        _ => LiteralValue::String(lex),
+    }
+}
+
+/// CEIL/FLOOR/ROUND preserve the numeric datatype of the argument.
+fn numeric_unary(
+    bv: &BoundValue,
+    d: impl Fn(f64) -> f64,
+    f: impl Fn(f32) -> f32,
+    i: impl Fn(f64) -> i64,
+) -> Option<BoundValue> {
+    match Numeric::from_bound(bv)? {
+        Numeric::Integer(x) => Some(BoundValue::Literal(LiteralValue::Integer(i(x as f64)))),
+        Numeric::Decimal(x) => Some(BoundValue::Literal(LiteralValue::Decimal(d(x)))),
+        Numeric::Float(x) => Some(BoundValue::Literal(LiteralValue::Float(f(x)))),
+        Numeric::Double(x) => Some(BoundValue::Literal(LiteralValue::Double(d(x)))),
+    }
+}
+
+fn encode_for_uri(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+struct DateTimeParts {
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second_trunc: i64,
+    tz: TimezoneOffset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimezoneOffset {
+    Z,
+    /// (sign, hours, minutes); sign true = '+', false = '-'.
+    Offset(bool, u32, u32),
+    None,
+}
+
+impl std::fmt::Display for TimezoneOffset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Z => f.write_str("Z"),
+            Self::Offset(true, h, m) => write!(f, "+{h:02}:{m:02}"),
+            Self::Offset(false, h, m) => write!(f, "-{h:02}:{m:02}"),
+            Self::None => Ok(()),
+        }
+    }
+}
+
+fn format_duration(tz: &TimezoneOffset) -> String {
+    match tz {
+        TimezoneOffset::Z | TimezoneOffset::None => "PT0S".to_owned(),
+        TimezoneOffset::Offset(sign, h, m) => {
+            let sign = if *sign { "" } else { "-" };
+            let mut out = String::new();
+            if *h > 0 {
+                out.push_str(&format!("{h}H"));
+            }
+            if *m > 0 {
+                out.push_str(&format!("{m}M"));
+            }
+            if out.is_empty() {
+                out.push_str("0S");
+            }
+            format!("{sign}PT{out}")
+        }
+    }
+}
+
+fn datetime_of(bv: &BoundValue) -> Option<DateTimeParts> {
+    let lex = match bv {
+        BoundValue::Literal(LiteralValue::Typed { value, datatype })
+            if datatype.as_str() == "http://www.w3.org/2001/XMLSchema#dateTime" =>
+        {
+            value
+        }
+        _ => return None,
+    };
+    parse_datetime(lex)
+}
+
+fn parse_datetime(s: &str) -> Option<DateTimeParts> {
+    // YYYY-MM-DDTHH:MM:SS(.fff)?(Z|±HH:MM)?
+    let b = s.as_bytes();
+    let mut i = 0;
+    let take = |i: &mut usize, n: usize| -> Option<i64> {
+        if *i + n > b.len() {
+            return None;
+        }
+        let part = &s[*i..*i + n];
+        *i += n;
+        part.parse::<i64>().ok()
+    };
+    let year = take(&mut i, 4)?;
+    if b.get(i) != Some(&b'-') {
+        return None;
+    }
+    i += 1;
+    let month = take(&mut i, 2)?;
+    if b.get(i) != Some(&b'-') {
+        return None;
+    }
+    i += 1;
+    let day = take(&mut i, 2)?;
+    if b.get(i) != Some(&b'T') {
+        return None;
+    }
+    i += 1;
+    let hour = take(&mut i, 2)?;
+    if b.get(i) != Some(&b':') {
+        return None;
+    }
+    i += 1;
+    let minute = take(&mut i, 2)?;
+    if b.get(i) != Some(&b':') {
+        return None;
+    }
+    i += 1;
+    let sec_start = i;
+    take(&mut i, 2)?;
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        let frac_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == frac_start {
+            return None;
+        }
+    }
+    let second_trunc = s[sec_start..sec_start + 2].parse::<i64>().ok()?;
+    let tz = if i >= b.len() {
+        TimezoneOffset::None
+    } else if b[i] == b'Z' {
+        i += 1;
+        TimezoneOffset::Z
+    } else if matches!(b[i], b'+' | b'-') {
+        let sign = b[i] == b'+';
+        i += 1;
+        let th = take(&mut i, 2)?;
+        if b.get(i) != Some(&b':') {
+            return None;
+        }
+        i += 1;
+        let tm = take(&mut i, 2)?;
+        TimezoneOffset::Offset(sign, th as u32, tm as u32)
+    } else {
+        return None;
+    };
+    if i != b.len() {
+        return None;
+    }
+    Some(DateTimeParts {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second_trunc,
+        tz,
+    })
+}
+
+fn now_datetime() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    // Howard Hinnant's civil_from_days algorithm.
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+const XSD_STRING_IRI: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_INTEGER_IRI: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_DECIMAL_IRI: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_FLOAT_IRI: &str = "http://www.w3.org/2001/XMLSchema#float";
+const XSD_DOUBLE_IRI: &str = "http://www.w3.org/2001/XMLSchema#double";
+const XSD_BOOLEAN_IRI: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+
+/// SPARQL numeric value for promotion-aware arithmetic / comparison.
+#[derive(Debug, Clone, Copy)]
+enum Numeric {
+    Integer(i64),
+    Decimal(f64),
+    Float(f32),
+    Double(f64),
+}
+
+impl Numeric {
+    fn from_literal(l: &LiteralValue) -> Option<Self> {
+        match l {
+            LiteralValue::Integer(x) => Some(Self::Integer(*x)),
+            LiteralValue::Decimal(x) => Some(Self::Decimal(*x)),
+            LiteralValue::Float(x) => Some(Self::Float(*x)),
+            LiteralValue::Double(x) => Some(Self::Double(*x)),
+            LiteralValue::Typed { value, datatype } => {
+                let dt = datatype.as_str();
+                if dt == XSD_INTEGER_IRI {
+                    value.parse::<i64>().ok().map(Self::Integer)
+                } else if dt == XSD_DECIMAL_IRI {
+                    value.parse::<f64>().ok().map(Self::Decimal)
+                } else if dt == XSD_FLOAT_IRI {
+                    value.parse::<f32>().ok().map(Self::Float)
+                } else if dt == XSD_DOUBLE_IRI {
+                    value.parse::<f64>().ok().map(Self::Double)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn from_bound(bv: &BoundValue) -> Option<Self> {
+        match bv {
+            BoundValue::Literal(l) => Self::from_literal(l),
+            _ => None,
+        }
+    }
+
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Integer(x) => x as f64,
+            Self::Decimal(x) => x,
+            Self::Float(x) => x as f64,
+            Self::Double(x) => x,
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Integer(_) => 0,
+            Self::Decimal(_) => 1,
+            Self::Float(_) => 2,
+            Self::Double(_) => 3,
+        }
+    }
+}
+
+/// SPARQL arithmetic with XPath numeric type promotion.
+fn arithmetic(op: char, l: &BoundValue, r: &BoundValue) -> Option<BoundValue> {
+    let ln = Numeric::from_bound(l)?;
+    let rn = Numeric::from_bound(r)?;
+    let rank = ln.rank().max(rn.rank());
+    let lf = ln.as_f64();
+    let rf = rn.as_f64();
+    let value = match op {
+        '+' => lf + rf,
+        '-' => lf - rf,
+        '*' => lf * rf,
+        '/' => {
+            if rf == 0.0 {
+                return None;
+            }
+            lf / rf
+        }
+        _ => return None,
+    };
+    if op == '/' && rank == 0 {
+        // XPath op:numeric-divide: integer / integer -> decimal.
+        return Some(BoundValue::Literal(LiteralValue::Decimal(value)));
+    }
+    if rank == 2 {
+        let v = match op {
+            '+' => (lf as f32) + (rf as f32),
+            '-' => (lf as f32) - (rf as f32),
+            '*' => (lf as f32) * (rf as f32),
+            '/' => (lf as f32) / (rf as f32),
+            _ => return None,
+        };
+        return Some(BoundValue::Literal(LiteralValue::Float(v)));
+    }
+    Some(match rank {
+        0 => BoundValue::Literal(LiteralValue::Integer(value as i64)),
+        1 => BoundValue::Literal(LiteralValue::Decimal(value)),
+        _ => BoundValue::Literal(LiteralValue::Double(value)),
+    })
+}
+
+/// SPARQL `=` / `!=` value equality (RDFterm-equal). `None` = evaluation error.
+fn value_equal(a: &BoundValue, b: &BoundValue) -> Option<bool> {
+    match (a, b) {
+        (BoundValue::Iri(x), BoundValue::Iri(y)) => Some(x == y),
+        (BoundValue::Iri(_), _) | (_, BoundValue::Iri(_)) => Some(false),
+        (
+            BoundValue::Blank(x) | BoundValue::Node(x),
+            BoundValue::Blank(y) | BoundValue::Node(y),
+        ) => Some(x == y),
+        (BoundValue::Blank(_) | BoundValue::Node(_), _)
+        | (_, BoundValue::Blank(_) | BoundValue::Node(_)) => Some(false),
+        (BoundValue::Literal(x), BoundValue::Literal(y)) => literal_equal(x, y),
+    }
+}
+
+fn literal_equal(a: &LiteralValue, b: &LiteralValue) -> Option<bool> {
+    if let (Some(na), Some(nb)) = (Numeric::from_literal(a), Numeric::from_literal(b)) {
+        let va = na.as_f64();
+        let vb = nb.as_f64();
+        if va.is_nan() || vb.is_nan() {
+            return None;
+        }
+        return Some(va == vb);
+    }
+    if Numeric::from_literal(a).is_some() || Numeric::from_literal(b).is_some() {
+        // Numeric vs non-numeric: unequal (SPARQL: no error).
+        return Some(false);
+    }
+    match (a, b) {
+        (LiteralValue::Lang { value: x, lang: lx }, LiteralValue::Lang { value: y, lang: ly }) => {
+            Some(x == y && lx == ly)
+        }
+        (LiteralValue::Lang { .. }, _) | (_, LiteralValue::Lang { .. }) => Some(false),
+        (LiteralValue::Typed { .. }, _) | (_, LiteralValue::Typed { .. }) => {
+            let (x, dx) = match a {
+                LiteralValue::Typed { value, datatype } => (value, datatype.as_str()),
+                LiteralValue::String(v) => (v, XSD_STRING_IRI),
+                _ => return None,
+            };
+            let (y, dy) = match b {
+                LiteralValue::Typed { value, datatype } => (value, datatype.as_str()),
+                LiteralValue::String(v) => (v, XSD_STRING_IRI),
+                _ => return None,
+            };
+            Some(x == y && dx == dy)
+        }
+        (LiteralValue::String(x), LiteralValue::String(y)) => Some(x == y),
+        (LiteralValue::Boolean(x), LiteralValue::Boolean(y)) => Some(x == y),
+        _ => Some(false),
+    }
+}
+
+/// SPARQL ordering comparison (`<` `<=` `>` `>=`). `None` = incomparable/error.
+fn compare_values(a: &BoundValue, b: &BoundValue) -> Option<i8> {
+    if let (Some(na), Some(nb)) = (Numeric::from_bound(a), Numeric::from_bound(b)) {
+        let va = na.as_f64();
+        let vb = nb.as_f64();
+        if va.is_nan() || vb.is_nan() {
+            return None;
+        }
+        return Some(if va < vb {
+            -1
+        } else if va > vb {
+            1
+        } else {
+            0
+        });
+    }
+    match (a, b) {
+        (BoundValue::Iri(x), BoundValue::Iri(y)) => Some(ord(x.as_str().cmp(y.as_str()))),
+        (BoundValue::Literal(x), BoundValue::Literal(y)) => {
+            let (lx, lang_x) = string_lex_and_lang(x)?;
+            let (ly, lang_y) = string_lex_and_lang(y)?;
+            let base = ord(lx.cmp(ly));
+            if base != 0 {
+                Some(base)
+            } else {
+                // Language-tagged literals sort after plain literals with the
+                // same value, then by tag.
+                Some(match (lang_x, lang_y) {
+                    (Some(a), Some(b)) => ord(a.cmp(b)),
+                    (Some(_), None) => 1,
+                    (None, Some(_)) => -1,
+                    (None, None) => 0,
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn ord(o: std::cmp::Ordering) -> i8 {
+    match o {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+fn string_lex_and_lang(l: &LiteralValue) -> Option<(&str, Option<&str>)> {
+    match l {
+        LiteralValue::String(s) => Some((s, None)),
+        LiteralValue::Lang { value, lang } => Some((value, Some(lang.as_str()))),
+        LiteralValue::Typed { value, datatype } if datatype.as_str() == XSD_STRING_IRI => {
+            Some((value, None))
+        }
+        _ => None,
+    }
+}
+
+/// SPARQL `CAST(expr AS datatype)` / `xsd:type(expr)`.
 fn cast_value(
     bv: &BoundValue,
     datatype: &Iri,
@@ -1863,7 +2409,7 @@ fn cast_value(
 ) -> Option<BoundValue> {
     let dt = datatype.as_str();
     match dt {
-        "http://www.w3.org/2001/XMLSchema#string" => {
+        XSD_STRING_IRI => {
             let s = match bv {
                 BoundValue::Literal(l) => l.lexical_form(),
                 BoundValue::Iri(i) => i.as_str().to_owned(),
@@ -1871,72 +2417,237 @@ fn cast_value(
             };
             Some(strlit(s))
         }
-        "http://www.w3.org/2001/XMLSchema#integer" => match bv {
-            BoundValue::Literal(LiteralValue::Integer(n)) => {
-                Some(BoundValue::Literal(LiteralValue::Integer(*n)))
-            }
-            BoundValue::Literal(LiteralValue::Decimal(f)) => {
-                Some(BoundValue::Literal(LiteralValue::Integer(f.round() as i64)))
-            }
-            BoundValue::Literal(LiteralValue::Boolean(b)) => {
-                Some(BoundValue::Literal(LiteralValue::Integer(*b as i64)))
-            }
-            BoundValue::Literal(LiteralValue::String(s)) => Some(BoundValue::Literal(
-                LiteralValue::Integer(s.trim().parse::<i64>().ok()?),
-            )),
-            _ => None,
-        },
-        "http://www.w3.org/2001/XMLSchema#decimal"
-        | "http://www.w3.org/2001/XMLSchema#double"
-        | "http://www.w3.org/2001/XMLSchema#float" => match bv {
-            BoundValue::Literal(LiteralValue::Integer(n)) => {
-                Some(BoundValue::Literal(LiteralValue::Decimal(*n as f64)))
-            }
-            BoundValue::Literal(LiteralValue::Decimal(f)) => {
-                Some(BoundValue::Literal(LiteralValue::Decimal(*f)))
-            }
-            BoundValue::Literal(LiteralValue::Boolean(b)) => {
-                Some(BoundValue::Literal(LiteralValue::Decimal(if *b {
-                    1.0
-                } else {
-                    0.0
-                })))
-            }
-            BoundValue::Literal(LiteralValue::String(s)) => s
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .map(|f| BoundValue::Literal(LiteralValue::Decimal(f))),
-            _ => None,
-        },
-        "http://www.w3.org/2001/XMLSchema#boolean" => match bv {
-            BoundValue::Literal(LiteralValue::Boolean(b)) => {
-                Some(BoundValue::Literal(LiteralValue::Boolean(*b)))
-            }
-            BoundValue::Literal(LiteralValue::Integer(n)) => {
-                Some(BoundValue::Literal(LiteralValue::Boolean(*n != 0)))
-            }
-            BoundValue::Literal(LiteralValue::Decimal(f)) => {
-                Some(BoundValue::Literal(LiteralValue::Boolean(*f != 0.0)))
-            }
-            BoundValue::Literal(LiteralValue::String(s)) => match s.trim() {
-                "true" | "1" => Some(BoundValue::Literal(LiteralValue::Boolean(true))),
-                "false" | "0" => Some(BoundValue::Literal(LiteralValue::Boolean(false))),
-                _ => None,
-            },
-            _ => None,
-        },
+        XSD_BOOLEAN_IRI => {
+            let b = match bv {
+                BoundValue::Literal(LiteralValue::Boolean(b)) => *b,
+                BoundValue::Literal(LiteralValue::Integer(n)) => *n != 0,
+                BoundValue::Literal(LiteralValue::Decimal(f)) => *f != 0.0,
+                BoundValue::Literal(LiteralValue::Float(f)) => *f != 0.0,
+                BoundValue::Literal(LiteralValue::Double(f)) => *f != 0.0,
+                BoundValue::Literal(LiteralValue::String(s)) => match s.trim() {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => return None,
+                },
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if matches!(
+                        datatype.as_str(),
+                        XSD_INTEGER_IRI | XSD_DECIMAL_IRI | XSD_FLOAT_IRI | XSD_DOUBLE_IRI
+                    ) =>
+                {
+                    Numeric::from_literal(&LiteralValue::Typed {
+                        value: value.clone(),
+                        datatype: datatype.clone(),
+                    })?
+                    .as_f64()
+                        != 0.0
+                }
+                _ => return None,
+            };
+            Some(BoundValue::Literal(LiteralValue::Boolean(b)))
+        }
+        XSD_INTEGER_IRI => {
+            let n = match bv {
+                BoundValue::Literal(LiteralValue::Integer(n)) => *n,
+                BoundValue::Literal(LiteralValue::Decimal(f)) => f.trunc() as i64,
+                BoundValue::Literal(LiteralValue::Float(f)) => f.trunc() as i64,
+                BoundValue::Literal(LiteralValue::Double(f)) => f.trunc() as i64,
+                BoundValue::Literal(LiteralValue::Boolean(b)) => *b as i64,
+                BoundValue::Literal(LiteralValue::String(s)) if valid_integer_lex(s.trim()) => {
+                    s.trim().parse::<i64>().ok()?
+                }
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if matches!(
+                        datatype.as_str(),
+                        XSD_INTEGER_IRI | XSD_DECIMAL_IRI | XSD_FLOAT_IRI | XSD_DOUBLE_IRI
+                    ) =>
+                {
+                    let num = Numeric::from_literal(&LiteralValue::Typed {
+                        value: value.clone(),
+                        datatype: datatype.clone(),
+                    })?;
+                    match num {
+                        Numeric::Integer(x) => x,
+                        other => other.as_f64().trunc() as i64,
+                    }
+                }
+                _ => return None,
+            };
+            Some(BoundValue::Literal(LiteralValue::Integer(n)))
+        }
+        XSD_DECIMAL_IRI => {
+            let v = match bv {
+                BoundValue::Literal(LiteralValue::Integer(n)) => *n as f64,
+                BoundValue::Literal(LiteralValue::Decimal(f)) => *f,
+                BoundValue::Literal(LiteralValue::Float(f)) => *f as f64,
+                BoundValue::Literal(LiteralValue::Double(f)) => *f,
+                BoundValue::Literal(LiteralValue::Boolean(b)) => {
+                    if *b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                BoundValue::Literal(LiteralValue::String(s)) if valid_decimal_lex(s.trim()) => {
+                    s.trim().parse::<f64>().ok()?
+                }
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if matches!(
+                        datatype.as_str(),
+                        XSD_INTEGER_IRI | XSD_DECIMAL_IRI | XSD_FLOAT_IRI | XSD_DOUBLE_IRI
+                    ) =>
+                {
+                    let num = Numeric::from_literal(&LiteralValue::Typed {
+                        value: value.clone(),
+                        datatype: datatype.clone(),
+                    })?;
+                    num.as_f64()
+                }
+                _ => return None,
+            };
+            Some(BoundValue::Literal(LiteralValue::Decimal(v)))
+        }
+        XSD_DOUBLE_IRI => {
+            let v = match bv {
+                BoundValue::Literal(LiteralValue::Integer(n)) => *n as f64,
+                BoundValue::Literal(LiteralValue::Decimal(f)) => *f,
+                BoundValue::Literal(LiteralValue::Float(f)) => *f as f64,
+                BoundValue::Literal(LiteralValue::Double(f)) => *f,
+                BoundValue::Literal(LiteralValue::Boolean(b)) => {
+                    if *b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                BoundValue::Literal(LiteralValue::String(s)) if valid_double_lex(s.trim()) => {
+                    s.trim().parse::<f64>().ok()?
+                }
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if matches!(
+                        datatype.as_str(),
+                        XSD_INTEGER_IRI | XSD_DECIMAL_IRI | XSD_FLOAT_IRI | XSD_DOUBLE_IRI
+                    ) =>
+                {
+                    let num = Numeric::from_literal(&LiteralValue::Typed {
+                        value: value.clone(),
+                        datatype: datatype.clone(),
+                    })?;
+                    num.as_f64()
+                }
+                _ => return None,
+            };
+            Some(BoundValue::Literal(LiteralValue::Double(v)))
+        }
+        XSD_FLOAT_IRI => {
+            let v = match bv {
+                BoundValue::Literal(LiteralValue::Integer(n)) => *n as f32,
+                BoundValue::Literal(LiteralValue::Decimal(f)) => *f as f32,
+                BoundValue::Literal(LiteralValue::Float(f)) => *f,
+                BoundValue::Literal(LiteralValue::Double(f)) => *f as f32,
+                BoundValue::Literal(LiteralValue::Boolean(b)) => {
+                    if *b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                BoundValue::Literal(LiteralValue::String(s)) if valid_double_lex(s.trim()) => {
+                    s.trim().parse::<f32>().ok()?
+                }
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if matches!(
+                        datatype.as_str(),
+                        XSD_INTEGER_IRI | XSD_DECIMAL_IRI | XSD_FLOAT_IRI | XSD_DOUBLE_IRI
+                    ) =>
+                {
+                    let num = Numeric::from_literal(&LiteralValue::Typed {
+                        value: value.clone(),
+                        datatype: datatype.clone(),
+                    })?;
+                    num.as_f64() as f32
+                }
+                _ => return None,
+            };
+            Some(BoundValue::Literal(LiteralValue::Float(v)))
+        }
         _ => None,
     }
 }
 
-/// Numeric value of a bound literal for arithmetic (SPARQL numeric promotion).
-fn bound_as_f64(bv: &BoundValue) -> Option<f64> {
-    match bv {
-        BoundValue::Literal(LiteralValue::Integer(n)) => Some(*n as f64),
-        BoundValue::Literal(LiteralValue::Decimal(f)) => Some(*f),
-        _ => None,
+fn valid_integer_lex(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && matches!(b[i], b'+' | b'-') {
+        i += 1;
     }
+    if i >= b.len() {
+        return false;
+    }
+    b[i..].iter().all(|c| c.is_ascii_digit())
+}
+
+fn valid_decimal_lex(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && matches!(b[i], b'+' | b'-') {
+        i += 1;
+    }
+    let mut digits = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+        digits += 1;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+            digits += 1;
+        }
+    }
+    digits > 0 && i == b.len()
+}
+
+fn valid_double_lex(s: &str) -> bool {
+    if matches!(s, "INF" | "+INF" | "-INF" | "NaN") {
+        return true;
+    }
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && matches!(b[i], b'+' | b'-') {
+        i += 1;
+    }
+    let mut digits = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+        digits += 1;
+    }
+    let mut saw_dot = false;
+    if i < b.len() && b[i] == b'.' {
+        saw_dot = true;
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return false;
+    }
+    if i < b.len() && matches!(b[i], b'e' | b'E') {
+        i += 1;
+        if i < b.len() && matches!(b[i], b'+' | b'-') {
+            i += 1;
+        }
+        let exp_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_start {
+            return false;
+        }
+    }
+    i == b.len() && (digits > 0 || saw_dot)
 }
 
 fn compare_bound(a: Option<&BoundValue>, b: Option<&BoundValue>) -> std::cmp::Ordering {

@@ -3,7 +3,7 @@
 //! Used by the RocksDB adapter; intentionally free of vendor types.
 
 use crate::domain::{StorageKey, WalPhase, WalRecord, WriteOperation};
-use ontolith_core::domain::{Iri, LiteralValue, NodeId};
+use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_transaction::domain::TxnId;
@@ -91,6 +91,24 @@ pub fn encode_term(term: &Term) -> Vec<u8> {
             buf.push(6);
             buf.push(u8::from(*v));
         }
+        Term::Literal(LiteralValue::Lang { value, lang }) => {
+            buf.push(7);
+            put_str(&mut buf, value);
+            put_str(&mut buf, lang.as_str());
+        }
+        Term::Literal(LiteralValue::Typed { value, datatype }) => {
+            buf.push(8);
+            put_str(&mut buf, value);
+            put_str(&mut buf, datatype.as_str());
+        }
+        Term::Literal(LiteralValue::Float(v)) => {
+            buf.push(9);
+            buf.extend_from_slice(&v.to_bits().to_be_bytes());
+        }
+        Term::Literal(LiteralValue::Double(v)) => {
+            buf.push(10);
+            buf.extend_from_slice(&v.to_bits().to_be_bytes());
+        }
     }
     buf
 }
@@ -138,6 +156,50 @@ pub fn decode_term(input: &[u8], off: &mut usize) -> Result<Term, OntolithError>
             let v = input[*off] != 0;
             *off += 1;
             Ok(Term::Literal(LiteralValue::Boolean(v)))
+        }
+        7 => {
+            let value = take_str(input, off)?;
+            let lang = take_str(input, off)?;
+            let lang = match LanguageTag::parse(lang) {
+                Ok(l) => l,
+                Err(e) => {
+                    return Err(OntolithError::Failed(format!(
+                        "decode lang: {}",
+                        e.message()
+                    )));
+                }
+            };
+            Ok(Term::Literal(LiteralValue::Lang { value, lang }))
+        }
+        8 => {
+            let value = take_str(input, off)?;
+            let datatype = take_str(input, off)?;
+            Ok(Term::Literal(LiteralValue::Typed {
+                value,
+                datatype: Iri::new(datatype),
+            }))
+        }
+        9 => {
+            if *off + 4 > input.len() {
+                return Err(OntolithError::Storage("f32 truncated"));
+            }
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(&input[*off..*off + 4]);
+            *off += 4;
+            Ok(Term::Literal(LiteralValue::Float(f32::from_bits(
+                u32::from_be_bytes(arr),
+            ))))
+        }
+        10 => {
+            if *off + 8 > input.len() {
+                return Err(OntolithError::Storage("f64 truncated"));
+            }
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&input[*off..*off + 8]);
+            *off += 8;
+            Ok(Term::Literal(LiteralValue::Double(f64::from_bits(
+                u64::from_be_bytes(arr),
+            ))))
         }
         _ => Err(OntolithError::Storage("unknown term tag")),
     }

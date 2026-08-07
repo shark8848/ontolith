@@ -9,7 +9,7 @@ use crate::domain::{
     ProjectionExpr, QueryKind, QueryPlan, QueryPlanId, QueryRequest, TermPattern, TriplePattern,
     UpdateOp,
 };
-use ontolith_core::domain::{Iri, LiteralValue};
+use ontolith_core::domain::{Iri, LanguageTag, LiteralValue};
 use ontolith_core::error::OntolithError;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -2036,13 +2036,19 @@ impl<'a> SparqlParser<'a> {
                 // datatype / lang
                 if self.peek_char() == Some('@') {
                     self.bump();
+                    let lang_start = self.pos;
                     while self
                         .peek_char()
                         .is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
                     {
                         self.bump();
                     }
-                    return Ok(LiteralValue::String(unescape(&raw)));
+                    let lang = self.input[lang_start..self.pos].to_ascii_lowercase();
+                    let lang = LanguageTag::parse(lang).map_err(|e| self.err(e.message()))?;
+                    return Ok(LiteralValue::Lang {
+                        value: unescape(&raw),
+                        lang,
+                    });
                 }
                 if self.input[self.pos..].starts_with("^^") {
                     self.bump();
@@ -2358,24 +2364,38 @@ fn unescape(s: &str) -> String {
 
 fn coerce_literal(content: String, dt: &str) -> LiteralValue {
     match dt {
+        "http://www.w3.org/2001/XMLSchema#string" => LiteralValue::String(content),
         "http://www.w3.org/2001/XMLSchema#integer"
         | "http://www.w3.org/2001/XMLSchema#int"
         | "http://www.w3.org/2001/XMLSchema#long" => content
             .parse()
             .map(LiteralValue::Integer)
-            .unwrap_or(LiteralValue::String(content)),
-        "http://www.w3.org/2001/XMLSchema#double"
-        | "http://www.w3.org/2001/XMLSchema#float"
-        | "http://www.w3.org/2001/XMLSchema#decimal" => content
+            .unwrap_or_else(|_| typed(content, dt)),
+        "http://www.w3.org/2001/XMLSchema#decimal" => content
             .parse()
             .map(LiteralValue::Decimal)
-            .unwrap_or(LiteralValue::String(content)),
+            .unwrap_or_else(|_| typed(content, dt)),
+        "http://www.w3.org/2001/XMLSchema#float" => content
+            .parse()
+            .map(LiteralValue::Float)
+            .unwrap_or_else(|_| typed(content, dt)),
+        "http://www.w3.org/2001/XMLSchema#double" => content
+            .parse()
+            .map(LiteralValue::Double)
+            .unwrap_or_else(|_| typed(content, dt)),
         "http://www.w3.org/2001/XMLSchema#boolean" => match content.as_str() {
             "true" | "1" => LiteralValue::Boolean(true),
             "false" | "0" => LiteralValue::Boolean(false),
-            _ => LiteralValue::String(content),
+            _ => typed(content, dt),
         },
-        _ => LiteralValue::String(content),
+        _ => typed(content, dt),
+    }
+}
+
+fn typed(content: String, datatype: &str) -> LiteralValue {
+    LiteralValue::Typed {
+        value: content,
+        datatype: Iri::new(datatype),
     }
 }
 
