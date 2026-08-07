@@ -11,7 +11,8 @@ mod sparql_mvp_legacy {
 }
 
 use crate::application::{
-    EngineUpdateWriteService, QueryExecutor, QueryPlanner, QueryReadService, UpdateWriteService,
+    EngineUpdateWriteService, QueryExecutor, QueryPlanner, QueryReadService, QueryStatistics,
+    UpdateWriteService,
 };
 #[cfg(test)]
 use crate::domain::QueryResultSummary;
@@ -24,8 +25,37 @@ use ontolith_transaction::domain::TxnId;
 use std::sync::Arc;
 
 pub use execute::AlgebraExecutor;
-pub use optimize::RuleBasedOptimizer;
+pub use optimize::{CostBasedOptimizer, RuleBasedOptimizer};
 pub use sparql_parse::{parse_subject_hint, plan_query};
+
+/// [`QueryStatistics`] over a storage engine's incremental counters.
+pub struct EngineQueryStatistics {
+    engine: Arc<dyn StorageEngine>,
+}
+
+impl EngineQueryStatistics {
+    pub fn new(engine: Arc<dyn StorageEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+impl QueryStatistics for EngineQueryStatistics {
+    fn triple_count(&self) -> u64 {
+        self.engine.stats().triple_count
+    }
+
+    fn distinct_subjects(&self) -> u64 {
+        self.engine.stats().distinct_subjects
+    }
+
+    fn distinct_predicates(&self) -> u64 {
+        self.engine.stats().distinct_predicates
+    }
+
+    fn distinct_objects(&self) -> u64 {
+        self.engine.stats().distinct_objects
+    }
+}
 
 /// Storage-backed read service using SPO/POS/OSP indexes.
 pub struct InMemoryQueryReadService {
@@ -192,7 +222,7 @@ pub fn update_pipeline(
     dictionary: Option<Arc<dyn DictionaryCodec>>,
 ) -> crate::application::QueryPipeline<
     SimpleQueryPlanner,
-    RuleBasedOptimizer,
+    CostBasedOptimizer<EngineQueryStatistics>,
     UpdateQueryExecutor<EngineUpdateWriteService>,
 > {
     let read: Arc<dyn QueryReadService> = match dictionary {
@@ -201,8 +231,25 @@ pub fn update_pipeline(
     };
     crate::application::QueryPipeline::new(
         SimpleQueryPlanner,
-        RuleBasedOptimizer,
+        CostBasedOptimizer::new(Arc::new(EngineQueryStatistics::new(Arc::clone(&engine)))),
         UpdateQueryExecutor::new(read, EngineUpdateWriteService::new(engine)),
+    )
+}
+
+/// Read-only pipeline with cost-based BGP ordering over engine statistics.
+pub fn cost_pipeline(
+    repo: Arc<dyn TripleRepository>,
+    engine: Arc<dyn StorageEngine>,
+) -> crate::application::QueryPipeline<
+    SimpleQueryPlanner,
+    CostBasedOptimizer<EngineQueryStatistics>,
+    ReadServiceQueryExecutor,
+> {
+    let read: Arc<dyn QueryReadService> = Arc::new(InMemoryQueryReadService::new(repo));
+    crate::application::QueryPipeline::new(
+        SimpleQueryPlanner,
+        CostBasedOptimizer::new(Arc::new(EngineQueryStatistics::new(engine))),
+        ReadServiceQueryExecutor::new(read),
     )
 }
 
@@ -232,7 +279,7 @@ pub fn status() -> &'static str {
 mod tests {
     use super::*;
     use crate::application::QueryPipeline;
-    use crate::domain::{Algebra, BoundValue, QueryRequest, TermPattern};
+    use crate::domain::{Algebra, BoundValue, QueryRequest, TermPattern, TriplePattern};
     use ontolith_core::domain::{Iri, LiteralValue, NodeId};
     use ontolith_rdf::domain::{Quad, Term, Triple};
     use ontolith_storage::application::{DictionaryCodec, QuadRepository, StorageEngine, TripleRepository};
@@ -333,7 +380,7 @@ mod tests {
         repo: Arc<dyn TripleRepository>,
     ) -> crate::application::QueryPipeline<
         SimpleQueryPlanner,
-        RuleBasedOptimizer,
+        CostBasedOptimizer<EngineQueryStatistics>,
         UpdateQueryExecutor<EngineUpdateWriteService>,
     > {
         crate::infrastructure::update_pipeline(repo, engine, Some(dict))
@@ -342,7 +389,7 @@ mod tests {
     fn count_names(
         p: &crate::application::QueryPipeline<
             SimpleQueryPlanner,
-            RuleBasedOptimizer,
+            CostBasedOptimizer<EngineQueryStatistics>,
             UpdateQueryExecutor<EngineUpdateWriteService>,
         >,
     ) -> usize {
@@ -688,6 +735,116 @@ mod tests {
         // Named graph was already cleared above; only default triples remain.
         assert_eq!(r.affected, 2);
         assert_eq!(count_names(&p), 0);
+    }
+
+    #[test]
+    fn cost_optimizer_orders_bgp_by_selectivity_and_binding() {
+        use crate::application::QueryStatistics;
+
+        struct FixedStats {
+            total: u64,
+            subjects: u64,
+            predicates: u64,
+            objects: u64,
+        }
+        impl QueryStatistics for FixedStats {
+            fn triple_count(&self) -> u64 {
+                self.total
+            }
+            fn distinct_subjects(&self) -> u64 {
+                self.subjects
+            }
+            fn distinct_predicates(&self) -> u64 {
+                self.predicates
+            }
+            fn distinct_objects(&self) -> u64 {
+                self.objects
+            }
+        }
+        let stats = FixedStats {
+            total: 100,
+            subjects: 50,
+            predicates: 10,
+            objects: 40,
+        };
+        let bound_pred = |p: &str| TriplePattern {
+            subject: TermPattern::Variable("s".into()),
+            predicate: TermPattern::Iri(Iri::new(p)),
+            object: TermPattern::Variable("o".into()),
+        };
+        let patterns = vec![
+            bound_pred("urn:common1"),
+            TriplePattern {
+                subject: TermPattern::Iri(Iri::new("urn:s")),
+                predicate: TermPattern::Variable("p".into()),
+                object: TermPattern::Variable("o".into()),
+            },
+            TriplePattern {
+                subject: TermPattern::Variable("s".into()),
+                predicate: TermPattern::Variable("p".into()),
+                object: TermPattern::Iri(Iri::new("urn:o")),
+            },
+            bound_pred("urn:common2"),
+        ];
+        let ordered = match super::optimize::optimize_algebra_with_stats(
+            Algebra::Bgp(patterns),
+            &stats,
+        ) {
+            Algebra::Bgp(p) => p,
+            other => panic!("expected Bgp, got {other:?}"),
+        };
+        let sig = |t: &TermPattern| match t {
+            TermPattern::Iri(i) => i.as_str().to_string(),
+            _ => "?".into(),
+        };
+        let signatures: Vec<_> = ordered
+            .iter()
+            .map(|p| format!("{}:{}:{}", sig(&p.subject), sig(&p.predicate), sig(&p.object)))
+            .collect();
+        // Cheapest first, then the connecting pattern (binding propagation),
+        // then the remaining selective patterns by cardinality.
+        assert_eq!(
+            signatures,
+            vec![
+                "?:urn:common1:?".to_string(),
+                "?:urn:common2:?".to_string(),
+                "?:?:urn:o".to_string(),
+                "urn:s:?:?".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn engine_statistics_reflect_seed() {
+        let (engine, _repo) = seed();
+        let stats = EngineQueryStatistics::new(engine.clone());
+        assert_eq!(stats.triple_count(), 4);
+        assert_eq!(stats.distinct_predicates(), 3);
+        let s = engine.stats();
+        assert_eq!(stats.distinct_subjects(), s.distinct_subjects);
+        assert_eq!(stats.distinct_objects(), s.distinct_objects);
+    }
+
+    #[test]
+    fn cost_pipeline_matches_standard_results() {
+        let (engine, repo) = seed();
+        let p_std = standard_pipeline(repo.clone());
+        let p_cost = cost_pipeline(repo, engine);
+        for q in [
+            "SELECT * WHERE { ?s ?p ?o }",
+            "SELECT ?s WHERE { ?s <http://ex.org/knows> ?o . ?s <http://ex.org/name> ?n }",
+        ] {
+            let a = p_std.execute(&QueryRequest::new(q)).unwrap();
+            let b = p_cost.execute(&QueryRequest::new(q)).unwrap();
+            assert_eq!(a.solutions.len(), b.solutions.len());
+        }
+        let plan = p_cost
+            .plan(&QueryRequest::new("SELECT * WHERE { ?s ?p ?o }"))
+            .unwrap();
+        assert!(
+            plan.logical_steps.iter().any(|s| s.starts_with("optimize(cost)")),
+            "cost optimizer step missing"
+        );
     }
 
     #[test]

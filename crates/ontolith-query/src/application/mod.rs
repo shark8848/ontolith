@@ -1,6 +1,8 @@
 //! Query application contracts (L3).
 
-use crate::domain::{QueryExplain, QueryPlan, QueryRequest, QueryResult, QueryResultSummary};
+use crate::domain::{
+    QueryExplain, QueryPlan, QueryRequest, QueryResult, QueryResultSummary, TriplePattern,
+};
 use ontolith_core::domain::{Iri, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
@@ -128,6 +130,35 @@ pub trait QueryReadService: Send + Sync {
             elapsed_ms: started.elapsed().as_millis() as u64,
             timed_out: false,
         })
+    }
+}
+
+/// Cardinality statistics used by the cost-based optimizer (P3-02).
+pub trait QueryStatistics: Send + Sync {
+    fn triple_count(&self) -> u64;
+
+    fn distinct_subjects(&self) -> u64;
+
+    fn distinct_predicates(&self) -> u64;
+
+    fn distinct_objects(&self) -> u64;
+
+    /// Uniform-selectivity estimate for one triple pattern: the product of
+    /// per-position bound selectivities (distinct values / total triples),
+    /// clamped to `[1e-9, 1]`.
+    fn pattern_selectivity(&self, pattern: &TriplePattern) -> f64 {
+        let total = self.triple_count().max(1) as f64;
+        let mut sel = 1.0;
+        if !pattern.subject.is_variable() {
+            sel *= self.distinct_subjects().max(1) as f64 / total;
+        }
+        if !pattern.predicate.is_variable() {
+            sel *= self.distinct_predicates().max(1) as f64 / total;
+        }
+        if !pattern.object.is_variable() {
+            sel *= self.distinct_objects().max(1) as f64 / total;
+        }
+        sel.clamp(1e-9, 1.0)
     }
 }
 
