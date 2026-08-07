@@ -582,60 +582,104 @@ fn apply_rules(
             .filter(|t| t.predicate == rdf_type && &t.object == class)
             .map(|t| t.subject)
             .collect();
-        let share_key = |x: NodeId, y: NodeId, p: &Iri| -> bool {
-            closure.iter().any(|t| {
-                t.subject == x && &t.predicate == p && {
-                    let value = &t.object;
-                    closure
-                        .iter()
-                        .any(|u| u.subject == y && &u.predicate == p && &u.object == value)
+        if members.len() < 2 {
+            continue;
+        }
+        // Bucket members by value per key property, then keep pairs that
+        // co-occur in a bucket of every key (avoids an O(m^2·k·n^2) scan).
+        let buckets: Vec<Vec<(Term, Vec<NodeId>)>> = keys
+            .iter()
+            .map(|p| {
+                let mut by_value: Vec<(Term, Vec<NodeId>)> = Vec::new();
+                for &x in &members {
+                    for t in closure {
+                        if t.subject == x && &t.predicate == p {
+                            let value = t.object.clone();
+                            match by_value.iter_mut().find(|(v, _)| *v == value) {
+                                Some((_, list)) => {
+                                    if !list.contains(&x) {
+                                        list.push(x);
+                                    }
+                                }
+                                None => by_value.push((value, vec![x])),
+                            }
+                        }
+                    }
                 }
+                by_value
             })
-        };
-        for (i, x) in members.iter().enumerate() {
-            for y in members.iter().skip(i + 1) {
-                if keys.iter().all(|p| share_key(*x, *y, p))
-                    && let Some(y_term) = node_term(*y)
-                {
-                    frontier.push(Triple::new(*x, owl("sameAs"), y_term.clone()));
+            .collect();
+        let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
+        let mut collect_pairs = |bucket: &[NodeId]| {
+            for i in 0..bucket.len() {
+                for j in (i + 1)..bucket.len() {
+                    let (a, b) = (bucket[i], bucket[j]);
+                    let (x, y) = if a < b { (a, b) } else { (b, a) };
+                    if !pairs.contains(&(x, y)) {
+                        pairs.push((x, y));
+                    }
                 }
+            }
+        };
+        for (_, list) in &buckets[0] {
+            collect_pairs(list);
+        }
+        for bucket in buckets.iter().skip(1) {
+            pairs.retain(|(x, y)| {
+                bucket
+                    .iter()
+                    .any(|(_, list)| list.contains(x) && list.contains(y))
+            });
+        }
+        for (x, y) in pairs {
+            if let Some(y_term) = node_term(y) {
+                frontier.push(Triple::new(x, owl("sameAs"), y_term));
             }
         }
     }
 
     // owl:sameAs equivalence closure.
-    let same_as: Vec<(Iri, Iri)> = closure
+    let same_as: Vec<(NodeId, NodeId)> = closure
         .iter()
         .filter_map(|t| {
             if t.predicate != owl("sameAs") {
+                return None;
+            }
+            let o = subject_node(&t.object)?;
+            Some((t.subject, o))
+        })
+        .collect();
+    // eq-sym
+    for (a, b) in &same_as {
+        if let Some(a_term) = node_term(*a) {
+            frontier.push(Triple::new(*b, owl("sameAs"), a_term));
+        }
+    }
+    // eq-trans
+    for (a, b) in &same_as {
+        for (_, c) in same_as.iter().filter(|(x, _)| x == b) {
+            if let Some(c_term) = node_term(*c) {
+                frontier.push(Triple::new(*a, owl("sameAs"), c_term));
+            }
+        }
+    }
+
+    // Consistency rules: conclusions are ⊥ and surface as `inconsistent`.
+    // Indexes include same-iteration derivations (`frontier`) so chain-triggered
+    // contradictions are detected even when `max_iterations == 1`.
+    let nothing = owl("Nothing");
+    let all: Vec<&Triple> = closure.iter().chain(frontier.iter()).collect();
+    let subclass_all: Vec<(Iri, Iri)> = all
+        .iter()
+        .filter_map(|t| {
+            if t.predicate != rdfs("subClassOf") {
                 return None;
             }
             let (s, o) = (node_iri(t.subject)?, iri_of(&t.object)?);
             Some((s, o))
         })
         .collect();
-    // eq-sym
-    for (a, b) in &same_as {
-        frontier.push(Triple::new(
-            dict.encode_node(b.as_str()),
-            owl("sameAs"),
-            Term::Iri(a.clone()),
-        ));
-    }
-    // eq-trans
-    for (a, b) in &same_as {
-        for (_, c) in same_as.iter().filter(|(x, _)| x == b) {
-            frontier.push(Triple::new(
-                dict.encode_node(a.as_str()),
-                owl("sameAs"),
-                Term::Iri(c.clone()),
-            ));
-        }
-    }
-
-    // Consistency rules: conclusions are ⊥ and surface as `inconsistent`.
-    let nothing = owl("Nothing");
-    let disjoint: Vec<(Iri, Iri)> = closure
+    let disjoint: Vec<(Iri, Iri)> = all
         .iter()
         .filter_map(|t| {
             if t.predicate != owl("disjointWith") {
@@ -645,8 +689,18 @@ fn apply_rules(
             Some((s, o))
         })
         .collect();
+    let same_as_all: Vec<(NodeId, NodeId)> = all
+        .iter()
+        .filter_map(|t| {
+            if t.predicate != owl("sameAs") {
+                return None;
+            }
+            let o = subject_node(&t.object)?;
+            Some((t.subject, o))
+        })
+        .collect();
     let different_from = owl("differentFrom");
-    for t in closure {
+    for t in &all {
         if t.predicate != rdf_type {
             continue;
         }
@@ -658,12 +712,12 @@ fn apply_rules(
             *inconsistent = true;
         }
         // cls-nothing2: ?c rdfs:subClassOf owl:Nothing ∧ x rdf:type ?c → ⊥.
-        if subclass.iter().any(|(c, d)| *d == nothing && *c == c1) {
+        if subclass_all.iter().any(|(c, d)| *d == nothing && *c == c1) {
             *inconsistent = true;
         }
         // cax-dw: x rdf:type ?c1 ∧ x rdf:type ?c2 ∧ ?c1 owl:disjointWith ?c2 → ⊥.
         let typed = |c: &Iri| -> bool {
-            closure.iter().any(|u| {
+            all.iter().any(|u| {
                 u.subject == t.subject
                     && u.predicate == rdf_type
                     && iri_of(&u.object).as_ref() == Some(c)
@@ -676,19 +730,22 @@ fn apply_rules(
             *inconsistent = true;
         }
     }
-    for t in closure {
+    for t in &all {
         if t.predicate != different_from {
             continue;
         }
-        let (Some(s), Some(o)) = (node_iri(t.subject), iri_of(&t.object)) else {
+        let Some(obj_node) = subject_node(&t.object) else {
             continue;
         };
         // eq-diff1: x owl:differentFrom x → ⊥.
-        if s == o {
+        if t.subject == obj_node {
             *inconsistent = true;
         }
         // eq-diff2: x owl:sameAs y ∧ x owl:differentFrom y → ⊥.
-        if same_as.iter().any(|(a, b)| a == &s && b == &o) {
+        if same_as_all
+            .iter()
+            .any(|(a, b)| *a == t.subject && *b == obj_node)
+        {
             *inconsistent = true;
         }
     }
@@ -712,6 +769,7 @@ pub fn status() -> &'static str {
 mod tests {
     use super::*;
     use crate::domain::{InferenceMode, ReasoningTask};
+    use ontolith_core::domain::LiteralValue;
     use ontolith_storage::infrastructure::InMemoryDictionary;
 
     fn task(mode: InferenceMode) -> ReasoningTask {
@@ -733,6 +791,19 @@ mod tests {
             Iri::new(p),
             Term::BlankNode(dict.encode_node(bnode)),
         )
+    }
+
+    fn tl(s: &str, p: &str, o: LiteralValue, dict: &InMemoryDictionary) -> Triple {
+        Triple::new(dict.encode_node(s), Iri::new(p), Term::Literal(o))
+    }
+
+    fn task_max_iterations(n: u32) -> ReasoningTask {
+        ReasoningTask {
+            plan_id: None,
+            mode: InferenceMode::ForwardChaining,
+            max_iterations: n,
+            max_elapsed_ms: None,
+        }
     }
 
     #[test]
@@ -1349,5 +1420,232 @@ mod tests {
             .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
             .expect("materialize");
         assert!(outcome.report.inconsistent, "expected eq-diff1/2 ⊥");
+    }
+
+    #[test]
+    fn consistent_input_not_marked_inconsistent() {
+        let dict = InMemoryDictionary::new();
+        let rdfs = "http://www.w3.org/2000/01/rdf-schema#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("urn:A", &format!("{rdfs}subClassOf"), "urn:B", &dict),
+            t("urn:B", &format!("{rdfs}subClassOf"), "urn:C", &dict),
+            t("urn:x", rdf_type, "urn:A", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(
+            !outcome.report.inconsistent,
+            "consistent input must not flag ⊥"
+        );
+        assert!(outcome.report.inferred_triples >= 2);
+    }
+
+    #[test]
+    fn has_key_single_property_infers_same_as() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let rdf_nil = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+        let input = vec![
+            t("urn:Person", &format!("{owl}hasKey"), "_:l1", &dict),
+            t(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
+                "urn:ssn",
+                &dict,
+            ),
+            t(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+                rdf_nil,
+                &dict,
+            ),
+            t("urn:alice", rdf_type, "urn:Person", &dict),
+            t("urn:bob", rdf_type, "urn:Person", &dict),
+            t("urn:carol", rdf_type, "urn:Person", &dict),
+            t("urn:alice", "urn:ssn", "urn:v1", &dict),
+            t("urn:bob", "urn:ssn", "urn:v1", &dict),
+            t("urn:carol", "urn:ssn", "urn:v2", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        let same_as = format!("{owl}sameAs");
+        let alice_bob = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:alice")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:bob"))
+        });
+        let carol_alice = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:carol")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:alice"))
+        });
+        assert!(alice_bob, "expected alice sameAs bob (single-key prp-key)");
+        assert!(!carol_alice, "carol has a different key value");
+    }
+
+    #[test]
+    fn has_key_literal_values_shared() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let rdf_nil = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+        let input = vec![
+            t("urn:Person", &format!("{owl}hasKey"), "_:l1", &dict),
+            t(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
+                "urn:code",
+                &dict,
+            ),
+            t(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+                rdf_nil,
+                &dict,
+            ),
+            t("urn:alice", rdf_type, "urn:Person", &dict),
+            t("urn:bob", rdf_type, "urn:Person", &dict),
+            t("urn:carol", rdf_type, "urn:Person", &dict),
+            t("urn:dave", rdf_type, "urn:Person", &dict),
+            tl("urn:alice", "urn:code", LiteralValue::Integer(42), &dict),
+            tl("urn:bob", "urn:code", LiteralValue::Integer(42), &dict),
+            tl("urn:carol", "urn:code", LiteralValue::Integer(43), &dict),
+            tl("urn:dave", "urn:code", LiteralValue::Decimal(42.0), &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        let same_as = format!("{owl}sameAs");
+        let alice_bob = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:alice")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:bob"))
+        });
+        let carol_alice = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:carol")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:alice"))
+        });
+        let dave_alice = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:dave")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:alice"))
+        });
+        assert!(
+            alice_bob,
+            "expected alice sameAs bob (shared literal key value)"
+        );
+        assert!(!carol_alice, "carol has a different literal value");
+        assert!(
+            !dave_alice,
+            "no cross-datatype normalization: Integer vs Decimal do not match"
+        );
+    }
+
+    #[test]
+    fn different_from_reverse_direction_marks_inconsistent() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let different_from = format!("{owl}differentFrom");
+        let same_as = format!("{owl}sameAs");
+        let input = vec![
+            t("urn:y", &different_from, "urn:x", &dict),
+            t("urn:x", &same_as, "urn:y", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        // eq-sym derives y sameAs x in the same iteration; ⊥ must fire even
+        // with a single iteration budget (regression for F3).
+        let outcome = reasoner
+            .materialize(&dict, &task_max_iterations(1), &input)
+            .expect("materialize");
+        assert!(
+            outcome.report.inconsistent,
+            "expected eq-diff2 ⊥ after same-iteration eq-sym"
+        );
+    }
+
+    #[test]
+    fn subclass_chain_to_nothing_marks_inconsistent() {
+        let dict = InMemoryDictionary::new();
+        let rdfs = "http://www.w3.org/2000/01/rdf-schema#";
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("urn:A", &format!("{rdfs}subClassOf"), "urn:B", &dict),
+            t(
+                "urn:B",
+                &format!("{rdfs}subClassOf"),
+                &format!("{owl}Nothing"),
+                &dict,
+            ),
+            t("urn:x", rdf_type, "urn:A", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        // rdfs5 derives A subClassOf Nothing in the same iteration; cls-nothing2
+        // must fire even with a single iteration budget (regression for F3).
+        let outcome = reasoner
+            .materialize(&dict, &task_max_iterations(1), &input)
+            .expect("materialize");
+        assert!(
+            outcome.report.inconsistent,
+            "expected cls-nothing2 ⊥ after same-iteration rdfs5"
+        );
+    }
+
+    #[test]
+    fn has_key_cyclic_list_terminates() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("urn:Person", &format!("{owl}hasKey"), "_:l1", &dict),
+            t(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
+                "urn:ssn",
+                &dict,
+            ),
+            tb(
+                "_:l1",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+                "_:l2",
+                &dict,
+            ),
+            t(
+                "_:l2",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
+                "urn:email",
+                &dict,
+            ),
+            tb(
+                "_:l2",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
+                "_:l1",
+                &dict,
+            ),
+            t("urn:alice", rdf_type, "urn:Person", &dict),
+            t("urn:bob", rdf_type, "urn:Person", &dict),
+            t("urn:alice", "urn:ssn", "urn:v1", &dict),
+            t("urn:alice", "urn:email", "urn:e1", &dict),
+            t("urn:bob", "urn:ssn", "urn:v1", &dict),
+            t("urn:bob", "urn:email", "urn:e1", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        let same_as = format!("{owl}sameAs");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:alice")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:bob"))
+        }));
     }
 }
