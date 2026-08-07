@@ -288,7 +288,7 @@ mod tests {
     };
     use ontolith_transaction::domain::TxnId;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn seed() -> (Arc<InMemoryStorageEngine>, Arc<dyn TripleRepository>) {
         let engine = Arc::new(InMemoryStorageEngine::new());
@@ -1096,6 +1096,117 @@ mod tests {
             .execute(&QueryRequest::new("SELECT * WHERE { ?s ?p ?o }").with_cancel(flag))
             .unwrap();
         assert!(result.cancelled);
+    }
+
+    /// Seed `n` triples with the same predicate for join-heavy preemption tests.
+    fn seed_many(n: u64) -> (Arc<InMemoryStorageEngine>, Arc<dyn TripleRepository>) {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+        let txn = TxnId::new(1);
+        for i in 0..n {
+            repo.insert(
+                txn,
+                Triple {
+                    subject: NodeId::new(i),
+                    predicate: Iri::new("http://ex.org/p"),
+                    object: Term::Iri(Iri::new(format!("http://ex.org/o{i}"))),
+                },
+            )
+            .unwrap();
+        }
+        engine.commit_transaction(txn).unwrap();
+        (engine, repo)
+    }
+
+    #[test]
+    fn preemption_token_deadline_and_cancel() {
+        use crate::domain::{PreemptionReason, PreemptionToken};
+
+        let token = PreemptionToken::new(Some(1));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(token.reason(), Some(PreemptionReason::Timeout));
+        assert!(token.is_preempted());
+
+        let token = PreemptionToken::new(None);
+        assert_eq!(token.reason(), None);
+        assert!(token.remaining().is_none());
+        token.preempt();
+        assert_eq!(token.reason(), Some(PreemptionReason::Cancelled));
+    }
+
+    #[test]
+    fn deadline_preempts_join_query() {
+        let (_e, repo) = seed_many(2000);
+        let p = pipeline(repo);
+        let result = p
+            .execute(
+                &QueryRequest::new(
+                    "SELECT * WHERE { ?s ?p ?o . ?s2 ?p2 ?o2 }",
+                )
+                .with_timeout(1),
+            )
+            .unwrap();
+        assert!(result.timed_out, "expected preemption by deadline");
+        assert!(result.solutions.is_empty());
+    }
+
+    #[test]
+    fn async_cancel_preempts_join_query() {
+        use crate::domain::PreemptionToken;
+
+        let (_e, repo) = seed_many(2000);
+        let p = pipeline(repo);
+        let token = PreemptionToken::new(None);
+        let flag = token.cancel_flag();
+        let thread_flag = Arc::clone(&flag);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            thread_flag.store(true, Ordering::Relaxed);
+        });
+        let result = p
+            .execute(
+                &QueryRequest::new("SELECT * WHERE { ?s ?p ?o . ?s2 ?p2 ?o2 }")
+                    .with_cancel(Arc::clone(&flag)),
+            )
+            .unwrap();
+        handle.join().unwrap();
+        assert!(result.cancelled, "expected async preemption");
+    }
+
+    #[test]
+    fn update_preemption_returns_timed_out_without_writes() {
+        let (engine, dict, repo) = {
+            let engine = Arc::new(InMemoryStorageEngine::new());
+            let dict = Arc::new(InMemoryDictionary::new());
+            let repo: Arc<dyn TripleRepository> =
+                Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+            let txn = TxnId::new(1);
+            for i in 0..2000u64 {
+                repo.insert(
+                    txn,
+                    Triple {
+                        subject: dict.encode_node(&format!("http://ex.org/s{i}")),
+                        predicate: Iri::new("http://ex.org/name"),
+                        object: Term::Literal(LiteralValue::String(format!("n{i}"))),
+                    },
+                )
+                .unwrap();
+            }
+            engine.commit_transaction(txn).unwrap();
+            (engine, dict, repo)
+        };
+        let p = update_pipeline(engine, dict, repo);
+        let result = p
+            .execute(
+                &QueryRequest::new(
+                    "INSERT { ?s <http://ex.org/q> ?n } WHERE { ?s <http://ex.org/name> ?n }",
+                )
+                .with_timeout(1),
+            )
+            .unwrap();
+        assert!(result.timed_out, "expected update preemption");
+        assert_eq!(result.affected, 0);
     }
 
     #[test]

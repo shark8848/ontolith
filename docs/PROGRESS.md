@@ -130,7 +130,7 @@
 | P3-01 | SPARQL 解析到执行主链路 | 已完成 | 100% | SELECT/ASK/CONSTRUCT + JOIN/OPT/UNION/FILTER/BIND/VALUES + 完整聚合 + SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE、**CLEAR/DROP 图作用域、WITH 图作用域、LOAD 本地图复制**）+ 子查询基线 + 属性路径最小集 + RDF 序列化导出；修复空更新误报 pending txn 的 bug；query 46→55 测，W3C 基线 127→151 PASS（24 项 FAIL→PASS） | — |
 | P3-02 | 规则优化基线 | 已完成 | 100% | BGP 重排、Identity 消除、Filter 下推、POS/OSP 选路 + **代价模型/统计**（`QueryStatistics` 契约 + `EngineQueryStatistics` 引擎增量统计 + `CostBasedOptimizer` 贪心 join 序与绑定传播，语义保持；`update_pipeline`/`cost_pipeline` 接入）；query 55→58 测，W3C 套件基线无漂移 | — |
 | P3-03 | Explain 输出 | 已完成 | 100% | logical/physical/algebra + optimize 步骤 + **HTTP Explain API 成本信息**（`/explain` JSON 输出 `estimated_rows` 与 `pattern_costs`，代价优化器填充）；query 58→59 测，server 19→20 测 | — |
-| P3-04 | 超时与取消 API | 部分完成 | 75% | timeout_ms + Arc\<AtomicBool\> cancel | 异步抢占/token |
+| P3-04 | 超时与取消 API | 已完成 | 100% | timeout_ms + Arc\<AtomicBool\> cancel + **异步抢占 token**（`PreemptionToken`：deadline + cancel 标志 + `reason()` Timeout/Cancelled + 跨线程 `preempt()`）；执行器轮询细化到 BGP 候选/join 行/FILTER/EXTEND/VALUES 行，Update 抢占返回标志且不落写；query 59→63 测 | — |
 | P3-05 | MVP 标准符合性子集 | 部分完成 | 97% | 引擎单测 + [ontolith-compliance](../crates/ontolith-compliance) 17 烟雾 + W3C 子集运行器（must-pass 30/30，known-gap xfail=0，unsupported skip=0）+ **完整 W3C 套件 manifest 驱动 runner（`w3c11_suite`，492 条基线，151 PASS/341 FAIL 欠账 profile 化防回归）** + CI required-lite + strict observer + strict-promotion-readiness 自动信号 + `ci-local.sh` 全链路通过 | 观察主干连续 3 次 CI 全绿后评估 strict required；按 profile 欠账逐项提 PASS |
 
 **阶段退出条件：** MVP profile 查询可跑通；Explain/超时/取消可用。
@@ -307,6 +307,7 @@
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-07 | Codex | L3：P3-04 异步抢占 token——`PreemptionToken`（墙钟 deadline + 共享 cancel 标志，`reason()` 区分 Timeout/Cancelled，`preempt()` 跨线程触发）；执行器轮询粒度细化到 BGP 候选/join 行/FILTER/EXTEND/VALUES 行；Update 抢占返回 `timed_out`/`cancelled` 且不落写；query 59→63 测 |
 | 2026-08-07 | Codex | L3：P3-03 HTTP Explain API 成本信息——`QueryExplain`/`QueryPlan` 新增 `estimated_rows`（主导 BGP 乘积×总数）与 `pattern_costs`（逐模式 selectivity/estimated_rows，代价优化器填充）；HTTP `/explain` JSON 输出两字段；query 58→59 测，server 19→20 测 |
 | 2026-08-07 | Codex | L3：P3-02 代价模型/统计——`QueryStatistics` 契约（triple/subject/predicate/object 计数 + 均匀选择性估计）、`EngineQueryStatistics`（引擎增量统计）、`CostBasedOptimizer`（BGP 贪心 join 序 + 绑定传播，语义保持）；`update_pipeline`/新增 `cost_pipeline` 接入代价优化；query 55→58 测，W3C 套件基线无漂移 |
 | 2026-08-07 | Codex | L3：P3-01 SPARQL Update 高级形态——`CLEAR/DROP [SILENT] DEFAULT/NAMED/ALL/GRAPH <g>`、`WITH <g>` 图作用域 DELETE·INSERT…WHERE / DELETE WHERE（WHERE 以图 g 为默认图、模板写入图 g）、`LOAD [SILENT] <src> [INTO GRAPH <g>]` 本地命名图复制子集；修复空更新（无匹配）误报 “pending storage transaction not found”（无写入不提交）；`UpdateWriteService` 增图范围读取；query 46→55 测，W3C 套件基线 127→151 PASS（24 项 FAIL→PASS，无回归） |
@@ -392,7 +393,7 @@
 
 - [x] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局（2026-08-07）
 - [x] **L2 存储内核**：P2-02 真 MVCC 版本链（内存+磁盘）✅（2026-08-07，storage 30→40 测）、P2-01 纯 CF 索引扫描 ✅（2026-08-07）、P2-04 命名图六置换 ✅（2026-08-07；Async 维护预留）、P2-05 fsync/备份演练 ✅（2026-08-07，storage 43→46 测）
-- [~] **L3 查询引擎**：P3-01 高级 Update ✅（2026-08-07，query 46→55 测，W3C 127→151 PASS）、P3-02 代价模型/统计 ✅（2026-08-07，query 55→58 测）、P3-03 HTTP Explain API（含成本估算）✅（2026-08-07，query 58→59 测，server 19→20 测）→ P3-04 异步抢占 → P3-05 W3C 欠账逐项提 PASS
+- [~] **L3 查询引擎**：P3-01 高级 Update ✅（2026-08-07，query 46→55 测，W3C 127→151 PASS）、P3-02 代价模型/统计 ✅（2026-08-07，query 55→58 测）、P3-03 HTTP Explain API ✅（2026-08-07，query 58→59 测）、P3-04 异步抢占 token ✅（2026-08-07，query 59→63 测）→ P3-05 W3C 欠账逐项提 PASS
 - [ ] **L4 集群**：P4-02 多进程 Raft M1（单节点 openraft 适配）→ M2（多进程 HTTP RPC + RocksDB raft CF）→ M3（默认运行时切换 + CI 三进程 smoke）；P4-01 多进程 RPC、P4-03 跨节点数据搬迁、P4-04 真实网络分区
 - [ ] **L5 接入与安全**：P5-03 强制分库/行级租户隔离 → P5-02 OIDC/JWT → P5-05 Tracing 全链路 → P5-01 gRPC
 - [ ] **L6 推理与验证**：P6-01 规则扩展收尾（cls-hv1/2、prp-irp、cax-adc/eq-diff2/3 AllDifferent、prp-chain）→ P6-03 接入 server 查询/推理管线 → P6-02 SHACL 补全 + W3C SHACL 套件

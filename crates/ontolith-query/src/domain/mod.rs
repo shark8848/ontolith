@@ -6,6 +6,7 @@ use ontolith_transaction::domain::TxnId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryText(pub String);
@@ -501,6 +502,69 @@ pub struct QueryRequest {
     pub consistency: ConsistencyLevel,
 }
 
+/// Async preemption token: a wall-clock deadline combined with a cooperative
+/// cancel flag. The executor polls [`Self::is_preempted`] at fine granularity
+/// (per triple candidate, per join row) so a query can be preempted promptly
+/// from another thread either by arming the deadline or flipping cancel.
+#[derive(Debug, Clone)]
+pub struct PreemptionToken {
+    deadline: Option<Instant>,
+    cancel: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreemptionReason {
+    Timeout,
+    Cancelled,
+}
+
+impl PreemptionToken {
+    pub fn new(timeout_ms: Option<u64>) -> Self {
+        Self {
+            deadline: timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms)),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Arm (or re-arm) the wall-clock deadline relative to now.
+    pub fn arm_deadline(&mut self, timeout_ms: u64) {
+        self.deadline = Some(Instant::now() + Duration::from_millis(timeout_ms));
+    }
+
+    /// Preempt from another thread: cancels cooperatively.
+    pub fn preempt(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Shared cancel flag (can be embedded into [`QueryRequest`]).
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    pub fn is_preempted(&self) -> bool {
+        self.reason().is_some()
+    }
+
+    pub fn reason(&self) -> Option<PreemptionReason> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Some(PreemptionReason::Cancelled);
+        }
+        if self
+            .deadline
+            .is_some_and(|d| Instant::now() >= d)
+        {
+            return Some(PreemptionReason::Timeout);
+        }
+        None
+    }
+
+    /// Time left until the deadline (`None` when no deadline is armed).
+    pub fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+    }
+}
+
 impl PartialEq for QueryRequest {
     fn eq(&self, other: &Self) -> bool {
         self.query == other.query
@@ -537,6 +601,15 @@ impl QueryRequest {
     pub fn with_cancel(mut self, flag: Arc<AtomicBool>) -> Self {
         self.cancel = Some(flag);
         self
+    }
+
+    /// Build a preemption token from this request's deadline and cancel flag.
+    pub fn preemption_token(&self) -> PreemptionToken {
+        let mut token = PreemptionToken::new(self.timeout_ms);
+        if let Some(flag) = &self.cancel {
+            token.cancel = Arc::clone(flag);
+        }
+        token
     }
 
     pub fn with_consistency(mut self, level: ConsistencyLevel) -> Self {

@@ -3,8 +3,8 @@
 use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
     AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, PathExpression, QueryKind,
-    GraphTarget, QueryPlan, QueryRequest, QueryResult, Solution, TermPattern, TriplePattern,
-    UpdateOp,
+    GraphTarget, PreemptionReason, PreemptionToken, QueryPlan, QueryRequest, QueryResult, Solution,
+    TermPattern, TriplePattern, UpdateOp,
 };
 use ontolith_core::domain::{Iri, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
@@ -52,11 +52,11 @@ impl AlgebraExecutor {
             return Ok(empty_cancelled(plan.kind, started));
         }
 
+        let token = request.preemption_token();
         let ctx = ExecCtx {
             read: self.read.as_ref(),
             txn_id: request.txn_id,
-            request,
-            started,
+            token: &token,
         };
 
         let mut solutions = match eval_algebra(&plan.algebra, &ctx) {
@@ -145,19 +145,16 @@ impl AlgebraExecutor {
 struct ExecCtx<'a> {
     read: &'a dyn QueryReadService,
     txn_id: Option<TxnId>,
-    request: &'a QueryRequest,
-    started: Instant,
+    token: &'a PreemptionToken,
 }
 
 impl ExecCtx<'_> {
     fn check(&self) -> Result<(), OntolithError> {
-        if self.request.is_cancelled() {
-            return Err(OntolithError::InvalidState("query cancelled"));
-        }
-        if let Some(limit) = self.request.timeout_ms
-            && self.started.elapsed().as_millis() as u64 > limit
-        {
-            return Err(OntolithError::InvalidState("query timed out"));
+        if let Some(reason) = self.token.reason() {
+            return Err(match reason {
+                PreemptionReason::Cancelled => OntolithError::InvalidState("query cancelled"),
+                PreemptionReason::Timeout => OntolithError::InvalidState("query timed out"),
+            });
         }
         Ok(())
     }
@@ -191,11 +188,11 @@ pub fn execute_update(
 ) -> Result<QueryResult, OntolithError> {
     let started = Instant::now();
     let txn_id = next_update_txn();
+    let token = request.preemption_token();
     let ctx = ExecCtx {
         read,
         txn_id: Some(txn_id),
-        request,
-        started,
+        token: &token,
     };
     let mut affected: u64 = 0;
     let mut staged = false;
@@ -239,8 +236,7 @@ pub fn execute_update(
                     let op_ctx = ExecCtx {
                         read: op_read,
                         txn_id: Some(txn_id),
-                        request,
-                        started,
+                        token: &token,
                     };
                     let solutions = eval_algebra(where_pattern, &op_ctx)?;
                     let mut ops = Vec::new();
@@ -282,8 +278,7 @@ pub fn execute_update(
                     let op_ctx = ExecCtx {
                         read: op_read,
                         txn_id: Some(txn_id),
-                        request,
-                        started,
+                        token: &token,
                     };
                     let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &op_ctx)?;
                     let mut ops = Vec::new();
@@ -373,19 +368,28 @@ pub fn execute_update(
         Ok(())
     })();
 
-    match result {
+    let (timed_out, cancelled) = match result {
         Ok(()) => {
             if staged {
                 write.commit(txn_id)?;
             }
+            (false, false)
         }
         Err(e) => {
             if staged {
                 let _ = write.abort(txn_id);
             }
-            return Err(e);
+            match &e {
+                OntolithError::InvalidState(s) if *s == "query timed out" => {
+                    (true, false)
+                }
+                OntolithError::InvalidState(s) if *s == "query cancelled" => {
+                    (false, true)
+                }
+                _ => return Err(e),
+            }
         }
-    }
+    };
 
     Ok(QueryResult {
         kind: QueryKind::Update,
@@ -395,8 +399,8 @@ pub fn execute_update(
         construct_triples: Vec::new(),
         affected,
         elapsed_ms: started.elapsed().as_millis() as u64,
-        timed_out: false,
-        cancelled: false,
+        timed_out,
+        cancelled,
     })
 }
 
@@ -579,10 +583,14 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
         }
         Algebra::Filter { expression, input } => {
             let rows = eval_algebra(input, ctx)?;
-            Ok(rows
-                .into_iter()
-                .filter(|s| eval_expr_bool(expression, s).unwrap_or(false))
-                .collect())
+            let mut out = Vec::new();
+            for s in rows {
+                ctx.check()?;
+                if eval_expr_bool(expression, &s).unwrap_or(false) {
+                    out.push(s);
+                }
+            }
+            Ok(out)
         }
         Algebra::Extend {
             variable,
@@ -591,6 +599,7 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
         } => {
             let mut rows = eval_algebra(input, ctx)?;
             for s in &mut rows {
+                ctx.check()?;
                 if let Some(v) = eval_expr_value(expression, s) {
                     s.insert(variable.clone(), v);
                 }
@@ -603,6 +612,7 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
         } => {
             let mut rows = Vec::new();
             for row in bindings {
+                ctx.check()?;
                 let mut s = Solution::new();
                 for (i, var) in variables.iter().enumerate() {
                     if let Some(Some(term)) = row.get(i)
@@ -1109,6 +1119,7 @@ fn eval_bgp(patterns: &[TriplePattern], ctx: &ExecCtx<'_>) -> Result<Vec<Solutio
         for sol in &solutions {
             let candidates = fetch_candidates(pattern, sol, ctx)?;
             for triple in candidates {
+                ctx.check()?;
                 if let Some(extended) = match_triple(pattern, &triple, sol, ctx)? {
                     next.push(extended);
                 }
@@ -1276,6 +1287,7 @@ fn hash_join(
     let mut out = Vec::new();
     for l in &left {
         for r in &right {
+            ctx.check()?;
             if let Some(m) = merge_solutions_compatible(l, r, ctx)? {
                 out.push(m);
             }
@@ -1294,6 +1306,7 @@ fn left_join(
     for l in &left {
         let mut matched = false;
         for r in &right {
+            ctx.check()?;
             if let Some(m) = merge_solutions_compatible(l, r, ctx)? {
                 let ok = condition
                     .map(|c| eval_expr_bool(c, &m).unwrap_or(false))

@@ -46,7 +46,7 @@ SPARQL / RDF text
 | PREFIX / BASE | ✅ |
 | 代数 + 规则优化 + Explain | ✅ |
 | 解绑定 `Solution` 结果（非仅 row_count） | ✅ |
-| timeout + 协作式 cancel | ✅ |
+| timeout + 协作式 cancel + 异步抢占 token | ✅ |
 | 经 L2 SPO/POS/OSP 访问 | ✅ |
 | 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`） | ✅ |
 | RDF 序列化导出（N-Triples / N-Quads 写出，`SerializeFormat`） | ✅ |
@@ -225,6 +225,8 @@ pub struct QueryResult {
 
 - `QueryRequest.timeout_ms`：`0` 立即超时；执行中协作检查  
 - `QueryRequest.cancel: Arc<AtomicBool>`：协作取消  
+- `PreemptionToken`：墙钟 deadline + 共享 cancel 标志，`reason()` 区分 Timeout/Cancelled；可从其它线程 `preempt()` 异步抢占  
+- 抢占轮询粒度：BGP 候选三元组、join 内层行、FILTER/EXTEND/VALUES 行、Update 各 op（不再仅按 pattern 粒度）  
 - 结果标志 `timed_out` / `cancelled`  
 
 ### 3.10 Explain
@@ -312,3 +314,4 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 | 2026-08-07 | 2.10.0 | 新增 SPARQL Update 高级形态：`CLEAR/DROP [SILENT] DEFAULT/NAMED/ALL/GRAPH <g>`、`WITH <g>` 图作用域 DELETE·INSERT…WHERE / DELETE WHERE（WHERE 以图 g 为默认图、模板写入图 g）、`LOAD [SILENT] <src> [INTO GRAPH <g>]` 本地命名图复制子集；修复空更新（无匹配 DELETE/CLEAR 空图）误报 “pending storage transaction not found” 的 bug（无写入不提交）；`UpdateWriteService` 增图范围读取（default/named/graph）；query 46→55 测，W3C 套件基线 127→151 PASS（24 项 FAIL→PASS：clear/drop 5、delete/delete-insert/delete-where 4、syntax-update 13、update-silent 2），无回归 |
 | 2026-08-07 | 2.11.0 | 新增代价模型/统计：`QueryStatistics` 契约（triple/subject/predicate/object 计数 + 均匀选择性 `pattern_selectivity`）、`EngineQueryStatistics`（引擎增量统计）、`CostBasedOptimizer`（贪心 join 序 + 绑定传播，语义保持）；`update_pipeline` 与新增 `cost_pipeline` 走代价优化；query 55→58 测，W3C 套件基线无漂移 |
 | 2026-08-07 | 2.12.0 | Explain 增成本信息：`QueryExplain`/`QueryPlan` 新增 `estimated_rows`（主导 BGP 乘积×总数）与 `pattern_costs`（逐模式 selectivity/estimated_rows，代价优化器填充）；HTTP `/explain` JSON 输出两字段；query 58→59 测，server explain HTTP 测试 +1（20 测） |
+| 2026-08-07 | 2.13.0 | 异步抢占 token：`PreemptionToken`（deadline + cancel 标志，`reason()` 区分 Timeout/Cancelled，`preempt()` 可跨线程触发）；执行器轮询粒度细化到 BGP 候选/join 行/FILTER/EXTEND/VALUES 行，Update 抢占返回 `timed_out`/`cancelled` 标志且不落写；query 59→63 测 |
