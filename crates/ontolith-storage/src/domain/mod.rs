@@ -6,7 +6,9 @@
 mod encoding;
 
 pub use encoding::{
-    IndexKind, encode_dictionary_entry, encode_osp_key, encode_osp_object_prefix, encode_pos_key,
+    IndexKind, encode_dictionary_entry, encode_gosp_key, encode_gosp_object_prefix,
+    encode_gpos_key, encode_gpos_predicate_prefix, encode_gspo_graph_prefix, encode_gspo_key,
+    encode_gspo_subject_prefix, encode_osp_key, encode_osp_object_prefix, encode_pos_key,
     encode_pos_predicate_prefix, encode_spo_key, encode_spo_subject_prefix,
     encode_triple_index_key,
 };

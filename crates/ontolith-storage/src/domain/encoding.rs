@@ -134,6 +134,74 @@ pub fn encode_osp_object_prefix(object: &Term) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Named-graph quad index key: GSPO ‖ graph ‖ S ‖ P ‖ O.
+pub fn encode_gspo_key(graph: &Iri, subject: NodeId, predicate: &Iri, object: &Term) -> Vec<u8> {
+    let mut out = CanonicalWriter::with_capacity(96);
+    out.write_tag(b"GSPO");
+    out.write_str(graph.as_str());
+    out.write_u64(subject.get());
+    out.write_str(predicate.as_str());
+    object.write_canonical(&mut out);
+    out.into_bytes()
+}
+
+/// Named-graph quad index key: GPOS ‖ graph ‖ P ‖ O ‖ S.
+pub fn encode_gpos_key(graph: &Iri, predicate: &Iri, object: &Term, subject: NodeId) -> Vec<u8> {
+    let mut out = CanonicalWriter::with_capacity(96);
+    out.write_tag(b"GPOS");
+    out.write_str(graph.as_str());
+    out.write_str(predicate.as_str());
+    object.write_canonical(&mut out);
+    out.write_u64(subject.get());
+    out.into_bytes()
+}
+
+/// Named-graph quad index key: GOSP ‖ graph ‖ O ‖ S ‖ P.
+pub fn encode_gosp_key(graph: &Iri, object: &Term, subject: NodeId, predicate: &Iri) -> Vec<u8> {
+    let mut out = CanonicalWriter::with_capacity(96);
+    out.write_tag(b"GOSP");
+    out.write_str(graph.as_str());
+    object.write_canonical(&mut out);
+    out.write_u64(subject.get());
+    out.write_str(predicate.as_str());
+    out.into_bytes()
+}
+
+/// Prefix key for all quads in a named graph under GSPO.
+pub fn encode_gspo_graph_prefix(graph: &Iri) -> Vec<u8> {
+    let mut out = CanonicalWriter::with_capacity(48);
+    out.write_tag(b"GSPO");
+    out.write_str(graph.as_str());
+    out.into_bytes()
+}
+
+/// Prefix key for lookup by (graph, subject) under GSPO.
+pub fn encode_gspo_subject_prefix(graph: &Iri, subject: NodeId) -> Vec<u8> {
+    let mut out = CanonicalWriter::with_capacity(64);
+    out.write_tag(b"GSPO");
+    out.write_str(graph.as_str());
+    out.write_u64(subject.get());
+    out.into_bytes()
+}
+
+/// Prefix key for lookup by (graph, predicate) under GPOS.
+pub fn encode_gpos_predicate_prefix(graph: &Iri, predicate: &Iri) -> Vec<u8> {
+    let mut out = CanonicalWriter::with_capacity(64);
+    out.write_tag(b"GPOS");
+    out.write_str(graph.as_str());
+    out.write_str(predicate.as_str());
+    out.into_bytes()
+}
+
+/// Prefix key for lookup by (graph, object) under GOSP.
+pub fn encode_gosp_object_prefix(graph: &Iri, object: &Term) -> Vec<u8> {
+    let mut out = CanonicalWriter::with_capacity(64);
+    out.write_tag(b"GOSP");
+    out.write_str(graph.as_str());
+    object.write_canonical(&mut out);
+    out.into_bytes()
+}
+
 /// Dictionary entry encoding: maps lexical form to node id for durable dict.
 pub fn encode_dictionary_entry(value: &str, node_id: NodeId) -> Vec<u8> {
     let mut out = CanonicalWriter::with_capacity(value.len() + 16);
@@ -187,5 +255,25 @@ mod tests {
         assert!(IndexKind::Pos.r1_required());
         assert!(IndexKind::Osp.r1_required());
         assert!(!IndexKind::Sop.r1_required());
+    }
+
+    #[test]
+    fn named_graph_index_prefixes_match_full_keys() {
+        let graph = Iri::new("urn:g");
+        let t = Triple::new(NodeId::new(1), Iri::new("urn:p"), Term::iri("urn:o"));
+
+        let gspo = encode_gspo_key(&graph, t.subject, &t.predicate, &t.object);
+        assert!(gspo.starts_with(&encode_gspo_graph_prefix(&graph)));
+        assert!(gspo.starts_with(&encode_gspo_subject_prefix(&graph, t.subject)));
+        assert!(!gspo.starts_with(&encode_gspo_subject_prefix(
+            &Iri::new("urn:other"),
+            t.subject
+        )));
+
+        let gpos = encode_gpos_key(&graph, &t.predicate, &t.object, t.subject);
+        assert!(gpos.starts_with(&encode_gpos_predicate_prefix(&graph, &t.predicate)));
+
+        let gosp = encode_gosp_key(&graph, &t.object, t.subject, &t.predicate);
+        assert!(gosp.starts_with(&encode_gosp_object_prefix(&graph, &t.object)));
     }
 }

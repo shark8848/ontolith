@@ -5,8 +5,10 @@
 use crate::application::{DictionaryCodec, StorageEngine, WriteAheadLog};
 use crate::domain::{
     SnapshotRef, StorageKey, StorageStats, WalPhase, WalRecord, WriteBatch, WriteOperation,
-    encode_osp_key, encode_osp_object_prefix, encode_pos_key, encode_pos_predicate_prefix,
-    encode_spo_key, encode_spo_subject_prefix,
+    encode_gosp_key, encode_gosp_object_prefix, encode_gpos_key, encode_gpos_predicate_prefix,
+    encode_gspo_graph_prefix, encode_gspo_key, encode_gspo_subject_prefix, encode_osp_key,
+    encode_osp_object_prefix, encode_pos_key, encode_pos_predicate_prefix, encode_spo_key,
+    encode_spo_subject_prefix,
 };
 use crate::infrastructure::codec::{
     decode_quad, decode_triple, decode_u64, decode_wal_record, encode_quad, encode_triple,
@@ -34,6 +36,9 @@ const CF_WAL: &str = "wal";
 const CF_SPO_INDEX: &str = "spo_index";
 const CF_POS_INDEX: &str = "pos_index";
 const CF_OSP_INDEX: &str = "osp_index";
+const CF_GSPO_INDEX: &str = "gspo_index";
+const CF_GPOS_INDEX: &str = "gpos_index";
+const CF_GOSP_INDEX: &str = "gosp_index";
 const CF_VERSIONS: &str = "versions";
 const CF_VERSIONS_QUADS: &str = "versions_quads";
 
@@ -93,6 +98,9 @@ impl RocksDbStorageEngine {
             CF_SPO_INDEX,
             CF_POS_INDEX,
             CF_OSP_INDEX,
+            CF_GSPO_INDEX,
+            CF_GPOS_INDEX,
+            CF_GOSP_INDEX,
             CF_VERSIONS,
             CF_VERSIONS_QUADS,
         ]
@@ -126,6 +134,7 @@ impl RocksDbStorageEngine {
             aborted_txn_count: AtomicU64::new(0),
         };
         engine.ensure_index_column_families()?;
+        engine.ensure_quad_index_column_families()?;
         engine.ensure_version_chain()?;
         engine.load_meta()?;
         engine.load_retained_versions()?;
@@ -194,6 +203,59 @@ impl RocksDbStorageEngine {
         self.db.write(batch).map_err(rocks_err)
     }
 
+    /// Backfill GSPO/GPOS/GOSP named-graph index column families for a
+    /// database created before named-graph position indexes existed.
+    fn ensure_quad_index_column_families(&self) -> Result<(), OntolithError> {
+        let cf_q = self.cf(CF_QUADS)?;
+        let cf_gspo = self.cf(CF_GSPO_INDEX)?;
+        if self.db.iterator_cf(cf_q, IteratorMode::Start).count() == 0
+            || self.db.iterator_cf(cf_gspo, IteratorMode::Start).count() > 0
+        {
+            return Ok(());
+        }
+        let cf_gpos = self.cf(CF_GPOS_INDEX)?;
+        let cf_gosp = self.cf(CF_GOSP_INDEX)?;
+        let mut batch = RocksBatch::default();
+        for item in self.db.iterator_cf(cf_q, IteratorMode::Start) {
+            let (_k, v) = item.map_err(rocks_err)?;
+            let quad = decode_quad(&v)?;
+            let Some(graph) = &quad.graph_name else {
+                continue; // default-graph quads are covered by triple indexes
+            };
+            batch.put_cf(
+                cf_gspo,
+                encode_gspo_key(
+                    graph,
+                    quad.triple.subject,
+                    &quad.triple.predicate,
+                    &quad.triple.object,
+                ),
+                encode_quad(&quad),
+            );
+            batch.put_cf(
+                cf_gpos,
+                encode_gpos_key(
+                    graph,
+                    &quad.triple.predicate,
+                    &quad.triple.object,
+                    quad.triple.subject,
+                ),
+                encode_quad(&quad),
+            );
+            batch.put_cf(
+                cf_gosp,
+                encode_gosp_key(
+                    graph,
+                    &quad.triple.object,
+                    quad.triple.subject,
+                    &quad.triple.predicate,
+                ),
+                encode_quad(&quad),
+            );
+        }
+        self.db.write(batch).map_err(rocks_err)
+    }
+
     /// Materialize a version-1 snapshot of the current committed state for a
     /// database created before MVCC version CFs existed.
     fn ensure_version_chain(&self) -> Result<(), OntolithError> {
@@ -207,7 +269,7 @@ impl RocksDbStorageEngine {
             return Ok(());
         }
         let triples = self.scan_triples_with_prefix(CF_TRIPLES, None)?;
-        let quads = self.scan_quads_with_prefix(None)?;
+        let quads = self.scan_quads_with_prefix(CF_QUADS, None)?;
         if triples.is_empty() && quads.is_empty() {
             // Fresh database: genesis only, no version chain materialization.
             return Ok(());
@@ -468,10 +530,14 @@ impl RocksDbStorageEngine {
         Ok(out)
     }
 
-    /// Scan the quads column family decoding quads, optionally restricted to a
-    /// named-graph prefix.
-    fn scan_quads_with_prefix(&self, prefix: Option<&[u8]>) -> Result<Vec<Quad>, OntolithError> {
-        let cf = self.cf(CF_QUADS)?;
+    /// Scan a quads column family decoding quads, optionally restricted to a
+    /// key prefix (graph or graph-position prefixes on the index CFs).
+    fn scan_quads_with_prefix(
+        &self,
+        cf_name: &str,
+        prefix: Option<&[u8]>,
+    ) -> Result<Vec<Quad>, OntolithError> {
+        let cf = self.cf(cf_name)?;
         let iter = match prefix {
             Some(p) => self
                 .db
@@ -499,7 +565,7 @@ impl RocksDbStorageEngine {
         let triples = self
             .scan_triples_with_prefix(CF_SPO_INDEX, Some(&encode_spo_subject_prefix(subject_id)))?;
         let quads = self
-            .scan_quads_with_prefix(None)?
+            .scan_quads_with_prefix(CF_QUADS, None)?
             .into_iter()
             .filter(|q| q.triple.subject == subject_id)
             .collect();
@@ -531,6 +597,9 @@ impl RocksDbStorageEngine {
         let cf_spo = self.cf(CF_SPO_INDEX)?;
         let cf_pos = self.cf(CF_POS_INDEX)?;
         let cf_osp = self.cf(CF_OSP_INDEX)?;
+        let cf_gspo = self.cf(CF_GSPO_INDEX)?;
+        let cf_gpos = self.cf(CF_GPOS_INDEX)?;
+        let cf_gosp = self.cf(CF_GOSP_INDEX)?;
         let mut removed = 0usize;
         for op in operations {
             match op {
@@ -560,10 +629,72 @@ impl RocksDbStorageEngine {
                     batch.delete_cf(cf_osp, encode_osp_key(&t.object, t.subject, &t.predicate));
                 }
                 WriteOperation::PutQuad(q) => {
-                    batch.put_cf(cf_q, quad_key(q), encode_quad(q));
+                    let encoded = encode_quad(q);
+                    batch.put_cf(cf_q, quad_key(q), &encoded);
+                    if let Some(graph) = &q.graph_name {
+                        batch.put_cf(
+                            cf_gspo,
+                            encode_gspo_key(
+                                graph,
+                                q.triple.subject,
+                                &q.triple.predicate,
+                                &q.triple.object,
+                            ),
+                            &encoded,
+                        );
+                        batch.put_cf(
+                            cf_gpos,
+                            encode_gpos_key(
+                                graph,
+                                &q.triple.predicate,
+                                &q.triple.object,
+                                q.triple.subject,
+                            ),
+                            &encoded,
+                        );
+                        batch.put_cf(
+                            cf_gosp,
+                            encode_gosp_key(
+                                graph,
+                                &q.triple.object,
+                                q.triple.subject,
+                                &q.triple.predicate,
+                            ),
+                            &encoded,
+                        );
+                    }
                 }
                 WriteOperation::DeleteQuad(q) => {
                     batch.delete_cf(cf_q, quad_key(q));
+                    if let Some(graph) = &q.graph_name {
+                        batch.delete_cf(
+                            cf_gspo,
+                            encode_gspo_key(
+                                graph,
+                                q.triple.subject,
+                                &q.triple.predicate,
+                                &q.triple.object,
+                            ),
+                        );
+                        batch.delete_cf(
+                            cf_gpos,
+                            encode_gpos_key(
+                                graph,
+                                &q.triple.predicate,
+                                &q.triple.object,
+                                q.triple.subject,
+                            ),
+                        );
+                        batch.delete_cf(
+                            cf_gosp,
+                            encode_gosp_key(
+                                graph,
+                                &q.triple.object,
+                                q.triple.subject,
+                                &q.triple.predicate,
+                            ),
+                        );
+                    }
                 }
                 WriteOperation::DeleteKey(key) => {
                     if let Some(subject_id) = key.components.first().copied() {
@@ -586,6 +717,35 @@ impl RocksDbStorageEngine {
                         }
                         for q in doomed_q {
                             batch.delete_cf(cf_q, quad_key(&q));
+                            if let Some(graph) = &q.graph_name {
+                                batch.delete_cf(
+                                    cf_gspo,
+                                    encode_gspo_key(
+                                        graph,
+                                        q.triple.subject,
+                                        &q.triple.predicate,
+                                        &q.triple.object,
+                                    ),
+                                );
+                                batch.delete_cf(
+                                    cf_gpos,
+                                    encode_gpos_key(
+                                        graph,
+                                        &q.triple.predicate,
+                                        &q.triple.object,
+                                        q.triple.subject,
+                                    ),
+                                );
+                                batch.delete_cf(
+                                    cf_gosp,
+                                    encode_gosp_key(
+                                        graph,
+                                        &q.triple.object,
+                                        q.triple.subject,
+                                        &q.triple.predicate,
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
@@ -756,7 +916,7 @@ impl StorageEngine for RocksDbStorageEngine {
 
         // Post-commit full state: drives the immutable MVCC snapshot below.
         let mut triples = self.scan_triples_with_prefix(CF_TRIPLES, None)?;
-        let mut quads = self.scan_quads_with_prefix(None)?;
+        let mut quads = self.scan_quads_with_prefix(CF_QUADS, None)?;
         Self::apply_committed_ops(&mut triples, &mut quads, &operations);
 
         let seq = self.next_version.fetch_add(1, Ordering::SeqCst);
@@ -848,7 +1008,7 @@ impl StorageEngine for RocksDbStorageEngine {
             return Ok(0);
         }
         let mut triples = self.scan_triples_with_prefix(CF_TRIPLES, None)?;
-        let mut quads = self.scan_quads_with_prefix(None)?;
+        let mut quads = self.scan_quads_with_prefix(CF_QUADS, None)?;
         triples.retain(|t| t.subject != subject_id);
         quads.retain(|q| q.triple.subject != subject_id);
 
@@ -910,7 +1070,9 @@ impl StorageEngine for RocksDbStorageEngine {
         let triples = self
             .scan_triples_with_prefix(CF_TRIPLES, None)
             .unwrap_or_default();
-        let quads = self.scan_quads_with_prefix(None).unwrap_or_default();
+        let quads = self
+            .scan_quads_with_prefix(CF_QUADS, None)
+            .unwrap_or_default();
         let mut subjects = HashSet::new();
         let mut predicates = HashSet::new();
         let mut objects: Vec<Term> = Vec::new();
@@ -986,13 +1148,14 @@ impl StorageEngine for RocksDbStorageEngine {
     }
 
     fn named_graph_quads(&self) -> Vec<Quad> {
-        self.scan_quads_with_prefix(None).unwrap_or_default()
+        self.scan_quads_with_prefix(CF_QUADS, None)
+            .unwrap_or_default()
     }
 
     fn quads_by_graph_in_txn(&self, graph_name: Option<&Iri>, txn_id: Option<TxnId>) -> Vec<Quad> {
         let mut quads = match graph_name {
             Some(g) => self
-                .scan_quads_with_prefix(Some(&quad_graph_prefix(g)))
+                .scan_quads_with_prefix(CF_QUADS, Some(&quad_graph_prefix(g)))
                 .unwrap_or_default(),
             None => self
                 .scan_triples_with_prefix(CF_TRIPLES, None)
@@ -1030,9 +1193,31 @@ impl StorageEngine for RocksDbStorageEngine {
         txn_id: Option<TxnId>,
     ) -> Vec<Quad> {
         let _ = txn_id;
-        let mut quads = self
-            .scan_quads_with_prefix(Some(&quad_graph_prefix(graph_name)))
-            .unwrap_or_default();
+        // Pick the most selective bound position: named-graph index CFs
+        // support (graph), (graph, subject), (graph, predicate), (graph,
+        // object) prefix scans (six-permutation coverage for quads).
+        let mut quads = if let Some(s) = subject {
+            self.scan_quads_with_prefix(
+                CF_GSPO_INDEX,
+                Some(&encode_gspo_subject_prefix(graph_name, s)),
+            )
+            .unwrap_or_default()
+        } else if let Some(p) = predicate {
+            self.scan_quads_with_prefix(
+                CF_GPOS_INDEX,
+                Some(&encode_gpos_predicate_prefix(graph_name, p)),
+            )
+            .unwrap_or_default()
+        } else if let Some(o) = object {
+            self.scan_quads_with_prefix(
+                CF_GOSP_INDEX,
+                Some(&encode_gosp_object_prefix(graph_name, o)),
+            )
+            .unwrap_or_default()
+        } else {
+            self.scan_quads_with_prefix(CF_GSPO_INDEX, Some(&encode_gspo_graph_prefix(graph_name)))
+                .unwrap_or_default()
+        };
         if let Some(s) = subject {
             quads.retain(|q| q.triple.subject == s);
         }
@@ -1130,7 +1315,8 @@ impl StorageEngine for RocksDbStorageEngine {
         } else if retained.contains(&version) {
             self.scan_version_quads(version).unwrap_or_default()
         } else if retained.first().is_none_or(|oldest| version >= *oldest) {
-            self.scan_quads_with_prefix(None).unwrap_or_default()
+            self.scan_quads_with_prefix(CF_QUADS, None)
+                .unwrap_or_default()
         } else {
             retained
                 .first()
@@ -1636,5 +1822,224 @@ mod tests {
         assert_eq!(engine.committed_version(), 2);
         assert_eq!(engine.triples_at_version_in_txn(1, None).len(), 2);
         assert_eq!(engine.triples_at_version_in_txn(2, None).len(), 1);
+    }
+
+    #[test]
+    fn rocksdb_named_graph_position_indexes_serve_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let g1 = Iri::new("urn:graph:idx:g1");
+        let g2 = Iri::new("urn:graph:idx:g2");
+        {
+            let engine = RocksDbStorageEngine::open(path).unwrap();
+            let txn = TxnId::new(401);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![
+                        WriteOperation::PutQuad(Quad::in_named_graph(
+                            Triple::new(
+                                NodeId::new(1),
+                                Iri::new("urn:p1"),
+                                Term::Iri(Iri::new("urn:o1")),
+                            ),
+                            g1.clone(),
+                        )),
+                        WriteOperation::PutQuad(Quad::in_named_graph(
+                            Triple::new(
+                                NodeId::new(1),
+                                Iri::new("urn:p2"),
+                                Term::Iri(Iri::new("urn:o2")),
+                            ),
+                            g1.clone(),
+                        )),
+                        WriteOperation::PutQuad(Quad::in_named_graph(
+                            Triple::new(
+                                NodeId::new(2),
+                                Iri::new("urn:p1"),
+                                Term::Iri(Iri::new("urn:o1")),
+                            ),
+                            g1.clone(),
+                        )),
+                        WriteOperation::PutQuad(Quad::in_named_graph(
+                            Triple::new(
+                                NodeId::new(1),
+                                Iri::new("urn:p1"),
+                                Term::Iri(Iri::new("urn:o1")),
+                            ),
+                            g2.clone(),
+                        )),
+                    ],
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+
+            assert_eq!(
+                engine
+                    .quads_matching_in_graph(&g1, Some(NodeId::new(1)), None, None, None)
+                    .len(),
+                2
+            );
+            assert_eq!(
+                engine
+                    .quads_matching_in_graph(&g1, None, Some(&Iri::new("urn:p1")), None, None)
+                    .len(),
+                2
+            );
+            assert_eq!(
+                engine
+                    .quads_matching_in_graph(
+                        &g1,
+                        None,
+                        None,
+                        Some(&Term::Iri(Iri::new("urn:o1"))),
+                        None,
+                    )
+                    .len(),
+                2
+            );
+            assert_eq!(
+                engine
+                    .quads_matching_in_graph(
+                        &g1,
+                        Some(NodeId::new(1)),
+                        Some(&Iri::new("urn:p1")),
+                        Some(&Term::Iri(Iri::new("urn:o1"))),
+                        None,
+                    )
+                    .len(),
+                1
+            );
+            // Same subject/predicate/object in another graph: index is
+            // graph-scoped, so this resolves to exactly one quad.
+            assert_eq!(
+                engine
+                    .quads_matching_in_graph(
+                        &g2,
+                        Some(NodeId::new(1)),
+                        Some(&Iri::new("urn:p1")),
+                        Some(&Term::Iri(Iri::new("urn:o1"))),
+                        None,
+                    )
+                    .len(),
+                1
+            );
+
+            // White-box: permutation keys land in the index CFs.
+            let cf = engine.cf(CF_GSPO_INDEX).unwrap();
+            assert!(
+                engine
+                    .db
+                    .get_cf(
+                        cf,
+                        encode_gspo_key(
+                            &g1,
+                            NodeId::new(1),
+                            &Iri::new("urn:p1"),
+                            &Term::Iri(Iri::new("urn:o1")),
+                        ),
+                    )
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        // Reopen: named-graph position indexes are durable.
+        let engine = RocksDbStorageEngine::open(path).unwrap();
+        assert_eq!(
+            engine
+                .quads_matching_in_graph(&g1, Some(NodeId::new(1)), None, None, None)
+                .len(),
+            2
+        );
+        assert_eq!(
+            engine
+                .quads_matching_in_graph(&g1, None, Some(&Iri::new("urn:p1")), None, None)
+                .len(),
+            2
+        );
+        assert_eq!(
+            engine
+                .quads_matching_in_graph(
+                    &g1,
+                    Some(NodeId::new(2)),
+                    Some(&Iri::new("urn:p1")),
+                    Some(&Term::Iri(Iri::new("urn:o1"))),
+                    None,
+                )
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rocksdb_named_graph_indexes_updated_on_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let graph = Iri::new("urn:graph:idx:del");
+        let quad = Quad::in_named_graph(
+            Triple::new(
+                NodeId::new(7),
+                Iri::new("urn:p"),
+                Term::Iri(Iri::new("urn:o")),
+            ),
+            graph.clone(),
+        );
+        {
+            let engine = RocksDbStorageEngine::open(path).unwrap();
+            let txn = TxnId::new(501);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![WriteOperation::PutQuad(quad.clone())],
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+            assert_eq!(
+                engine
+                    .quads_matching_in_graph(&graph, Some(NodeId::new(7)), None, None, None)
+                    .len(),
+                1
+            );
+
+            let del = TxnId::new(502);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: del,
+                    operations: vec![WriteOperation::DeleteQuad(quad.clone())],
+                })
+                .unwrap();
+            engine.commit_transaction(del).unwrap();
+            assert!(
+                engine
+                    .quads_matching_in_graph(&graph, Some(NodeId::new(7)), None, None, None)
+                    .is_empty()
+            );
+        }
+        // Reuse the reopened engine for the delete_by_key path.
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        let txn = TxnId::new(503);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![WriteOperation::PutQuad(quad.clone())],
+            })
+            .unwrap();
+        engine.commit_transaction(txn).unwrap();
+        let removed = engine
+            .delete_by_key(&StorageKey::spo_subject(NodeId::new(7)))
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(
+            engine
+                .quads_matching_in_graph(&graph, Some(NodeId::new(7)), None, None, None)
+                .is_empty()
+        );
+        drop(engine);
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        assert!(
+            engine
+                .quads_matching_in_graph(&graph, Some(NodeId::new(7)), None, None, None)
+                .is_empty()
+        );
     }
 }
