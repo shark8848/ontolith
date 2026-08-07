@@ -154,7 +154,17 @@ pub fn coerce_typed_literal(content: String, datatype: &str) -> LiteralValue {
         "http://www.w3.org/2001/XMLSchema#string" => LiteralValue::String(content),
         "http://www.w3.org/2001/XMLSchema#integer"
         | "http://www.w3.org/2001/XMLSchema#int"
-        | "http://www.w3.org/2001/XMLSchema#long" => content
+        | "http://www.w3.org/2001/XMLSchema#long"
+        | "http://www.w3.org/2001/XMLSchema#short"
+        | "http://www.w3.org/2001/XMLSchema#byte"
+        | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger"
+        | "http://www.w3.org/2001/XMLSchema#nonPositiveInteger"
+        | "http://www.w3.org/2001/XMLSchema#negativeInteger"
+        | "http://www.w3.org/2001/XMLSchema#positiveInteger"
+        | "http://www.w3.org/2001/XMLSchema#unsignedLong"
+        | "http://www.w3.org/2001/XMLSchema#unsignedInt"
+        | "http://www.w3.org/2001/XMLSchema#unsignedShort"
+        | "http://www.w3.org/2001/XMLSchema#unsignedByte" => content
             .parse::<i64>()
             .map(LiteralValue::Integer)
             .unwrap_or_else(|_| typed(content, datatype)),
@@ -241,9 +251,10 @@ pub fn object_term(
     match token {
         TurtleTerm::IriRef(s) => {
             let iri = prefixes.expand_iri_ref(s);
-            Ok(Term::Iri(Iri::parse(iri).map_err(|e| {
-                OntolithError::parse_at(line, col, e.message())
-            })?))
+            // The vendored W3C suite resolves `<>` against bases that may be
+            // bare file names (no scheme); keep the resolved string as-is like
+            // [`subject_node`] does so those triples load.
+            Ok(Term::Iri(Iri::new(iri)))
         }
         TurtleTerm::Prefixed(s) | TurtleTerm::Bare(s) => {
             let iri = prefixes.expand_prefixed(s, line, col)?;
@@ -458,7 +469,13 @@ impl<'a> Lexer<'a> {
         self.bump();
         let start = self.pos;
         while let Some(c) = self.peek_char() {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+            if (c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                || (c == '.'
+                    && self.input[self.pos + 1..]
+                        .chars()
+                        .next()
+                        .is_some_and(|n| n.is_ascii_alphanumeric() || n == '_' || n == '-'))
+            {
                 self.bump();
             } else {
                 break;
@@ -594,6 +611,18 @@ impl<'a> Lexer<'a> {
                     c,
                     ',' | ';' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '"' | '#'
                 )
+                || (c == '.'
+                    && self.input[self.pos + 1..]
+                        .chars()
+                        .next()
+                        .is_none_or(|n| {
+                            n.is_ascii_whitespace()
+                                || matches!(
+                                    n,
+                                    ',' | ';' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '"'
+                                        | '#' | '.'
+                                )
+                        }))
             {
                 break;
             }

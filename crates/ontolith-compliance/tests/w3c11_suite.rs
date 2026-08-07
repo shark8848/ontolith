@@ -12,9 +12,10 @@
 //! Regenerate the profile after implementing a feature:
 //!   ONTOLITH_W3C11_LEARN=1 cargo test -p ontolith-compliance --test w3c11_suite
 
-use ontolith_core::domain::{Iri, LiteralValue, NodeId};
+use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_parser::application::RdfParser;
 use ontolith_parser::domain::ParseRequest;
+use ontolith_parser::infrastructure::term_lex::coerce_typed_literal;
 use ontolith_parser::infrastructure::{BasicRdfParser, parse_ntriples, parse_turtle_doc};
 use ontolith_query::domain::{BoundValue, QueryKind, QueryRequest, QueryResult};
 use ontolith_query::infrastructure::{plan_query, update_pipeline};
@@ -1207,18 +1208,209 @@ fn term_to_norm(term: &Term, dict: &InMemoryDictionary, base: &str) -> NormTerm 
     }
 }
 
+/// Minimal RDF/XML reader covering the constructs used by the vendored W3C
+/// data files (`rdf:Description` + prefixed property elements, `rdf:about`,
+/// `rdf:resource`, `rdf:nodeID`, `rdf:datatype`, `xml:lang`, text content).
+/// Relative IRIs (including `rdf:resource=""`) resolve against `base`.
+fn parse_rdf_xml(
+    text: &str,
+    dict: &InMemoryDictionary,
+    base: &str,
+) -> Result<Vec<Triple>, String> {
+    use quick_xml::events::Event;
+
+    let mut reader = quick_xml::Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut ns: BTreeMap<String, String> = BTreeMap::new();
+    ns.insert(
+        "rdf".to_owned(),
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_owned(),
+    );
+    let mut triples = Vec::new();
+    let mut subject: Option<NodeId> = None;
+    let mut pending: Option<(Iri, Option<String>, Option<String>)> = None; // (pred, datatype, lang)
+    let mut text_buf = String::new();
+    let mut in_root = false;
+
+    let attr = |e: &quick_xml::events::BytesStart<'_>, key: &str| -> Option<String> {
+        e.attributes()
+            .filter_map(|a| a.ok())
+            .find(|a| a.key.as_ref() == key.as_bytes())
+            .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+    };
+    let emit = |triples: &mut Vec<Triple>,
+                subject: NodeId,
+                pred: &Iri,
+                object: &Term| {
+        triples.push(Triple {
+            subject,
+            predicate: pred.clone(),
+            object: object.clone(),
+        });
+    };
+    loop {
+        match reader.read_event() {
+            Err(e) => return Err(format!("rdf/xml error: {e}")),
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                if name == "rdf:RDF" {
+                    in_root = true;
+                    for a in e.attributes().filter_map(|a| a.ok()) {
+                        let k = String::from_utf8_lossy(a.key.as_ref()).into_owned();
+                        if let Some(prefix) = k.strip_prefix("xmlns:") {
+                            let v = String::from_utf8_lossy(&a.value).into_owned();
+                            ns.insert(prefix.to_owned(), v);
+                        }
+                    }
+                    continue;
+                }
+                if !in_root {
+                    continue;
+                }
+                if name == "rdf:Description" {
+                    let about = attr(&e, "rdf:about");
+                    let node_id = attr(&e, "rdf:nodeID");
+                    let subject_term = if let Some(a) = about {
+                        dict.encode_node(&resolve_iri(&a, base))
+                    } else if let Some(n) = node_id {
+                        dict.encode_node(&format!("_:{n}"))
+                    } else {
+                        dict.encode_node(&format!("_:rdfxml{}", dict.len()))
+                    };
+                    subject = Some(subject_term);
+                    continue;
+                }
+                if subject.is_none() {
+                    continue;
+                }
+                if let Some(pred) = resolve_prefixed_name(&name, &ns) {
+                    let resource = attr(&e, "rdf:resource");
+                    let node_id = attr(&e, "rdf:nodeID");
+                    if let Some(r) = resource {
+                        emit(
+                            &mut triples,
+                            subject.unwrap(),
+                            &pred,
+                            &Term::Iri(Iri::new(resolve_iri(&r, base))),
+                        );
+                    } else if let Some(n) = node_id {
+                        emit(
+                            &mut triples,
+                            subject.unwrap(),
+                            &pred,
+                            &Term::BlankNode(dict.encode_node(&format!("_:{n}"))),
+                        );
+                    } else {
+                        let datatype = attr(&e, "rdf:datatype");
+                        let lang = attr(&e, "xml:lang");
+                        pending = Some((pred, datatype, lang));
+                        text_buf.clear();
+                    }
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                if subject.is_none() || name == "rdf:Description" {
+                    continue;
+                }
+                if let Some(pred) = resolve_prefixed_name(&name, &ns) {
+                    let resource = attr(&e, "rdf:resource");
+                    let node_id = attr(&e, "rdf:nodeID");
+                    let object = if let Some(r) = resource {
+                        Term::Iri(Iri::new(resolve_iri(&r, base)))
+                    } else if let Some(n) = node_id {
+                        Term::BlankNode(dict.encode_node(&format!("_:{n}")))
+                    } else {
+                        Term::Literal(LiteralValue::String(String::new()))
+                    };
+                    emit(&mut triples, subject.unwrap(), &pred, &object);
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if let Ok(decoded) = t.unescape() {
+                    text_buf.push_str(&decoded);
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                if name == "rdf:Description" {
+                    subject = None;
+                } else if let (Some(s), Some((pred, datatype, lang))) = (subject, pending.take()) {
+                    let lex = text_buf.trim().to_owned();
+                    let object = match (datatype, lang) {
+                        (Some(dt), _) => {
+                            // Compact forms for known XSD datatypes, matching
+                            // the Turtle/N-Triples parser (`coerce_typed_literal`).
+                            Term::Literal(coerce_typed_literal(lex, &dt))
+                        }
+                        (None, Some(l)) => Term::Literal(LiteralValue::Lang {
+                            value: lex,
+                            lang: LanguageTag::parse(&l)
+                                .map_err(|e| format!("bad xml:lang {l}: {e}"))?,
+                        }),
+                        (None, None) => Term::Literal(LiteralValue::String(lex)),
+                    };
+                    emit(&mut triples, s, &pred, &object);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(triples)
+}
+
+/// Resolve a prefixed XML name (`ex:p`) against the collected namespaces.
+fn resolve_prefixed_name(name: &str, ns: &BTreeMap<String, String>) -> Option<Iri> {
+    if let Some((prefix, local)) = name.split_once(':') {
+        let base = ns.get(prefix)?;
+        Some(Iri::new(format!("{base}{local}")))
+    } else {
+        // Unprefixed element names are not valid property IRIs here.
+        None
+    }
+}
+
+/// RFC 3986-lite IRI resolution good enough for the vendored suite: empty
+/// references resolve to the base, absolute references pass through, and
+/// relative/fragment references join onto the base's last path segment.
+fn resolve_iri(reference: &str, base: &str) -> String {
+    if reference.is_empty() {
+        return base.to_owned();
+    }
+    if reference.contains(':') {
+        return reference.to_owned();
+    }
+    if let Some(fragment) = reference.strip_prefix('#') {
+        let cut = base
+            .rfind(['#', '/'])
+            .map(|i| i + 1)
+            .unwrap_or(base.len());
+        return format!("{}{fragment}", &base[..cut]);
+    }
+    match base.rfind('/') {
+        Some(i) => format!("{}/{}", &base[..i + 1], reference),
+        None => reference.to_owned(),
+    }
+}
+
 fn parse_graph_file(path: &Path) -> Result<(Vec<Triple>, InMemoryDictionary), String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let dict = InMemoryDictionary::new();
-    let parsed = match path.extension().and_then(|e| e.to_str()) {
-        Some("nt") => {
-            parse_ntriples(&text, &dict).map_err(|e| format!("parse {}: {e:?}", path.display()))?
-        }
+    let triples = match path.extension().and_then(|e| e.to_str()) {
+        Some("nt") => parse_ntriples(&text, &dict)
+            .map_err(|e| format!("parse {}: {e:?}", path.display()))?
+            .dataset
+            .default_graph,
+        Some("rdf") => parse_rdf_xml(&text, &dict, &file_uri(path))
+            .map_err(|e| format!("parse {}: {e}", path.display()))?,
         _ => parse_turtle_doc(&text, &dict)
-            .map_err(|e| format!("parse {}: {e:?}", path.display()))?,
+            .map_err(|e| format!("parse {}: {e:?}", path.display()))?
+            .dataset
+            .default_graph,
     };
-    Ok((parsed.dataset.default_graph, dict))
+    Ok((triples, dict))
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,7 +1424,11 @@ struct Loaded {
     quads: Arc<InMemoryQuadRepository>,
 }
 
-fn load_data(files: &[PathBuf], graph_data: &[NamedGraphFile]) -> Result<Loaded, String> {
+fn load_data(
+    files: &[PathBuf],
+    graph_data: &[NamedGraphFile],
+    expose_data_graphs: bool,
+) -> Result<Loaded, String> {
     let engine = Arc::new(InMemoryStorageEngine::new());
     let dict = Arc::new(InMemoryDictionary::new());
     let repo: Arc<dyn TripleRepository> =
@@ -1243,13 +1439,37 @@ fn load_data(files: &[PathBuf], graph_data: &[NamedGraphFile]) -> Result<Loaded,
     for file in files {
         let text =
             std::fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?;
-        let parsed = match file.extension().and_then(|e| e.to_str()) {
+        // Query evaluation follows the vendored suite's bare-file-name
+        // convention: the data file's base is its file name, so `<>` in
+        // exists-graph-variable.ttl resolves to the same IRI the graphData
+        // entry registers (the graph name doubles as the document IRI).
+        let base = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_owned();
+        let triples = match file.extension().and_then(|e| e.to_str()) {
             Some("nt") => parse_ntriples(&text, dict.as_ref())
-                .map_err(|e| format!("parse {}: {e:?}", file.display()))?,
+                .map_err(|e| format!("parse {}: {e:?}", file.display()))?
+                .dataset
+                .default_graph,
+            Some("rdf") => parse_rdf_xml(&text, dict.as_ref(), &base)
+                .map_err(|e| format!("parse {}: {e}", file.display()))?,
+            _ if expose_data_graphs => BasicRdfParser::new()
+                .parse(
+                    &ParseRequest::turtle("data.ttl").with_base(base.clone()),
+                    &text,
+                    dict.as_ref(),
+                )
+                .map_err(|e| format!("parse {}: {e:?}", file.display()))?
+                .dataset
+                .default_graph,
             _ => parse_turtle_doc(&text, dict.as_ref())
-                .map_err(|e| format!("parse {}: {e:?}", file.display()))?,
+                .map_err(|e| format!("parse {}: {e:?}", file.display()))?
+                .dataset
+                .default_graph,
         };
-        for triple in parsed.dataset.default_graph {
+        for triple in triples {
             repo.insert(txn, triple)
                 .map_err(|e| format!("insert: {e:?}"))?;
             inserted += 1;
@@ -1258,10 +1478,23 @@ fn load_data(files: &[PathBuf], graph_data: &[NamedGraphFile]) -> Result<Loaded,
     for ng in graph_data {
         let text = std::fs::read_to_string(&ng.file)
             .map_err(|e| format!("read {}: {e}", ng.file.display()))?;
-        let parsed = parse_turtle_doc(&text, dict.as_ref())
-            .map_err(|e| format!("parse {}: {e:?}", ng.file.display()))?;
+        // Data resolves relative IRIs against the graph name (the graph name
+        // doubles as the document IRI in the W3C data files).
+        let triples = match ng.file.extension().and_then(|e| e.to_str()) {
+            Some("rdf") => parse_rdf_xml(&text, dict.as_ref(), &ng.name)
+                .map_err(|e| format!("parse {}: {e}", ng.file.display()))?,
+            _ => BasicRdfParser::new()
+                .parse(
+                    &ParseRequest::turtle("graph.ttl").with_base(ng.name.clone()),
+                    &text,
+                    dict.as_ref(),
+                )
+                .map_err(|e| format!("parse {}: {e:?}", ng.file.display()))?
+                .dataset
+                .default_graph,
+        };
         let graph_name = Iri::new(ng.name.clone());
-        for triple in parsed.dataset.default_graph {
+        for triple in triples {
             quads
                 .insert(txn, Quad::in_named_graph(triple, graph_name.clone()))
                 .map_err(|e| format!("insert quad: {e:?}"))?;
@@ -1495,7 +1728,8 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
         }
         TestKind::QueryEvaluation => {
             let loaded =
-                load_data(&entry.data_files, &entry.graph_data).map_err(FailReason::DataFormat)?;
+                load_data(&entry.data_files, &entry.graph_data, true)
+                    .map_err(FailReason::DataFormat)?;
             let actual = execute_query(&loaded, &text).map_err(|e| classify_query_error(&e))?;
             if actual.timed_out {
                 return fail(FailReason::Timeout);
@@ -1507,6 +1741,7 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
                 Expected::Table(path) => {
                     let expected_text = std::fs::read_to_string(path)
                         .map_err(|e| FailReason::ResultFormat(e.to_string()))?;
+
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                     let (vars, rows, boolean) = match ext {
                         "srx" | "xml" => {
@@ -1556,7 +1791,8 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
         }
         TestKind::UpdateEvaluation => {
             let loaded =
-                load_data(&entry.data_files, &entry.graph_data).map_err(FailReason::DataFormat)?;
+                load_data(&entry.data_files, &entry.graph_data, false)
+                    .map_err(FailReason::DataFormat)?;
             let actual = execute_query(&loaded, &text).map_err(|e| classify_query_error(&e))?;
             if actual.timed_out {
                 return fail(FailReason::Timeout);

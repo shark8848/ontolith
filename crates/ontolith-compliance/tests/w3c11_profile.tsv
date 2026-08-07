@@ -75,7 +75,7 @@ bind	bind04 - BIND	PASS
 bind	bind05 - BIND	PASS	
 bind	bind06 - BIND	PASS	
 bind	bind07 - BIND	PASS	
-bind	bind08 - BIND	FAIL	semantic
+bind	bind08 - BIND	PASS	
 bind	bind10 - BIND scoping - Variable in filter not in scope	PASS	
 bind	bind11 - BIND scoping - Variable in filter in scope	PASS	
 bindings	Inline VALUES graph pattern	PASS	
@@ -103,7 +103,7 @@ construct	CONSTRUCT list	PASS
 construct	constructwhere01 - CONSTRUCT WHERE	PASS	
 construct	constructwhere02 - CONSTRUCT WHERE	PASS	
 construct	constructwhere03 - CONSTRUCT WHERE	PASS	
-construct	constructwhere04 - CONSTRUCT WHERE	FAIL	semantic
+construct	constructwhere04 - CONSTRUCT WHERE	PASS	
 construct	constructwhere05 - CONSTRUCT WHERE	PASS	
 construct	constructwhere06 - CONSTRUCT WHERE	PASS	
 copy	COPY 1	PASS	
@@ -114,18 +114,18 @@ copy	COPY 6	PASS
 copy	COPY 7	PASS	
 csv-tsv-res	tsv01 - TSV Result Format	PASS	
 csv-tsv-res	tsv02 - TSV Result Format	PASS	
-csv-tsv-res	tsv03 - TSV Result Format	FAIL	semantic
+csv-tsv-res	tsv03 - TSV Result Format	PASS	
 delete	Graph-specific DELETE 1	PASS	
 delete	Graph-specific DELETE 1 (USING)	PASS	
 delete	Graph-specific DELETE 1 (WITH)	PASS	
 delete	Graph-specific DELETE 2	PASS	
-delete	Graph-specific DELETE 2 (USING)	FAIL	semantic
+delete	Graph-specific DELETE 2 (USING)	PASS	
 delete	Graph-specific DELETE 2 (WITH)	PASS	
 delete	Simple DELETE 1	PASS	
 delete	Simple DELETE 1 (USING)	PASS	
 delete	Simple DELETE 1 (WITH)	PASS	
 delete	Simple DELETE 2	PASS	
-delete	Simple DELETE 2 (USING)	FAIL	semantic
+delete	Simple DELETE 2 (USING)	PASS	
 delete	Simple DELETE 2 (WITH)	PASS	
 delete	Simple DELETE 3	PASS	
 delete	Simple DELETE 3 (USING)	PASS	
@@ -167,12 +167,12 @@ drop	DROP ALL	PASS
 drop	DROP DEFAULT	PASS	
 drop	DROP GRAPH	PASS	
 drop	DROP NAMED	PASS	
-exists	Exists with ground triple	FAIL	semantic
-exists	Exists with one constant	FAIL	semantic
-exists	Exists within graph pattern	FAIL	semantic
-exists	GRAPH variable inside of EXISTS is bound to external variable	FAIL	data-format
-exists	Nested negative exists in positive exists	FAIL	semantic
-exists	Nested positive exists	FAIL	semantic
+exists	Exists with ground triple	PASS	
+exists	Exists with one constant	PASS	
+exists	Exists within graph pattern	PASS	
+exists	GRAPH variable inside of EXISTS is bound to external variable	PASS	
+exists	Nested negative exists in positive exists	PASS	
+exists	Nested positive exists	PASS	
 functions	ABS()	PASS	
 functions	BNODE()	PASS	
 functions	BNODE(str)	PASS	
@@ -254,8 +254,8 @@ grouping	Group-4	PASS
 grouping	Group-5	PASS	
 grouping	Group-6	PASS	
 grouping	Group-7	PASS	
-json-res	jsonres01 - JSON Result Format	FAIL	semantic
-json-res	jsonres02 - JSON Result Format	FAIL	semantic
+json-res	jsonres01 - JSON Result Format	PASS	
+json-res	jsonres02 - JSON Result Format	PASS	
 json-res	jsonres03 - JSON Result Format	PASS	
 json-res	jsonres04 - JSON Result Format	PASS	
 move	MOVE 1	PASS	
@@ -267,7 +267,7 @@ move	MOVE 7	PASS
 negation	Calculate proper subset	PASS	
 negation	Calculate which sets are subsets of others (exclude A subsetOf A)	PASS	
 negation	Calculate which sets are subsets of others (include A subsetOf A)	PASS	
-negation	Calculate which sets have the same elements	FAIL	semantic
+negation	Calculate which sets have the same elements	PASS	
 negation	Medical, temporal proximity by exclusion (NOT EXISTS)	PASS	
 negation	Positive EXISTS 1	PASS	
 negation	Positive EXISTS 2	PASS	
@@ -316,16 +316,16 @@ property-path	Negated Property Set with inverse properties	PASS
 property-path	Negated Property Set with the inverse rdf:type property written using '^a'	PASS	
 property-path	Negated Property Set with the rdf:type property written using 'a'	PASS	
 property-path	ZeroOrX property paths should only return terms in the graph and not also terms defined in the query	PASS	
-subquery	sq01 - Subquery within graph pattern	FAIL	data-format
-subquery	sq02 - Subquery within graph pattern, graph variable is bound	FAIL	data-format
-subquery	sq03 - Subquery within graph pattern, graph variable is not bound	FAIL	data-format
-subquery	sq04 - Subquery within graph pattern, default graph does not apply	FAIL	data-format
-subquery	sq05 - Subquery within graph pattern, from named applies	FAIL	data-format
-subquery	sq06 - Subquery with graph pattern, from named applies	FAIL	data-format
-subquery	sq07 - Subquery with from 	FAIL	data-format
-subquery	sq08 - Subquery with aggregate	FAIL	data-format
-subquery	sq09 - Nested Subqueries	FAIL	data-format
-subquery	sq10 - Subquery with exists	FAIL	data-format
+subquery	sq01 - Subquery within graph pattern	PASS	
+subquery	sq02 - Subquery within graph pattern, graph variable is bound	PASS	
+subquery	sq03 - Subquery within graph pattern, graph variable is not bound	PASS	
+subquery	sq04 - Subquery within graph pattern, default graph does not apply	PASS	
+subquery	sq05 - Subquery within graph pattern, from named applies	PASS	
+subquery	sq06 - Subquery with graph pattern, from named applies	PASS	
+subquery	sq07 - Subquery with from 	PASS	
+subquery	sq08 - Subquery with aggregate	PASS	
+subquery	sq09 - Nested Subqueries	PASS	
+subquery	sq10 - Subquery with exists	PASS	
 subquery	sq11 - Subquery limit per resource	PASS	
 subquery	sq12 - Subquery in CONSTRUCT with built-ins	PASS	
 subquery	sq13 - Subqueries don't inject bindings	PASS	
@@ -338,22 +338,22 @@ syntax-query	Too few values in a VALUE clause compared to the number of variable
 syntax-query	Too many values in a VALUE clause compared to the number of variables	PASS	
 syntax-query	\U and \u unicode codepoint escaping in literal using codepoints at notable unicode boundaries	PASS	
 syntax-query	\U unicode codepoint escaping in literal	PASS	
-syntax-query	\u unicode codepoint escaping in literal using partial surrogate pair	FAIL	accepted-invalid
-syntax-query	syn-bad-01.rq	FAIL	accepted-invalid
+syntax-query	\u unicode codepoint escaping in literal using partial surrogate pair	PASS	
+syntax-query	syn-bad-01.rq	PASS	
 syntax-query	syn-bad-02.rq	PASS	
 syntax-query	syn-bad-03.rq	PASS	
 syntax-query	syn-bad-04.rq	PASS	
-syntax-query	syn-bad-05.rq	FAIL	accepted-invalid
+syntax-query	syn-bad-05.rq	PASS	
 syntax-query	syn-bad-06.rq	PASS	
-syntax-query	syn-bad-07.rq	FAIL	accepted-invalid
+syntax-query	syn-bad-07.rq	PASS	
 syntax-query	syn-bad-08.rq	PASS	
 syntax-query	syn-bad-pname-01	PASS	
 syntax-query	syn-bad-pname-02	PASS	
 syntax-query	syn-bad-pname-03	PASS	
 syntax-query	syn-bad-pname-04	PASS	
-syntax-query	syn-bad-pname-05	FAIL	accepted-invalid
-syntax-query	syn-bad-pname-06	FAIL	accepted-invalid
-syntax-query	syn-bad-pname-07	FAIL	accepted-invalid
+syntax-query	syn-bad-pname-05	PASS	
+syntax-query	syn-bad-pname-06	PASS	
+syntax-query	syn-bad-pname-07	PASS	
 syntax-query	syn-bad-pname-08	PASS	
 syntax-query	syn-bad-pname-09	PASS	
 syntax-query	syn-bad-pname-10	PASS	
@@ -368,7 +368,7 @@ syntax-query	syn-pname-05	PASS
 syntax-query	syn-pname-06	PASS	
 syntax-query	syn-pname-07	PASS	
 syntax-query	syn-pname-08	PASS	
-syntax-query	syn-pname-09	FAIL	parse-error
+syntax-query	syn-pname-09	PASS	
 syntax-query	syn-pp-in-collection	PASS	
 syntax-query	syntax-BINDscope1.rq	PASS	
 syntax-query	syntax-BINDscope2.rq	PASS	
@@ -401,7 +401,7 @@ syntax-query	syntax-bindingBINDscopes-01.rq	PASS
 syntax-query	syntax-bindings-02a.rq with VALUES clause	PASS	
 syntax-query	syntax-bindings-03a.rq with VALUES clause	PASS	
 syntax-query	syntax-bindings-05a.rq with VALUES clause	PASS	
-syntax-query	syntax-bindings-09.rq	FAIL	accepted-invalid
+syntax-query	syntax-bindings-09.rq	PASS	
 syntax-query	syntax-construct-where-01.rq	PASS	
 syntax-query	syntax-construct-where-02.rq	PASS	
 syntax-query	syntax-exists-01.rq	PASS	
@@ -418,7 +418,7 @@ syntax-query	syntax-propertyPaths-01.rq	PASS
 syntax-query	syntax-select-expr-01.rq	PASS	
 syntax-query	syntax-select-expr-02.rq	PASS	
 syntax-query	syntax-select-expr-03.rq	PASS	
-syntax-query	syntax-select-expr-04.rq	FAIL	parse-error
+syntax-query	syntax-select-expr-04.rq	PASS	
 syntax-query	syntax-select-expr-05.rq	PASS	
 syntax-query	syntax-subquery-01.rq	PASS	
 syntax-query	syntax-subquery-02.rq	PASS	

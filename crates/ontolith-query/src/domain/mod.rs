@@ -354,6 +354,10 @@ pub struct QueryPlan {
     pub update_ops: Vec<UpdateOp>,
     pub prefixes: BTreeMap<String, String>,
     pub base: Option<String>,
+    /// `FROM <iri>` dataset clauses (default graph sources).
+    pub from: Vec<Iri>,
+    /// `FROM NAMED <iri>` dataset clauses (named graph sources).
+    pub from_named: Vec<Iri>,
     pub logical_steps: Vec<String>,
     pub physical_steps: Vec<String>,
     /// CONSTRUCT template (only for Construct).

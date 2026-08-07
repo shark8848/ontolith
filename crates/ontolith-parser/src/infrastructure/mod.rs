@@ -1,7 +1,7 @@
 //! Parser infrastructure adapters (L3 — full syntax surface).
 
 mod nt;
-mod term_lex;
+pub mod term_lex;
 mod turtle;
 
 use crate::application::RdfParser;

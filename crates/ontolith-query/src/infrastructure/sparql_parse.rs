@@ -113,6 +113,8 @@ impl<'a> SparqlParser<'a> {
                 update_ops: Vec::new(),
                 prefixes: self.prefixes.clone(),
                 base: self.base.clone(),
+                from: Vec::new(),
+                from_named: Vec::new(),
                 logical_steps: self.logical.clone(),
                 physical_steps: vec![format!("unsupported:{}", kind.as_str())],
                 construct_template: Vec::new(),
@@ -131,6 +133,8 @@ impl<'a> SparqlParser<'a> {
                 update_ops,
                 prefixes: self.prefixes.clone(),
                 base: self.base.clone(),
+                from: Vec::new(),
+                from_named: Vec::new(),
                 logical_steps: self.logical.clone(),
                 physical_steps: vec!["update:ops".to_string()],
                 construct_template: Vec::new(),
@@ -258,6 +262,29 @@ impl<'a> SparqlParser<'a> {
         }
 
         self.skip();
+        let (from, from_named) = self.parse_dataset_clauses()?;
+        if !from.is_empty() {
+            self.logical.push(format!("from:{}", from.len()));
+        }
+        if !from_named.is_empty() {
+            self.logical.push(format!("from_named:{}", from_named.len()));
+        }
+        // `CONSTRUCT FROM <g> WHERE { pattern }` shorthand: the WHERE pattern
+        // doubles as the template when no explicit template was given.
+        if kind == QueryKind::Construct
+            && construct_template.is_empty()
+            && !construct_where_consumed
+            && self.looking_at_keyword("WHERE")
+        {
+            self.eat_keyword("WHERE");
+            self.skip();
+            if self.peek_char() == Some('{') {
+                let tpl = self.parse_construct_template()?;
+                construct_template = tpl.clone();
+                self.logical.push(format!("construct_where:{}", tpl.len()));
+                construct_where_consumed = true;
+            }
+        }
         // WHERE is optional for ASK { } form; CONSTRUCT WHERE already consumed it.
         if !construct_where_consumed {
             let _ = self.eat_keyword("WHERE");
@@ -311,6 +338,9 @@ impl<'a> SparqlParser<'a> {
         // GROUP BY — appears after the WHERE group, before solution modifiers.
         let mut groups: Vec<String> = Vec::new();
         if self.eat_keyword("GROUP") {
+            if star_projection {
+                return Err(self.err("SELECT * cannot be combined with GROUP BY"));
+            }
             self.skip();
             self.expect_keyword("BY")?;
             loop {
@@ -496,6 +526,11 @@ impl<'a> SparqlParser<'a> {
             }
         }
 
+        self.skip();
+        if !self.eof() {
+            return Err(self.err("unexpected trailing content after query"));
+        }
+
         let physical = physical_steps(&algebra);
         Ok(QueryPlan {
             id: plan_id(self.input),
@@ -504,6 +539,8 @@ impl<'a> SparqlParser<'a> {
             update_ops: Vec::new(),
             prefixes: self.prefixes.clone(),
             base: self.base.clone(),
+            from,
+            from_named,
             logical_steps: self.logical.clone(),
             physical_steps: physical,
             construct_template,
@@ -653,7 +690,7 @@ impl<'a> SparqlParser<'a> {
         if self.peek_char() == Some('<') {
             self.parse_iriref()
         } else {
-            let word = self.parse_word();
+            let word = self.parse_word()?;
             if word.is_empty() {
                 return Err(self.err("expected IRI"));
             }
@@ -670,7 +707,9 @@ impl<'a> SparqlParser<'a> {
                 return rest[i + 1..]
                     .chars()
                     .next()
-                    .is_some_and(|nc| nc.is_ascii_alphanumeric() || nc == '_' || nc == '-');
+                    .is_some_and(|nc| {
+                        nc.is_ascii_alphanumeric() || nc == '_' || nc == '-' || nc == ':'
+                    });
             }
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
                 continue;
@@ -967,6 +1006,29 @@ impl<'a> SparqlParser<'a> {
         Ok(GraphRef::Graph(Iri::new(self.parse_iri_or_prefixed()?)))
     }
 
+    /// `DatasetClause*` from the query prologue: `FROM <iri>` fills the
+    /// default graph and `FROM NAMED <iri>` the named graphs of the query
+    /// dataset (SPARQL 1.1 §18.2.1).
+    fn parse_dataset_clauses(&mut self) -> Result<(Vec<Iri>, Vec<Iri>), OntolithError> {
+        let mut from = Vec::new();
+        let mut from_named = Vec::new();
+        loop {
+            self.skip();
+            if !self.looking_at_keyword("FROM") {
+                break;
+            }
+            self.eat_keyword("FROM");
+            self.skip();
+            if self.eat_keyword("NAMED") {
+                self.skip();
+                from_named.push(Iri::new(self.parse_iri_or_prefixed()?));
+            } else {
+                from.push(Iri::new(self.parse_iri_or_prefixed()?));
+            }
+        }
+        Ok((from, from_named))
+    }
+
     fn parse_aggregate_spec(&mut self) -> Result<AggregateSpec, OntolithError> {
         self.expect_char('(')?;
         self.skip();
@@ -1083,7 +1145,12 @@ impl<'a> SparqlParser<'a> {
 
     fn parse_group_graph_pattern_sub(&mut self) -> Result<Algebra, OntolithError> {
         let mut acc = Algebra::Identity;
+        // SPARQL 1.1 §18.2.2.6 translates a group's FILTERs as wrapping the
+        // whole group (after its BIND extensions), so a FILTER can see a
+        // variable bound by a BIND later in the same group (w3c bind08).
+        let mut pending_filters: Vec<Expression> = Vec::new();
         self.skip();
+        let group_start = self.pos;
         while !self.eof() && self.peek_char() != Some('}') {
             if self.eat_keyword("OPTIONAL") {
                 self.skip();
@@ -1118,10 +1185,7 @@ impl<'a> SparqlParser<'a> {
             } else if self.eat_keyword("FILTER") {
                 self.skip();
                 let expr = self.parse_constraint()?;
-                acc = Algebra::Filter {
-                    expression: expr,
-                    input: Box::new(acc),
-                };
+                pending_filters.push(expr);
                 self.logical.push("filter".into());
             } else if self.eat_keyword("BIND") {
                 self.skip();
@@ -1163,6 +1227,14 @@ impl<'a> SparqlParser<'a> {
                 );
                 self.logical.push("graph".into());
             } else if self.looking_at_keyword("SELECT") {
+                // A `SubSelect` is only legal as the sole content of a group
+                // (`{ SELECT ... }`); a bare SELECT after other elements is a
+                // syntax error (w3c syn-bad-07).
+                if self.pos != group_start {
+                    return Err(self.err(
+                        "subquery is only allowed as the first element of a group",
+                    ));
+                }
                 let subquery = self.parse_subquery_select()?;
                 acc = join(acc, subquery);
                 self.logical.push("subquery".into());
@@ -1240,6 +1312,12 @@ impl<'a> SparqlParser<'a> {
                 break;
             }
             self.skip();
+        }
+        for expr in pending_filters {
+            acc = Algebra::Filter {
+                expression: expr,
+                input: Box::new(acc),
+            };
         }
         Ok(acc)
     }
@@ -1409,7 +1487,7 @@ impl<'a> SparqlParser<'a> {
                 }
                 Iri::new(raw)
             } else {
-                let word = self.parse_word();
+                let word = self.parse_word()?;
                 if word.is_empty() {
                     return Err(self.err("negated property set requires an IRI"));
                 }
@@ -2052,7 +2130,7 @@ impl<'a> SparqlParser<'a> {
             return Ok(TermPattern::Literal(self.parse_string_literal()?));
         }
         // number / boolean / node:ID / prefixed name
-        let mut word = self.parse_word();
+        let mut word = self.parse_word()?;
         if word.is_empty() {
             return Err(self.err("expected term"));
         }
@@ -2550,6 +2628,11 @@ impl<'a> SparqlParser<'a> {
                 name.push(c);
                 pos += c.len_utf8();
             }
+            ':' => {
+                // Empty-prefix function names (`:fn(...)`).
+                name.push(':');
+                pos += 1;
+            }
             _ => return None,
         }
         while let Some(c) = self.input[pos..].chars().next() {
@@ -2654,6 +2737,9 @@ impl<'a> SparqlParser<'a> {
             if c == ':' {
                 let name = self.input[start..self.pos].to_owned();
                 self.bump();
+                if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    return Err(self.err("prefix name must not start with a digit"));
+                }
                 return Ok(name);
             }
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -2695,6 +2781,7 @@ impl<'a> SparqlParser<'a> {
                     }
                     let lang = self.input[lang_start..self.pos].to_ascii_lowercase();
                     let lang = LanguageTag::parse(lang).map_err(|e| self.err(e.message()))?;
+                    self.check_unicode_escapes(&raw)?;
                     return Ok(LiteralValue::Lang {
                         value: unescape(&raw),
                         lang,
@@ -2706,11 +2793,13 @@ impl<'a> SparqlParser<'a> {
                     let dt = if self.peek_char() == Some('<') {
                         self.parse_iriref()?
                     } else {
-                        let w = self.parse_word();
+                        let w = self.parse_word()?;
                         self.expand_prefixed(&w)?
                     };
+                    self.check_unicode_escapes(&raw)?;
                     return Ok(coerce_literal(unescape(&raw), &dt));
                 }
+                self.check_unicode_escapes(&raw)?;
                 return Ok(LiteralValue::String(unescape(&raw)));
             }
             self.bump();
@@ -2718,7 +2807,7 @@ impl<'a> SparqlParser<'a> {
         Err(self.err("unterminated string"))
     }
 
-    fn parse_word(&mut self) -> String {
+    fn parse_word(&mut self) -> Result<String, OntolithError> {
         // PN_LOCAL_ESC characters that may follow a backslash in a prefixed
         // name local part (e.g. `:d\?` is the IRI char `?`).
         const PN_LOCAL_ESC: &[char] = &[
@@ -2735,41 +2824,34 @@ impl<'a> SparqlParser<'a> {
                     out.push(esc);
                     continue;
                 }
-                self.bump();
-                out.push('\\');
-                continue;
+                return Err(self.err("invalid escape sequence in prefixed name"));
             }
             if c.is_whitespace()
                 || matches!(
                     c,
-                    '{' | '}'
-                        | '('
-                        | ')'
-                        | '.'
-                        | ';'
-                        | ','
-                        | '<'
-                        | '"'
-                        | '\''
-                        | '#'
-                        | '!'
-                        | '='
-                        | '>'
-                        | '/'
-                        | '^'
-                        | '+'
-                        | '*'
-                        | '&'
-                        | '|'
-                        | '?'
+                    '{' | '}' | '(' | ')' | ';' | ',' | '<' | '"' | '\'' | '#' | '!' | '=' | '>'
+                        | '/' | '^' | '+' | '*' | '&' | '|' | '?'
                 )
+                || (c == '.'
+                    && self.input[self.pos + 1..]
+                        .chars()
+                        .next()
+                        .is_none_or(|n| {
+                            n.is_whitespace()
+                                || matches!(
+                                    n,
+                                    '{' | '}' | '(' | ')' | '.' | ';' | ',' | '<' | '"' | '\''
+                                        | '#' | '!' | '=' | '>' | '/' | '^' | '+' | '*' | '&'
+                                        | '|' | '?'
+                                )
+                        }))
             {
                 break;
             }
             self.bump();
             out.push(c);
         }
-        out
+        Ok(out)
     }
 
     fn parse_usize(&mut self) -> Result<usize, OntolithError> {
@@ -2794,6 +2876,45 @@ impl<'a> SparqlParser<'a> {
             return Err(OntolithError::query(format!("unknown prefix '{p}'")));
         }
         Ok(token.to_owned())
+    }
+
+    /// Validates `\uXXXX` / `\UXXXXXXXX` escapes inside a string literal raw
+    /// body. A code point in the surrogate range U+D800..U+DFFF cannot be
+    /// represented by a Unicode escape in SPARQL (W3C
+    /// syn-invalid-codepoint-escaped-bad-01), and an escape with fewer digits
+    /// than the grammar requires is a syntax error.
+    fn check_unicode_escapes(&self, raw: &str) -> Result<(), OntolithError> {
+        let bytes = raw.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] != b'\\' {
+                i += 1;
+                continue;
+            }
+            match bytes.get(i + 1).copied() {
+                Some(b'u') | Some(b'U') => {
+                    let ndigits = if bytes[i + 1] == b'u' { 4 } else { 8 };
+                    let hex_start = i + 2;
+                    if hex_start + ndigits > bytes.len() {
+                        return Err(self.err("incomplete unicode escape in string literal"));
+                    }
+                    let hex = &raw[hex_start..hex_start + ndigits];
+                    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(self.err("malformed unicode escape in string literal"));
+                    }
+                    let cp = u32::from_str_radix(hex, 16).map_err(|_| {
+                        self.err("malformed unicode escape in string literal")
+                    })?;
+                    if (0xD800..=0xDFFF).contains(&cp) {
+                        return Err(self.err("surrogate codepoint in string literal escape"));
+                    }
+                    i = hex_start + ndigits;
+                }
+                Some(_) => i += 2,
+                None => i += 1,
+            }
+        }
+        Ok(())
     }
 
     fn err(&self, msg: impl Into<String>) -> OntolithError {
@@ -3064,19 +3185,55 @@ pub fn plan_id(query: &str) -> QueryPlanId {
 }
 
 fn unescape(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
             continue;
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some(other) => out.push(other),
-            None => out.push('\\'),
+        let next = bytes.get(i + 1).copied();
+        match next {
+            Some(b'u') | Some(b'U') => {
+                let ndigits = if next == Some(b'u') { 4 } else { 8 };
+                let hex_start = i + 2;
+                if hex_start + ndigits <= bytes.len() {
+                    let hex = &s[hex_start..hex_start + ndigits];
+                    if let Some(ch) =
+                        u32::from_str_radix(hex, 16).ok().and_then(|cp| char::from_u32(cp))
+                    {
+                        out.push(ch);
+                        i = hex_start + ndigits;
+                        continue;
+                    }
+                }
+                out.push('\\');
+                i += 1;
+            }
+            Some(b'n') => {
+                out.push('\n');
+                i += 2;
+            }
+            Some(b't') => {
+                out.push('\t');
+                i += 2;
+            }
+            Some(b'r') => {
+                out.push('\r');
+                i += 2;
+            }
+            Some(_) => {
+                let ch = s[i + 1..].chars().next().unwrap();
+                out.push(ch);
+                i += 1 + ch.len_utf8();
+            }
+            None => {
+                out.push('\\');
+                i += 1;
+            }
         }
     }
     out

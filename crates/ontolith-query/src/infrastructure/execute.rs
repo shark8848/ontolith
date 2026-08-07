@@ -55,8 +55,22 @@ impl AlgebraExecutor {
         }
 
         let token = request.preemption_token();
+        // Query-side `FROM`/`FROM NAMED` dataset (SPARQL 1.1 §18.2.1): the
+        // listed graphs become the dataset for the WHERE clause.
+        let dataset_view: DatasetView;
+        let read: &dyn QueryReadService = if !plan.from.is_empty() || !plan.from_named.is_empty() {
+            dataset_view = DatasetView::Merged(MergedGraphRead::new(
+                self.read.as_ref(),
+                &plan.from,
+                &plan.from_named,
+                request.txn_id,
+            ));
+            dataset_view.as_read()
+        } else {
+            self.read.as_ref()
+        };
         let ctx = ExecCtx {
-            read: self.read.as_ref(),
+            read,
             txn_id: request.txn_id,
             token: &token,
             base: plan.base.as_deref(),
@@ -921,11 +935,11 @@ impl<'a> MergedGraphRead<'a> {
         for g in using {
             triples.extend(base.quads_in_graph(g, txn_id));
         }
-        let named = if using_named.is_empty() {
-            base.named_graph_names(txn_id)
-        } else {
-            using_named.to_vec()
-        };
+        // SPARQL 1.1 Update §4.1.2: the USING dataset's named graphs are the
+        // `USING NAMED` graphs only; without `USING NAMED` the dataset has no
+        // named graphs, so `GRAPH` blocks inside the WHERE stay scoped to the
+        // USING dataset instead of falling back to the graph store.
+        let named = using_named.to_vec();
         Self {
             base,
             triples,
@@ -2592,7 +2606,14 @@ fn eval_function(
         match bv {
             BoundValue::Literal(l) => Some(l.lexical_form()),
             BoundValue::Iri(i) => Some(i.as_str().to_owned()),
-            _ => None,
+            BoundValue::Node(n) | BoundValue::Blank(n) => {
+                let s = ctx.read.decode_node(*n)?;
+                if s.starts_with("_:") {
+                    None
+                } else {
+                    Some(s)
+                }
+            }
         }
     };
     let string = |i: usize| string_of(&arg(i)?);
@@ -2621,11 +2642,7 @@ fn eval_function(
             let datatype = Iri::new(format!("http://www.w3.org/2001/XMLSchema#{suffix}"));
             cast_value(&arg(0)?, &datatype, &strlit)
         }
-        "STR" => match arg(0)? {
-            BoundValue::Iri(i) => Some(strlit(i.as_str().to_owned())),
-            BoundValue::Literal(l) => Some(strlit(l.lexical_form())),
-            _ => None,
-        },
+        "STR" => Some(strlit(string(0)?)),
         "UCASE" => {
             let l = str_lit(0)?;
             Some(BoundValue::Literal(str_result(
