@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub struct AlgebraExecutor {
     read: Arc<dyn QueryReadService>,
@@ -60,6 +60,7 @@ impl AlgebraExecutor {
             token: &token,
             base: plan.base.as_deref(),
             bnode: RefCell::new(BnodeState::default()),
+            uuid: RefCell::new(uuid_seed()),
         };
 
         // Projection expressions must see every variable bound by the WHERE
@@ -170,6 +171,7 @@ struct ExecCtx<'a> {
     token: &'a PreemptionToken,
     base: Option<&'a str>,
     bnode: RefCell<BnodeState>,
+    uuid: RefCell<u64>,
 }
 
 /// Per-query blank node state for `BNODE()` / `BNODE(str)` (SPARQL: the same
@@ -254,6 +256,7 @@ pub fn execute_update(
         token: &token,
         base: None,
         bnode: RefCell::new(BnodeState::default()),
+        uuid: RefCell::new(uuid_seed()),
     };
     let mut affected: u64 = 0;
     let mut staged = false;
@@ -303,6 +306,7 @@ pub fn execute_update(
                             token: &token,
                             base: None,
                             bnode: RefCell::new(BnodeState::default()),
+                            uuid: RefCell::new(uuid_seed()),
                         };
                         let solutions = eval_algebra(where_pattern, &op_ctx)?;
                         let mut ops = Vec::new();
@@ -349,6 +353,7 @@ pub fn execute_update(
                             token: &token,
                             base: None,
                             bnode: RefCell::new(BnodeState::default()),
+                            uuid: RefCell::new(uuid_seed()),
                         };
                         let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &op_ctx)?;
                         let mut ops = Vec::new();
@@ -1903,6 +1908,25 @@ fn eval_function(
             let out = regex_replace(&s, &pattern, &replacement, &flags)?;
             Some(BoundValue::Literal(str_result(&l, out)))
         }
+        "REGEX" => {
+            let text = str_lit_lex(&str_lit(0)?)?.to_owned();
+            let pattern = str_lit_lex(&str_lit(1)?)?.to_owned();
+            let flags = if args.len() >= 3 {
+                str_lit_lex(&str_lit(2)?)?.to_owned()
+            } else {
+                String::new()
+            };
+            let re = regex_compile(&pattern, &flags)?;
+            Some(bool(re.is_match(&text)))
+        }
+        "UUID" => {
+            let uuid = uuid_v4(&mut ctx.uuid.borrow_mut());
+            Some(BoundValue::Iri(Iri::new(format!("urn:uuid:{uuid}"))))
+        }
+        "STRUUID" => {
+            let uuid = uuid_v4(&mut ctx.uuid.borrow_mut());
+            Some(strlit(uuid))
+        }
         "BNODE" => {
             if args.is_empty() {
                 return Some(BoundValue::Blank(ctx.bnode.borrow_mut().fresh()));
@@ -2119,6 +2143,13 @@ fn lang_matches(tag: &str, range: &str) -> bool {
 /// SPARQL REPLACE over XPath fn:replace: flags `i`/`s`/`m`/`q` (plus `x`),
 /// `$n` capture references in the replacement, non-overlapping matches.
 fn regex_replace(input: &str, pattern: &str, replacement: &str, flags: &str) -> Option<String> {
+    let re = regex_compile(pattern, flags)?;
+    Some(re.replace_all(input, replacement).into_owned())
+}
+
+/// Compile a SPARQL/XPath regex with flags `i`/`s`/`m`/`q`/`x` (`q` treats
+/// the pattern as a literal string).
+fn regex_compile(pattern: &str, flags: &str) -> Option<regex::Regex> {
     let mut literal = false;
     let mut builder = regex::RegexBuilder::new(pattern);
     for f in flags.chars() {
@@ -2140,10 +2171,44 @@ fn regex_replace(input: &str, pattern: &str, replacement: &str, flags: &str) -> 
         }
     }
     if literal {
-        builder = regex::RegexBuilder::new(&regex::escape(pattern));
+        return regex::Regex::new(&regex::escape(pattern)).ok();
     }
-    let re = builder.build().ok()?;
-    Some(re.replace_all(input, replacement).into_owned())
+    builder.build().ok()
+}
+
+/// Per-query seed for the UUID PRNG (time-based, mixed with a process-unique
+/// constant so parallel queries stay distinct).
+fn uuid_seed() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ 0x9e37_79b9_7f4a_7c15
+}
+
+/// RFC 4122 version-4 UUID (lowercase hex), advancing the xorshift state.
+fn uuid_v4(state: &mut u64) -> String {
+    let mut next = || {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    };
+    let a = next();
+    let b = next();
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&a.to_be_bytes());
+    bytes[8..].copy_from_slice(&b.to_be_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let mut out = String::with_capacity(36);
+    for (i, byte) in bytes.iter().enumerate() {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            out.push('-');
+        }
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 /// CEIL/FLOOR/ROUND preserve the numeric datatype of the argument.

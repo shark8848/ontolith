@@ -224,16 +224,16 @@ functions	STRAFTER() datatyping	PASS
 functions	STRBEFORE()	PASS	
 functions	STRBEFORE() datatyping	PASS	
 functions	STRDT()	PASS	
-functions	STRDT() TypeErrors (updated for RDF 1.1)	FAIL	semantic
-functions	STRDT(STR())	FAIL	semantic
+functions	STRDT() TypeErrors (updated for RDF 1.1)	PASS	
+functions	STRDT(STR())	PASS	
 functions	STRENDS()	PASS	
 functions	STRLANG()	PASS	
 functions	STRLANG() TypeErrors (updated for RDF 1.1)	PASS	
-functions	STRLANG(STR())	FAIL	semantic
+functions	STRLANG(STR())	PASS	
 functions	STRLEN()	PASS	
 functions	STRLEN() on non-BMP unicode strings	PASS	
 functions	STRSTARTS()	PASS	
-functions	STRUUID() pattern match	FAIL	semantic
+functions	STRUUID() pattern match	PASS	
 functions	SUBSTR() (2-argument)	PASS	
 functions	SUBSTR() (2-argument) on non-BMP unicode strings	PASS	
 functions	SUBSTR() (3-argument)	PASS	
@@ -242,8 +242,8 @@ functions	TIMEZONE()	PASS
 functions	TZ()	PASS	
 functions	UCASE()	PASS	
 functions	UCASE() on non-BMP unicode strings	PASS	
-functions	UUID() pattern match	FAIL	semantic
-functions	UUID() per binding	FAIL	semantic
+functions	UUID() pattern match	PASS	
+functions	UUID() per binding	PASS	
 functions	YEAR()	PASS	
 functions	isNumeric()	PASS	
 functions	plus-1-corrected	PASS	

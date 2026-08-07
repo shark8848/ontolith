@@ -481,7 +481,8 @@ fn norm_literal(lex: &str, datatype: Option<&str>, lang: Option<&str>) -> NormTe
         return NormTerm::Literal {
             lex: lex.to_owned(),
             dt: NormDt::Lang,
-            lang: Some(l.to_owned()),
+            // BCP 47 language tags compare case-insensitively.
+            lang: Some(l.to_ascii_lowercase()),
         };
     }
     let dt = datatype.unwrap_or(XSD_STRING);
@@ -615,11 +616,19 @@ fn norm_from_engine(value: &BoundValue, dict: Option<&InMemoryDictionary>) -> No
                 dt: NormDt::Lang,
                 lang: Some(lang.as_str().to_owned()),
             },
-            LiteralValue::Typed { value, datatype } => NormTerm::Literal {
-                lex: value.clone(),
-                dt: NormDt::Other(datatype.as_str().to_owned()),
-                lang: None,
-            },
+            LiteralValue::Typed { value, datatype } => {
+                // RDF 1.1: xsd:string typed literals equal simple literals.
+                let dt = if datatype.as_str() == XSD_STRING {
+                    NormDt::Plain
+                } else {
+                    NormDt::Other(datatype.as_str().to_owned())
+                };
+                NormTerm::Literal {
+                    lex: value.clone(),
+                    dt,
+                    lang: None,
+                }
+            }
             LiteralValue::Boolean(b) => NormTerm::Literal {
                 lex: b.to_string(),
                 dt: NormDt::Boolean,
