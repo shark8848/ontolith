@@ -1013,6 +1013,7 @@ fn load_data(files: &[PathBuf]) -> Result<Loaded, String> {
     let repo: Arc<dyn TripleRepository> =
         Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
     let txn = TxnId::new(1);
+    let mut inserted = 0usize;
     for file in files {
         let text =
             std::fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?;
@@ -1025,11 +1026,14 @@ fn load_data(files: &[PathBuf]) -> Result<Loaded, String> {
         for triple in parsed.dataset.default_graph {
             repo.insert(txn, triple)
                 .map_err(|e| format!("insert: {e:?}"))?;
+            inserted += 1;
         }
     }
-    engine
-        .commit_transaction(txn)
-        .map_err(|e| format!("commit: {e:?}"))?;
+    if inserted > 0 {
+        engine
+            .commit_transaction(txn)
+            .map_err(|e| format!("commit: {e:?}"))?;
+    }
     Ok(Loaded { engine, repo, dict })
 }
 

@@ -11,7 +11,7 @@ add	ADD 8	FAIL	semantic
 aggregates	AVG	PASS	
 aggregates	AVG DISTINCT with GROUP BY	PASS	
 aggregates	AVG with GROUP BY	PASS	
-aggregates	AVG with empty group (value defined to be 0)	FAIL	data-format
+aggregates	AVG with empty group (value defined to be 0)	FAIL	semantic
 aggregates	COUNT 1	PASS	
 aggregates	COUNT 10	PASS	
 aggregates	COUNT 11	PASS	
@@ -28,18 +28,18 @@ aggregates	COUNT 9	PASS
 aggregates	COUNT DISTINCT with GROUP BY	PASS	
 aggregates	COUNT(DISTINCT *) with GROUP BY	PASS	
 aggregates	COUNT: no GROUP BY inside of GRAPH	FAIL	named-graph
-aggregates	COUNT: no match, no group	FAIL	data-format
-aggregates	COUNT: no match, with group	FAIL	data-format
+aggregates	COUNT: no match, no group	PASS	
+aggregates	COUNT: no match, with group	PASS	
 aggregates	Error in AVG	FAIL	semantic
 aggregates	GROUP BY with a built-in function	PASS	
 aggregates	GROUP BY with a function	PASS	
 aggregates	GROUP_CONCAT 1	PASS	
 aggregates	GROUP_CONCAT 2	PASS	
-aggregates	GROUP_CONCAT DISTINCT	FAIL	data-format
+aggregates	GROUP_CONCAT DISTINCT	FAIL	semantic
 aggregates	GROUP_CONCAT with SEPARATOR	PASS	
-aggregates	GROUP_CONCAT with different language tags	FAIL	data-format
-aggregates	GROUP_CONCAT with one element	FAIL	data-format
-aggregates	GROUP_CONCAT with same language tag	FAIL	data-format
+aggregates	GROUP_CONCAT with different language tags	PASS	
+aggregates	GROUP_CONCAT with one element	FAIL	semantic
+aggregates	GROUP_CONCAT with same language tag	FAIL	semantic
 aggregates	HAVING: multiple conditions	FAIL	other
 aggregates	MAX	PASS	
 aggregates	MAX DISTINCT with GROUP BY	PASS	
@@ -53,21 +53,21 @@ aggregates	SAMPLE DISTINCT	PASS
 aggregates	SUM	FAIL	semantic
 aggregates	SUM DISTINCT with GROUP BY	PASS	
 aggregates	SUM with GROUP BY	PASS	
-aggregates	agg on empty set, explicit grouping	FAIL	data-format
-aggregates	agg on empty set, no grouping	FAIL	data-format
+aggregates	agg on empty set, explicit grouping	PASS	
+aggregates	agg on empty set, no grouping	PASS	
 basic-update	INSERT 01	PASS	
 basic-update	INSERT 02	FAIL	parse-error
 basic-update	INSERT 03	FAIL	parse-error
 basic-update	INSERT 04	FAIL	parse-error
 basic-update	INSERT USING 01	FAIL	parse-error
-basic-update	INSERT same bnode twice	FAIL	data-format
-basic-update	INSERTing the same bnode with INSERT DATA into two different Graphs is the same bnode	FAIL	data-format
+basic-update	INSERT same bnode twice	FAIL	parse-error
+basic-update	INSERTing the same bnode with INSERT DATA into two different Graphs is the same bnode	FAIL	parse-error
 basic-update	INSERTing the same bnode with two INSERT WHERE statement within one request is NOT the same bnode	FAIL	parse-error
 basic-update	INSERTing the same bnode with two INSERT WHERE statement within one request is NOT the same bnode even if both WHERE clauses have the empty solution mapping as the only solution.	FAIL	parse-error
-basic-update	Simple insert data 1	FAIL	data-format
-basic-update	Simple insert data named 1	FAIL	data-format
-basic-update	Simple insert data named 2	FAIL	data-format
-basic-update	Simple insert data named 3	FAIL	data-format
+basic-update	Simple insert data 1	PASS	
+basic-update	Simple insert data named 1	FAIL	parse-error
+basic-update	Simple insert data named 2	FAIL	parse-error
+basic-update	Simple insert data named 3	FAIL	parse-error
 bind	bind01 - BIND	PASS	
 bind	bind02 - BIND	PASS	
 bind	bind03 - BIND	PASS	
@@ -116,30 +116,30 @@ csv-tsv-res	tsv01 - TSV Result Format	PASS
 csv-tsv-res	tsv02 - TSV Result Format	PASS	
 csv-tsv-res	tsv03 - TSV Result Format	FAIL	semantic
 delete	Graph-specific DELETE 1	FAIL	semantic
-delete	Graph-specific DELETE 1 (USING)	FAIL	data-format
-delete	Graph-specific DELETE 1 (WITH)	FAIL	data-format
+delete	Graph-specific DELETE 1 (USING)	FAIL	parse-error
+delete	Graph-specific DELETE 1 (WITH)	PASS	
 delete	Graph-specific DELETE 2	FAIL	parse-error
-delete	Graph-specific DELETE 2 (USING)	FAIL	data-format
+delete	Graph-specific DELETE 2 (USING)	FAIL	parse-error
 delete	Graph-specific DELETE 2 (WITH)	FAIL	parse-error
 delete	Simple DELETE 1	FAIL	semantic
 delete	Simple DELETE 1 (USING)	FAIL	parse-error
-delete	Simple DELETE 1 (WITH)	FAIL	data-format
-delete	Simple DELETE 2	FAIL	data-format
+delete	Simple DELETE 1 (WITH)	PASS	
+delete	Simple DELETE 2	FAIL	parse-error
 delete	Simple DELETE 2 (USING)	FAIL	parse-error
-delete	Simple DELETE 2 (WITH)	FAIL	data-format
+delete	Simple DELETE 2 (WITH)	FAIL	parse-error
 delete	Simple DELETE 3	PASS	
 delete	Simple DELETE 3 (USING)	FAIL	parse-error
-delete	Simple DELETE 3 (WITH)	FAIL	data-format
-delete	Simple DELETE 4	FAIL	data-format
+delete	Simple DELETE 3 (WITH)	PASS	
+delete	Simple DELETE 4	FAIL	parse-error
 delete	Simple DELETE 4 (USING)	FAIL	parse-error
-delete	Simple DELETE 4 (WITH)	FAIL	data-format
+delete	Simple DELETE 4 (WITH)	FAIL	parse-error
 delete	Simple DELETE 7	PASS	
 delete-data	Graph-specific DELETE DATA 1	PASS	
 delete-data	Graph-specific DELETE DATA 2	FAIL	parse-error
 delete-data	Simple DELETE DATA 1	PASS	
-delete-data	Simple DELETE DATA 2	FAIL	data-format
+delete-data	Simple DELETE DATA 2	FAIL	parse-error
 delete-data	Simple DELETE DATA 3	PASS	
-delete-data	Simple DELETE DATA 4	FAIL	data-format
+delete-data	Simple DELETE DATA 4	FAIL	parse-error
 delete-insert	DELETE INSERT 1	FAIL	semantic
 delete-insert	DELETE INSERT 1b	PASS	
 delete-insert	DELETE INSERT 1c	FAIL	semantic
@@ -160,9 +160,9 @@ delete-insert	Halloween Problem: A delete/insert operation should not be able to
 delete-where	Graph-specific DELETE WHERE 1	PASS	
 delete-where	Graph-specific DELETE WHERE 2	FAIL	parse-error
 delete-where	Simple DELETE WHERE 1	PASS	
-delete-where	Simple DELETE WHERE 2	FAIL	data-format
+delete-where	Simple DELETE WHERE 2	FAIL	parse-error
 delete-where	Simple DELETE WHERE 3	PASS	
-delete-where	Simple DELETE WHERE 4	FAIL	data-format
+delete-where	Simple DELETE WHERE 4	FAIL	parse-error
 drop	DROP ALL	PASS	
 drop	DROP DEFAULT	PASS	
 drop	DROP GRAPH	FAIL	parse-error
@@ -205,10 +205,10 @@ functions	NOT IN 1	PASS
 functions	NOT IN 2	PASS	
 functions	NOW()	PASS	
 functions	RAND()	PASS	
-functions	REPLACE()	FAIL	semantic
-functions	REPLACE() with captured substring	FAIL	semantic
-functions	REPLACE() with overlapping pattern	FAIL	semantic
-functions	REPLACE() with the 'i' option	FAIL	data-format
+functions	REPLACE()	PASS	
+functions	REPLACE() with captured substring	PASS	
+functions	REPLACE() with overlapping pattern	PASS	
+functions	REPLACE() with the 'i' option	PASS	
 functions	ROUND()	PASS	
 functions	SECONDS()	PASS	
 functions	SHA1()	PASS	
@@ -233,7 +233,7 @@ functions	STRLANG(STR())	FAIL	semantic
 functions	STRLEN()	PASS	
 functions	STRLEN() on non-BMP unicode strings	PASS	
 functions	STRSTARTS()	PASS	
-functions	STRUUID() pattern match	FAIL	data-format
+functions	STRUUID() pattern match	FAIL	semantic
 functions	SUBSTR() (2-argument)	PASS	
 functions	SUBSTR() (2-argument) on non-BMP unicode strings	PASS	
 functions	SUBSTR() (3-argument)	PASS	
@@ -242,8 +242,8 @@ functions	TIMEZONE()	PASS
 functions	TZ()	PASS	
 functions	UCASE()	PASS	
 functions	UCASE() on non-BMP unicode strings	PASS	
-functions	UUID() pattern match	FAIL	data-format
-functions	UUID() per binding	FAIL	data-format
+functions	UUID() pattern match	FAIL	semantic
+functions	UUID() per binding	FAIL	semantic
 functions	YEAR()	PASS	
 functions	isNumeric()	PASS	
 functions	plus-1-corrected	PASS	
@@ -307,15 +307,15 @@ property-path	(pp34) Named Graph 1	FAIL	named-graph
 property-path	(pp35) Named Graph 2	FAIL	named-graph
 property-path	(pp36) Arbitrary path with bound endpoints	FAIL	parse-error
 property-path	(pp37) Nested (*)*	FAIL	parse-error
-property-path	* with end being a constant on the empty dataset	FAIL	data-format
-property-path	* with start being a constant on the empty dataset	FAIL	data-format
-property-path	? with end being a constant on the empty dataset	FAIL	data-format
-property-path	? with start being a constant on the empty dataset	FAIL	data-format
+property-path	* with end being a constant on the empty dataset	PASS	
+property-path	* with start being a constant on the empty dataset	FAIL	semantic
+property-path	? with end being a constant on the empty dataset	FAIL	semantic
+property-path	? with start being a constant on the empty dataset	FAIL	semantic
 property-path	Negated Property Set with both direct and inverse properties	FAIL	parse-error
 property-path	Negated Property Set with inverse properties	FAIL	parse-error
 property-path	Negated Property Set with the inverse rdf:type property written using '^a'	FAIL	parse-error
 property-path	Negated Property Set with the rdf:type property written using 'a'	FAIL	parse-error
-property-path	ZeroOrX property paths should only return terms in the graph and not also terms defined in the query	FAIL	data-format
+property-path	ZeroOrX property paths should only return terms in the graph and not also terms defined in the query	PASS	
 subquery	sq01 - Subquery within graph pattern	FAIL	named-graph
 subquery	sq02 - Subquery within graph pattern, graph variable is bound	FAIL	named-graph
 subquery	sq03 - Subquery within graph pattern, graph variable is not bound	FAIL	named-graph
@@ -479,16 +479,16 @@ syntax-update-1	syntax-update-bad-10.ru	PASS
 syntax-update-1	syntax-update-bad-11.ru	PASS	
 syntax-update-1	syntax-update-bad-12.ru	PASS	
 syntax-update-2	syntax-update-other-01	FAIL	parse-error
-update-silent	ADD SILENT	FAIL	data-format
-update-silent	ADD SILENT TO DEFAULT	FAIL	data-format
-update-silent	CLEAR SILENT DEFAULT	FAIL	data-format
+update-silent	ADD SILENT	FAIL	semantic
+update-silent	ADD SILENT TO DEFAULT	FAIL	semantic
+update-silent	CLEAR SILENT DEFAULT	PASS	
 update-silent	CLEAR SILENT GRAPH iri	PASS	
-update-silent	COPY SILENT	FAIL	data-format
-update-silent	COPY SILENT TO DEFAULT	FAIL	data-format
-update-silent	CREATE SILENT iri	FAIL	data-format
-update-silent	DROP SILENT DEFAULT	FAIL	data-format
+update-silent	COPY SILENT	FAIL	semantic
+update-silent	COPY SILENT TO DEFAULT	FAIL	semantic
+update-silent	CREATE SILENT iri	FAIL	semantic
+update-silent	DROP SILENT DEFAULT	PASS	
 update-silent	DROP SILENT GRAPH iri	PASS	
-update-silent	LOAD SILENT	FAIL	data-format
-update-silent	LOAD SILENT INTO	FAIL	data-format
-update-silent	MOVE SILENT	FAIL	data-format
-update-silent	MOVE SILENT TO DEFAULT	FAIL	data-format
+update-silent	LOAD SILENT	PASS	
+update-silent	LOAD SILENT INTO	PASS	
+update-silent	MOVE SILENT	FAIL	semantic
+update-silent	MOVE SILENT TO DEFAULT	FAIL	semantic

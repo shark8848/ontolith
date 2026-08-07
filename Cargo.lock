@@ -377,6 +377,7 @@ dependencies = [
  "ontolith-rdf",
  "ontolith-storage",
  "ontolith-transaction",
+ "regex",
 ]
 
 [[package]]

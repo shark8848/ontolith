@@ -1843,6 +1843,19 @@ fn eval_function(
                 None => Some(strlit(String::new())),
             }
         }
+        "REPLACE" => {
+            let l = str_lit(0)?;
+            let s = str_lit_lex(&l)?.to_owned();
+            let pattern = str_lit_lex(&str_lit(1)?)?.to_owned();
+            let replacement = str_lit_lex(&str_lit(2)?)?.to_owned();
+            let flags = if args.len() >= 4 {
+                str_lit_lex(&str_lit(3)?)?.to_owned()
+            } else {
+                String::new()
+            };
+            let out = regex_replace(&s, &pattern, &replacement, &flags)?;
+            Some(BoundValue::Literal(str_result(&l, out)))
+        }
         "LANG" => match arg(0)? {
             BoundValue::Literal(LiteralValue::Lang { lang, .. }) => {
                 Some(strlit(lang.as_str().to_owned()))
@@ -2046,6 +2059,36 @@ fn lang_matches(tag: &str, range: &str) -> bool {
         || tag
             .strip_prefix(range)
             .is_some_and(|rest| rest.starts_with('-'))
+}
+
+/// SPARQL REPLACE over XPath fn:replace: flags `i`/`s`/`m`/`q` (plus `x`),
+/// `$n` capture references in the replacement, non-overlapping matches.
+fn regex_replace(input: &str, pattern: &str, replacement: &str, flags: &str) -> Option<String> {
+    let mut literal = false;
+    let mut builder = regex::RegexBuilder::new(pattern);
+    for f in flags.chars() {
+        match f {
+            'i' => {
+                builder.case_insensitive(true);
+            }
+            's' => {
+                builder.dot_matches_new_line(true);
+            }
+            'm' => {
+                builder.multi_line(true);
+            }
+            'x' => {
+                builder.ignore_whitespace(true);
+            }
+            'q' => literal = true,
+            _ => return None,
+        }
+    }
+    if literal {
+        builder = regex::RegexBuilder::new(&regex::escape(pattern));
+    }
+    let re = builder.build().ok()?;
+    Some(re.replace_all(input, replacement).into_owned())
 }
 
 /// CEIL/FLOOR/ROUND preserve the numeric datatype of the argument.
