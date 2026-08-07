@@ -92,6 +92,25 @@ pub struct SnapshotRef {
     pub snapshot_id: u64,
     pub read_txn_id: Option<TxnId>,
     pub consistency: ConsistencyLevel,
+    /// Committed version (MVCC commit sequence) captured by the snapshot.
+    /// `0` = genesis (empty) version; a token-only snapshot uses `0`.
+    pub version: u64,
+}
+
+impl SnapshotRef {
+    pub const fn new(
+        snapshot_id: u64,
+        read_txn_id: Option<TxnId>,
+        consistency: ConsistencyLevel,
+        version: u64,
+    ) -> Self {
+        Self {
+            snapshot_id,
+            read_txn_id,
+            consistency,
+            version,
+        }
+    }
 }
 
 /// Aggregate storage statistics for optimizers and observability (SAS-0001 §6).
@@ -107,6 +126,12 @@ pub struct StorageStats {
     pub pending_transactions: u64,
     pub wal_records: u64,
     pub index_kinds_active: u8,
+    /// Committed versions created since startup (monotonic, includes pruned).
+    pub committed_versions: u64,
+    /// Versions removed by MVCC retention pruning.
+    pub pruned_versions: u64,
+    /// Outstanding snapshots pinning a committed version.
+    pub pinned_snapshots: u64,
 }
 
 pub fn status() -> &'static str {

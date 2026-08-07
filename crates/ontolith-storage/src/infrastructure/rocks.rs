@@ -522,6 +522,7 @@ impl StorageEngine for RocksDbStorageEngine {
             snapshot_id: self.next_snapshot_id.fetch_add(1, Ordering::SeqCst),
             read_txn_id,
             consistency,
+            version: 0,
         }
     }
 
@@ -542,6 +543,9 @@ impl StorageEngine for RocksDbStorageEngine {
             pending_transactions: guard.pending_writes.len() as u64,
             wal_records: self.entries().len() as u64,
             index_kinds_active: 6,
+            committed_versions: 0,
+            pruned_versions: 0,
+            pinned_snapshots: 0,
         }
     }
 

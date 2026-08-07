@@ -42,7 +42,7 @@
 | 仓库与 crate 骨架 | 部分完成 | ~95% | 14 crate（+compliance）；Git 已有基线提交 |
 | Phase 0 规划与治理 | 部分完成 | ~60% | 台账 + ADR/RFC 模板 + 依赖登记 + 计划互链；签批仍缺 |
 | Phase 1 核心模型与存储抽象 | 部分完成 | ~75% | L0/L1 文档化；ConsistencyLevel；存储契约固化；序列化 Part II（KO 二进制编解码） |
-| Phase 2 持久化与事务内核 | 部分完成 | ~85% | 内存六索引 + RocksDB 耐久；无真 MVCC / 纯 CF 扫描 |
+| Phase 2 持久化与事务内核 | 部分完成 | ~85% | 内存 MVCC 版本链 + RocksDB 耐久；纯 CF 扫描仍缺 |
 | Phase 3 查询引擎 | 部分完成 | ~96% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）+ SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+ 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 30/30）+ strict 观测轨 + **完整 W3C 套件 manifest 基线（492 条，127 PASS/365 FAIL）** |
 | Phase 4 集群与一致性 MVP | 部分完成 | ~82% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API + 数据面同步接口（快照迁移入队/回执）；无多进程 Raft |
 | Phase 5 接入层与安全基线 | 部分完成 | ~90% | HTTP 全路由 + 文件审计（含哈希链）+ cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
@@ -59,7 +59,7 @@
 |----|--------|------|
 | L0 core | ~90% | KO/Canonical/Error/ConsistencyLevel/序列化 Part II（20 测） |
 | L1 rdf | ~80% | Triple/Quad/Dataset |
-| L2 storage/txn | ~85% | 内存+RocksDB |
+| L2 storage/txn | ~88% | 内存 MVCC 版本链（版本快照/剪枝/WAL 重放重建）+ RocksDB |
 | L3 parser/query | ~96% | 完整核心，非仅 MVP；完整聚合 + SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+子查询（含聚合）+属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ RDF 序列化导出；W3C 子集 required-lite（30/30）+ strict 观测双轨 + 完整 W3C 套件 manifest 基线 |
 | L4 cluster | ~82% | +session/partition/rebalance/commit + HTTP /cluster + 数据面同步（快照迁移/回执）；17 测 |
 | L5 server/security/obs | ~90% | 双后端、文件审计（哈希链）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
@@ -71,7 +71,7 @@
 
 | 优先级 | 焦点 | 负责人 | 目标日期 |
 |--------|------|--------|----------|
-| P0 | L0–L3 底层收尾（编码/字典契约文档、存储真 MVCC、查询代价模型与高级 Update、W3C 欠账提 PASS） | TBD | 进行中 |
+| P0 | L0–L3 底层收尾（编码/字典契约✅、存储 MVCC 版本链✅；查询代价模型与高级 Update、W3C 欠账提 PASS） | TBD | 进行中 |
 | P1 | L4 集群多进程 Raft 实施（P4-02 M1–M3：openraft 适配 → 多进程 HTTP RPC + RocksDB raft CF → 默认运行时切换 + CI 三进程 smoke） | TBD | TBD |
 | P2 | L5 应用层安全与隔离（P5-03 强制租户隔离、P5-02 OIDC/JWT、P5-05 Tracing） | TBD | TBD |
 | P3 | L6 推理应用化（P6-01 规则扩展收尾 → P6-03 接入 server 查询/推理管线 → P6-02 SHACL 补全） | TBD | TBD |
@@ -113,7 +113,7 @@
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
 | P2-01 | RocksDB 适配（抽象层下） | 部分完成 | 80% | `RocksDbStorageEngine` + CF + ADR-0001 | 纯 CF 索引扫描；运维参数调优 |
-| P2-02 | WAL / 快照恢复 / MVCC 基线 | 部分完成 | 75% | 内存+Rocks WAL CF、reopen 恢复、snapshot+consistency | 真 MVCC 版本链 |
+| P2-02 | WAL / 快照恢复 / MVCC 基线 | 部分完成 | 90% | 内存+Rocks WAL CF、reopen 恢复、snapshot+consistency；内存 MVCC 版本链（`versions` 链 + 版本快照 pin/剪枝 + WAL 重放重建，storage 30→35 测） | 版本读取接入 repo 层（by_subject/图按快照版本） |
 | P2-03 | 三元组/四元组物理编码 | 部分完成 | 90% | codec + 六置换键 + CF 落盘 | 列族级索引键直接扫描 |
 | P2-04 | 索引基线 SPO/POS/OSP | 部分完成 | 95% | 六置换增量（内存侧）+ GraphIndex + matching | 命名图六置换；Async 维护 |
 | P2-05 | 可恢复耐久写入路径 | 部分完成 | 85% | RocksDB commit/reopen/delete 单测通过 | fsync 策略/备份演练 |
@@ -255,7 +255,7 @@
 |-----|------|------|--------|----------|
 | WBS-01 | 核心运行时与知识模型 | 部分完成 | ~78% | L0+L1 + 序列化 Part II（`KoCodec`）；Statement KO 挂载仍简 |
 | WBS-02 | 解析与导入 | 部分完成 | ~85% | N-T/N-Q/Turtle/TriG/流式 + 序列化导出（N-T/N-Q）；JSON-LD 未做 |
-| WBS-03 | 存储与事务 | 部分完成 | ~85% | RocksDB 已接；真 MVCC / 纯 CF 扫描仍缺 |
+| WBS-03 | 存储与事务 | 部分完成 | ~85% | RocksDB 已接 + 内存 MVCC 版本链；纯 CF 扫描仍缺 |
 | WBS-04 | 查询与优化 | 部分完成 | ~95% | 完整核心代数+优化+绑定 + 完整聚合（GROUP BY/HAVING）+ SPARQL Update 基线 + 子查询（含聚合）+ 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（30/30）；缺高级 Update 形态 |
 | WBS-05 | 推理与 SHACL | 部分完成 | ~18% | 前向链推理最小集可用；SHACL 基线校验（约束子集 + 逻辑形状 and/or/not + qualifiedValueShape 计数 + closed/ignoredProperties）落地 |
 | WBS-06 | 分布式运行时 | 部分完成 | ~78% | 控制面增强+HTTP + 数据面同步接口；无多进程数据复制 |
@@ -370,6 +370,7 @@
 | 2026-08-07 | Codex | L6：OWL 2 RL 等价与基数规则——`prp-fp`/`prp-ifp`（功能/逆功能属性 → 值/主词 sameAs）、`eq-rep-s/p/o`（sameAs 主/谓/宾替换，HashMap 索引）、`cls-maxc2`（maxCardinality 1 基数键）、`cls-com`（complementOf 一致性 ⊥）；reasoner 47→52 测（forward-chain 25→30），全量测试 255 通过。 |
 | 2026-08-07 | Codex | 计划更新：执行顺序改为自底向上逐层推进（L0→L8，先底层后顶层应用）；§2 焦点表按层重排（P0=L0–L3 底层收尾、P1=L4 多进程 Raft、P2=L5 安全隔离、P3=L6 推理应用化、P4=L7 运维发布）；§8 新增分层后续执行队列，当前光标为 L0–L3 底层收尾。 |
 | 2026-08-07 | Codex | L0/L1 底层契约收尾（自底向上队列首项）——首个实质 RFC [RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)（确定性标识/规范化编码/六置换键/RocksDB 磁盘布局，P0-04 试用 + P1-04 定稿）；[L2-storage-contracts.md](./L2-storage-contracts.md)（P1-02 并发字典契约：线程安全/单调分配/epoch 不可变/批写原子；P1-03 存储接口版本冻结 0.1.0 + 变更流程）。 |
+| 2026-08-07 | Codex | L2：P2-02 内存 MVCC 版本链——`StorageState` 改为不可变提交快照版本链（`versions: BTreeMap<u64, Arc<CommittedGraph>>`，0=genesis）+ `next_version`；`SnapshotRef` 携带 `version`，快照 pin 防剪枝；`prune_versions`/版本保留策略（保留最新+retention+pin+genesis）；`triples_at_version_in_txn`/`quads_at_version` 按版本读取（剪枝回退最旧保留版）；`delete_by_key` 仅在有删除时铸新版本；WAL 重放重建版本链；修正 `prune_locked` 链首 genesis 阻断剪枝的 bug；storage 30→35 测，全量 260 测通过（server 21 测需端口）。 |
 
 ---
 
@@ -382,7 +383,7 @@
 > 当前光标：**L0–L3 底层收尾（本队列首项）**
 
 - [x] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局（2026-08-07）
-- [ ] **L2 存储内核**：P2-02 真 MVCC 版本链 → P2-01 纯 CF 索引扫描 → P2-04 命名图六置换/Async → P2-05 fsync/备份演练
+- [~] **L2 存储内核**：P2-02 真 MVCC 版本链 ✅（2026-08-07，storage 30→35 测）→ P2-01 纯 CF 索引扫描 → P2-04 命名图六置换/Async → P2-05 fsync/备份演练
 - [ ] **L3 查询引擎**：P3-01 高级 Update（LOAD/CLEAR/WITH）→ P3-02 代价模型/统计 → P3-03 HTTP Explain API → P3-04 异步抢占 → P3-05 W3C 欠账逐项提 PASS
 - [ ] **L4 集群**：P4-02 多进程 Raft M1（单节点 openraft 适配）→ M2（多进程 HTTP RPC + RocksDB raft CF）→ M3（默认运行时切换 + CI 三进程 smoke）；P4-01 多进程 RPC、P4-03 跨节点数据搬迁、P4-04 真实网络分区
 - [ ] **L5 接入与安全**：P5-03 强制分库/行级租户隔离 → P5-02 OIDC/JWT → P5-05 Tracing 全链路 → P5-01 gRPC

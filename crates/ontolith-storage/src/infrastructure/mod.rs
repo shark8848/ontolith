@@ -8,9 +8,9 @@ use ontolith_core::domain::{ConsistencyLevel, Iri, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_transaction::domain::TxnId;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(feature = "rocksdb-backend")]
 mod codec;
@@ -72,12 +72,35 @@ impl DictionaryCodec for InMemoryDictionary {
     }
 }
 
+/// Immutable committed graph at one version of the MVCC chain.
 #[derive(Default)]
-struct StorageState {
+struct CommittedGraph {
     default_graph: Vec<Triple>,
-    spo_index: HashMap<NodeId, Vec<Triple>>,
     named_graph_quads: Vec<Quad>,
+}
+
+/// In-memory MVCC state: a commit-versioned chain of immutable graphs plus
+/// staged (uncommitted) writes.
+struct StorageState {
+    /// Version chain keyed by commit sequence; `0` = genesis (empty) version.
+    /// Pruning removes leading entries; `triples_at_version` clamps to the
+    /// oldest retained version when the requested version was pruned.
+    versions: BTreeMap<u64, Arc<CommittedGraph>>,
+    /// Next commit sequence to assign (monotonic, includes pruned versions).
+    next_version: u64,
+    spo_index: HashMap<NodeId, Vec<Triple>>,
     pending_writes: HashMap<TxnId, Vec<WriteOperation>>,
+}
+
+impl Default for StorageState {
+    fn default() -> Self {
+        Self {
+            versions: BTreeMap::from([(0, Arc::new(CommittedGraph::default()))]),
+            next_version: 1,
+            spo_index: HashMap::new(),
+            pending_writes: HashMap::new(),
+        }
+    }
 }
 
 pub struct InMemoryStorageEngine {
@@ -96,6 +119,11 @@ pub struct InMemoryStorageEngine {
     aborted_put_quad_ops_count: AtomicU64,
     aborted_delete_key_ops_count: AtomicU64,
     checkpoint_truncated_count: AtomicU64,
+    pruned_versions_count: AtomicU64,
+    /// Outstanding snapshots: snapshot id → pinned committed version.
+    pinned_snapshots: Mutex<HashMap<u64, u64>>,
+    /// Auto-prune retention applied after each commit/delete (default 16).
+    version_retention: usize,
     wal: Arc<dyn WriteAheadLog>,
 }
 
@@ -116,14 +144,25 @@ pub struct StorageMetricsSnapshot {
     pub checkpoint_truncated_records: u64,
     pub pending_transactions: usize,
     pub wal_records: usize,
+    pub committed_versions: u64,
+    pub pruned_versions: u64,
+    pub pinned_snapshots: u64,
 }
 
 impl InMemoryStorageEngine {
     pub fn new() -> Self {
-        Self::with_wal(Arc::new(InMemoryWal::new()))
+        Self::with_version_retention(16)
     }
 
     pub fn with_wal(wal: Arc<dyn WriteAheadLog>) -> Self {
+        Self::with_wal_and_retention(wal, 16)
+    }
+
+    pub fn with_version_retention(retention: usize) -> Self {
+        Self::with_wal_and_retention(Arc::new(InMemoryWal::new()), retention)
+    }
+
+    fn with_wal_and_retention(wal: Arc<dyn WriteAheadLog>, version_retention: usize) -> Self {
         Self {
             state: RwLock::new(StorageState::default()),
             next_snapshot_id: AtomicU64::new(1),
@@ -140,6 +179,9 @@ impl InMemoryStorageEngine {
             aborted_put_quad_ops_count: AtomicU64::new(0),
             aborted_delete_key_ops_count: AtomicU64::new(0),
             checkpoint_truncated_count: AtomicU64::new(0),
+            pruned_versions_count: AtomicU64::new(0),
+            pinned_snapshots: Mutex::new(HashMap::new()),
+            version_retention,
             wal,
         }
     }
@@ -187,10 +229,20 @@ impl InMemoryStorageEngine {
     }
 
     pub fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
-        let pending_transactions = self
+        let (pending_transactions, committed_versions) = self
             .state
             .read()
-            .map(|state| state.pending_writes.len())
+            .map(|state| {
+                (
+                    state.pending_writes.len(),
+                    state.next_version.saturating_sub(1),
+                )
+            })
+            .unwrap_or((0, 0));
+        let pinned_snapshots = self
+            .pinned_snapshots
+            .lock()
+            .map(|pins| pins.len() as u64)
             .unwrap_or(0);
 
         StorageMetricsSnapshot {
@@ -213,6 +265,9 @@ impl InMemoryStorageEngine {
             checkpoint_truncated_records: self.checkpoint_truncated_count.load(Ordering::SeqCst),
             pending_transactions,
             wal_records: self.wal.entries().len(),
+            committed_versions,
+            pruned_versions: self.pruned_versions_count.load(Ordering::SeqCst),
+            pinned_snapshots,
         }
     }
 
@@ -251,9 +306,7 @@ impl InMemoryStorageEngine {
                         ));
                     };
 
-                    for op in operations {
-                        Self::apply_committed_operation(&mut state, op);
-                    }
+                    Self::commit_into_state(&mut state, operations);
                 }
                 WalPhase::Aborted => {
                     let removed = state.pending_writes.remove(&record.txn_id);
@@ -284,27 +337,60 @@ impl InMemoryStorageEngine {
             aborted_put_quad_ops_count: AtomicU64::new(0),
             aborted_delete_key_ops_count: AtomicU64::new(0),
             checkpoint_truncated_count: AtomicU64::new(0),
+            pruned_versions_count: AtomicU64::new(0),
+            pinned_snapshots: Mutex::new(HashMap::new()),
+            version_retention: 16,
             wal,
         })
     }
 
-    fn remove_by_subject(state: &mut StorageState, subject_id: NodeId) -> usize {
-        let before_default = state.default_graph.len();
-        state.default_graph.retain(|t| t.subject != subject_id);
-        let removed_default = before_default - state.default_graph.len();
-
-        let before_quads = state.named_graph_quads.len();
+    fn latest_committed(state: &StorageState) -> &CommittedGraph {
         state
-            .named_graph_quads
-            .retain(|q| q.triple.subject != subject_id);
-        let removed_quads = before_quads - state.named_graph_quads.len();
+            .versions
+            .last_key_value()
+            .map(|(_, graph)| graph.as_ref())
+            .expect("version chain always contains at least the genesis version")
+    }
+
+    /// Apply a committed write batch as a new immutable version of the chain.
+    fn commit_into_state(state: &mut StorageState, operations: Vec<WriteOperation>) {
+        let latest = Self::latest_committed(state);
+        let mut triples = latest.default_graph.clone();
+        let mut quads = latest.named_graph_quads.clone();
+        for op in operations {
+            Self::apply_committed_op(&mut triples, &mut quads, op);
+        }
+        let seq = state.next_version;
+        state.next_version += 1;
+        state.versions.insert(
+            seq,
+            Arc::new(CommittedGraph {
+                default_graph: triples,
+                named_graph_quads: quads,
+            }),
+        );
+    }
+
+    fn remove_by_subject_vecs(
+        triples: &mut Vec<Triple>,
+        quads: &mut Vec<Quad>,
+        subject_id: NodeId,
+    ) -> usize {
+        let before_default = triples.len();
+        triples.retain(|t| t.subject != subject_id);
+        let removed_default = before_default - triples.len();
+
+        let before_quads = quads.len();
+        quads.retain(|q| q.triple.subject != subject_id);
+        let removed_quads = before_quads - quads.len();
 
         removed_default + removed_quads
     }
 
     fn rebuild_spo_index(state: &mut StorageState) {
         state.spo_index.clear();
-        for triple in &state.default_graph {
+        let triples = Self::latest_committed(state).default_graph.clone();
+        for triple in &triples {
             state
                 .spo_index
                 .entry(triple.subject)
@@ -350,30 +436,61 @@ impl InMemoryStorageEngine {
         }
     }
 
-    fn apply_committed_operation(state: &mut StorageState, op: WriteOperation) {
+    fn apply_committed_op(triples: &mut Vec<Triple>, quads: &mut Vec<Quad>, op: WriteOperation) {
         match op {
             WriteOperation::PutTriple(triple) => {
-                if !state.default_graph.iter().any(|t| t == &triple) {
-                    state.default_graph.push(triple);
+                if !triples.iter().any(|t| t == &triple) {
+                    triples.push(triple);
                 }
             }
             WriteOperation::PutQuad(quad) => {
-                if !state.named_graph_quads.iter().any(|q| q == &quad) {
-                    state.named_graph_quads.push(quad);
+                if !quads.iter().any(|q| q == &quad) {
+                    quads.push(quad);
                 }
             }
             WriteOperation::DeleteTriple(triple) => {
-                state.default_graph.retain(|t| t != &triple);
+                triples.retain(|t| t != &triple);
             }
             WriteOperation::DeleteQuad(quad) => {
-                state.named_graph_quads.retain(|q| q != &quad);
+                quads.retain(|q| q != &quad);
             }
             WriteOperation::DeleteKey(key) => {
                 if let Some(subject_id) = key.components.first().copied() {
-                    let _ = Self::remove_by_subject(state, subject_id);
+                    let _ = Self::remove_by_subject_vecs(triples, quads, subject_id);
                 }
             }
         }
+    }
+
+    /// Prune leading versions beyond `retention` (genesis always kept); a
+    /// version pinned by an outstanding snapshot is never pruned, and the
+    /// newest committed version is always retained.
+    fn prune_locked(&self, state: &mut StorageState, retention: usize) -> usize {
+        let keep = retention.max(1);
+        let pinned: HashSet<u64> = self
+            .pinned_snapshots
+            .lock()
+            .map(|pins| pins.values().copied().collect())
+            .unwrap_or_default();
+        let latest_seq = state.next_version.saturating_sub(1);
+        let mut pruned = 0usize;
+        let seqs: Vec<u64> = state.versions.keys().copied().collect();
+        for seq in seqs {
+            if seq == 0 || seq == latest_seq || pinned.contains(&seq) {
+                continue;
+            }
+            let retained_committed = state.versions.len().saturating_sub(1);
+            if retained_committed <= keep {
+                break;
+            }
+            state.versions.remove(&seq);
+            pruned += 1;
+        }
+        if pruned > 0 {
+            self.pruned_versions_count
+                .fetch_add(pruned as u64, Ordering::SeqCst);
+        }
+        pruned
     }
 }
 
@@ -430,17 +547,18 @@ impl StorageEngine for InMemoryStorageEngine {
         let mut put_quad_ops = 0u64;
         let mut delete_key_ops = 0u64;
 
-        for op in operations {
-            match &op {
+        for op in &operations {
+            match op {
                 WriteOperation::PutTriple(_) => put_triple_ops += 1,
                 WriteOperation::PutQuad(_) => put_quad_ops += 1,
                 WriteOperation::DeleteKey(_)
                 | WriteOperation::DeleteTriple(_)
                 | WriteOperation::DeleteQuad(_) => delete_key_ops += 1,
             }
-            Self::apply_committed_operation(&mut guard, op);
         }
+        Self::commit_into_state(&mut guard, operations);
         Self::rebuild_spo_index(&mut guard);
+        self.prune_locked(&mut guard, self.version_retention);
 
         if let Err(err) = self.wal.append(WalRecord {
             txn_id,
@@ -517,8 +635,23 @@ impl StorageEngine for InMemoryStorageEngine {
             return Ok(0);
         };
 
-        let removed = Self::remove_by_subject(&mut guard, subject_id);
-        Self::rebuild_spo_index(&mut guard);
+        let latest = Self::latest_committed(&guard);
+        let mut triples = latest.default_graph.clone();
+        let mut quads = latest.named_graph_quads.clone();
+        let removed = Self::remove_by_subject_vecs(&mut triples, &mut quads, subject_id);
+        if removed > 0 {
+            let seq = guard.next_version;
+            guard.next_version += 1;
+            guard.versions.insert(
+                seq,
+                Arc::new(CommittedGraph {
+                    default_graph: triples,
+                    named_graph_quads: quads,
+                }),
+            );
+            Self::rebuild_spo_index(&mut guard);
+            self.prune_locked(&mut guard, self.version_retention);
+        }
         Ok(removed)
     }
 
@@ -531,12 +664,16 @@ impl StorageEngine for InMemoryStorageEngine {
         consistency: ConsistencyLevel,
         read_txn_id: Option<TxnId>,
     ) -> SnapshotRef {
+        let version = self
+            .state
+            .read()
+            .map(|state| state.next_version.saturating_sub(1))
+            .unwrap_or(0);
         let snapshot_id = self.next_snapshot_id.fetch_add(1, Ordering::SeqCst);
-        SnapshotRef {
-            snapshot_id,
-            read_txn_id,
-            consistency,
+        if let Ok(mut pins) = self.pinned_snapshots.lock() {
+            pins.insert(snapshot_id, version);
         }
+        SnapshotRef::new(snapshot_id, read_txn_id, consistency, version)
     }
 
     fn stats(&self) -> StorageStats {
@@ -550,7 +687,8 @@ impl StorageEngine for InMemoryStorageEngine {
         let mut objects: Vec<Term> = Vec::new();
         let mut named_graphs = HashSet::new();
 
-        for triple in &guard.default_graph {
+        let latest = Self::latest_committed(&guard);
+        for triple in &latest.default_graph {
             subjects.insert(triple.subject);
             predicates.insert(triple.predicate.clone());
             if !objects.iter().any(|o| o == &triple.object) {
@@ -558,15 +696,15 @@ impl StorageEngine for InMemoryStorageEngine {
             }
         }
 
-        for quad in &guard.named_graph_quads {
+        for quad in &latest.named_graph_quads {
             if let Some(g) = &quad.graph_name {
                 named_graphs.insert(g.clone());
             }
         }
 
         StorageStats {
-            triple_count: guard.default_graph.len() as u64,
-            quad_count: guard.named_graph_quads.len() as u64,
+            triple_count: latest.default_graph.len() as u64,
+            quad_count: latest.named_graph_quads.len() as u64,
             distinct_subjects: subjects.len() as u64,
             distinct_predicates: predicates.len() as u64,
             distinct_objects: objects.len() as u64,
@@ -575,6 +713,13 @@ impl StorageEngine for InMemoryStorageEngine {
             pending_transactions: guard.pending_writes.len() as u64,
             wal_records: self.wal.entries().len() as u64,
             index_kinds_active: 1,
+            committed_versions: guard.next_version.saturating_sub(1),
+            pruned_versions: self.pruned_versions_count.load(Ordering::SeqCst),
+            pinned_snapshots: self
+                .pinned_snapshots
+                .lock()
+                .map(|pins| pins.len() as u64)
+                .unwrap_or(0),
         }
     }
 
@@ -588,7 +733,7 @@ impl StorageEngine for InMemoryStorageEngine {
             Err(_) => return Vec::new(),
         };
 
-        let mut triples = guard.default_graph.clone();
+        let mut triples = Self::latest_committed(&guard).default_graph.clone();
         if let Some(txn_id) = txn_id
             && let Some(operations) = guard.pending_writes.get(&txn_id)
         {
@@ -624,7 +769,7 @@ impl StorageEngine for InMemoryStorageEngine {
             Err(_) => return Vec::new(),
         };
 
-        let mut triples: Vec<Triple> = guard
+        let mut triples: Vec<Triple> = Self::latest_committed(&guard)
             .default_graph
             .iter()
             .filter(|t| &t.predicate == predicate)
@@ -652,7 +797,7 @@ impl StorageEngine for InMemoryStorageEngine {
             Err(_) => return Vec::new(),
         };
 
-        let mut triples: Vec<Triple> = guard
+        let mut triples: Vec<Triple> = Self::latest_committed(&guard)
             .default_graph
             .iter()
             .filter(|t| &t.object == object)
@@ -677,7 +822,81 @@ impl StorageEngine for InMemoryStorageEngine {
     fn named_graph_quads(&self) -> Vec<Quad> {
         self.state
             .read()
-            .map(|s| s.named_graph_quads.clone())
+            .map(|s| Self::latest_committed(&s).named_graph_quads.clone())
+            .unwrap_or_default()
+    }
+
+    fn committed_version(&self) -> u64 {
+        self.state
+            .read()
+            .map(|s| s.next_version.saturating_sub(1))
+            .unwrap_or(0)
+    }
+
+    fn version_count(&self) -> u64 {
+        self.state
+            .read()
+            .map(|s| s.next_version.saturating_sub(1))
+            .unwrap_or(0)
+    }
+
+    fn pruned_version_count(&self) -> u64 {
+        self.pruned_versions_count.load(Ordering::SeqCst)
+    }
+
+    fn pinned_snapshot_count(&self) -> u64 {
+        self.pinned_snapshots
+            .lock()
+            .map(|pins| pins.len() as u64)
+            .unwrap_or(0)
+    }
+
+    fn release_snapshot(&self, snapshot_id: u64) {
+        if let Ok(mut pins) = self.pinned_snapshots.lock() {
+            pins.remove(&snapshot_id);
+        }
+    }
+
+    fn prune_versions(&self, retention: usize) -> Result<usize, OntolithError> {
+        let mut guard = self
+            .state
+            .write()
+            .map_err(|_| OntolithError::InvalidState("storage state lock poisoned"))?;
+        Ok(self.prune_locked(&mut guard, retention))
+    }
+
+    fn triples_at_version_in_txn(&self, version: u64, txn_id: Option<TxnId>) -> Vec<Triple> {
+        let guard = match self.state.read() {
+            Ok(state) => state,
+            Err(_) => return Vec::new(),
+        };
+        let graph = guard
+            .versions
+            .get(&version)
+            .or_else(|| guard.versions.first_key_value().map(|(_, g)| g))
+            .map(|g| g.as_ref());
+        let Some(graph) = graph else {
+            return Vec::new();
+        };
+        let mut triples = graph.default_graph.clone();
+        if let Some(txn_id) = txn_id
+            && let Some(operations) = guard.pending_writes.get(&txn_id)
+        {
+            Self::apply_ops_to_triple_projection(&mut triples, operations, None, None, None);
+        }
+        triples
+    }
+
+    fn quads_at_version(&self, version: u64) -> Vec<Quad> {
+        self.state
+            .read()
+            .map(|s| {
+                s.versions
+                    .get(&version)
+                    .or_else(|| s.versions.first_key_value().map(|(_, g)| g))
+                    .map(|g| g.named_graph_quads.clone())
+                    .unwrap_or_default()
+            })
             .unwrap_or_default()
     }
 }
@@ -856,7 +1075,7 @@ mod tests {
         TripleRepository, WriteAheadLog,
     };
     use crate::domain::{StorageKey, WalPhase, WalRecord, WriteBatch, WriteOperation};
-    use ontolith_core::domain::{Iri, NodeId};
+    use ontolith_core::domain::{ConsistencyLevel, Iri, NodeId};
     use ontolith_core::error::OntolithError;
     use ontolith_rdf::domain::{Quad, Term, Triple};
     use ontolith_transaction::domain::{TxnId, TxnMode};
@@ -1561,5 +1780,232 @@ mod tests {
         assert_eq!(abort_metrics.aborted_transactions, 0);
         assert_eq!(abort_metrics.failed_abort_transactions, 1);
         assert_eq!(abort_metrics.aborted_put_triple_operations, 0);
+    }
+
+    #[test]
+    fn snapshot_reads_old_version_after_later_commit() {
+        let storage = InMemoryStorageEngine::new();
+        let first_txn = TxnId::new(3101);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: first_txn,
+                operations: vec![WriteOperation::PutTriple(Triple {
+                    subject: NodeId::new(1),
+                    predicate: Iri::new("urn:test:mvcc:first"),
+                    object: Term::Iri(Iri::new("urn:test:value")),
+                })],
+            })
+            .expect("first stage should succeed");
+        storage
+            .commit_transaction(first_txn)
+            .expect("first commit should succeed");
+        assert_eq!(storage.committed_version(), 1);
+
+        let snapshot = storage.snapshot_with(ConsistencyLevel::Strong, None);
+        assert_eq!(snapshot.version, 1);
+        assert_eq!(storage.pinned_snapshot_count(), 1);
+
+        let second_txn = TxnId::new(3102);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: second_txn,
+                operations: vec![WriteOperation::PutTriple(Triple {
+                    subject: NodeId::new(2),
+                    predicate: Iri::new("urn:test:mvcc:second"),
+                    object: Term::Iri(Iri::new("urn:test:value")),
+                })],
+            })
+            .expect("second stage should succeed");
+        storage
+            .commit_transaction(second_txn)
+            .expect("second commit should succeed");
+        assert_eq!(storage.committed_version(), 2);
+
+        let snapshot_triples = storage.triples_at_version_in_txn(snapshot.version, None);
+        assert_eq!(snapshot_triples.len(), 1);
+        assert_eq!(snapshot_triples[0].subject, NodeId::new(1));
+        assert_eq!(storage.default_graph_triples().len(), 2);
+
+        storage.release_snapshot(snapshot.snapshot_id);
+        assert_eq!(storage.pinned_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn named_graph_quads_are_versioned() {
+        let storage = InMemoryStorageEngine::new();
+        let graph = Iri::new("urn:graph:mvcc");
+        let first_txn = TxnId::new(3601);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: first_txn,
+                operations: vec![WriteOperation::PutQuad(Quad::in_named_graph(
+                    Triple::new(
+                        NodeId::new(1),
+                        Iri::new("urn:test:p"),
+                        Term::Iri(Iri::new("urn:test:o1")),
+                    ),
+                    graph.clone(),
+                ))],
+            })
+            .expect("first quad stage should succeed");
+        storage
+            .commit_transaction(first_txn)
+            .expect("first commit should succeed");
+
+        let snapshot = storage.snapshot();
+        assert_eq!(snapshot.version, 1);
+
+        let second_txn = TxnId::new(3602);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: second_txn,
+                operations: vec![WriteOperation::PutQuad(Quad::in_named_graph(
+                    Triple::new(
+                        NodeId::new(2),
+                        Iri::new("urn:test:p"),
+                        Term::Iri(Iri::new("urn:test:o2")),
+                    ),
+                    graph.clone(),
+                ))],
+            })
+            .expect("second quad stage should succeed");
+        storage
+            .commit_transaction(second_txn)
+            .expect("second commit should succeed");
+
+        assert_eq!(storage.quads_at_version(snapshot.version).len(), 1);
+        assert_eq!(storage.quads_at_version(2).len(), 2);
+    }
+
+    #[test]
+    fn prune_versions_removes_old_versions_but_keeps_pinned_and_latest() {
+        let storage = InMemoryStorageEngine::with_version_retention(16);
+        for seq in 1..=5u64 {
+            let txn = TxnId::new(3300 + seq as u128);
+            storage
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(seq),
+                        predicate: Iri::new("urn:test:mvcc:prune"),
+                        object: Term::Iri(Iri::new("urn:test:value")),
+                    })],
+                })
+                .expect("stage should succeed");
+            storage
+                .commit_transaction(txn)
+                .expect("commit should succeed");
+        }
+        assert_eq!(storage.committed_version(), 5);
+
+        let snapshot = storage.snapshot();
+        assert_eq!(snapshot.version, 5);
+        assert_eq!(storage.pinned_snapshot_count(), 1);
+
+        let txn = TxnId::new(3306);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![WriteOperation::PutTriple(Triple {
+                    subject: NodeId::new(6),
+                    predicate: Iri::new("urn:test:mvcc:prune"),
+                    object: Term::Iri(Iri::new("urn:test:value")),
+                })],
+            })
+            .expect("stage should succeed");
+        storage
+            .commit_transaction(txn)
+            .expect("commit should succeed");
+        assert_eq!(storage.committed_version(), 6);
+
+        let pruned = storage.prune_versions(1).expect("prune should succeed");
+        assert_eq!(pruned, 4);
+        assert_eq!(storage.pruned_version_count(), 4);
+
+        let pinned_triples = storage.triples_at_version_in_txn(snapshot.version, None);
+        assert_eq!(pinned_triples.len(), 5);
+        assert_eq!(storage.default_graph_triples().len(), 6);
+
+        // A pruned version falls back to the oldest retained version (genesis = empty).
+        assert!(storage.triples_at_version_in_txn(2, None).is_empty());
+
+        storage.release_snapshot(snapshot.snapshot_id);
+        assert_eq!(storage.pinned_snapshot_count(), 0);
+
+        let pruned = storage.prune_versions(1).expect("prune should succeed");
+        assert_eq!(pruned, 1);
+        assert_eq!(storage.pruned_version_count(), 5);
+    }
+
+    #[test]
+    fn delete_by_key_creates_new_committed_version() {
+        let storage = InMemoryStorageEngine::new();
+        let txn = TxnId::new(3401);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![WriteOperation::PutTriple(Triple {
+                    subject: NodeId::new(1),
+                    predicate: Iri::new("urn:test:mvcc:delete"),
+                    object: Term::Iri(Iri::new("urn:test:value")),
+                })],
+            })
+            .expect("stage should succeed");
+        storage
+            .commit_transaction(txn)
+            .expect("commit should succeed");
+        assert_eq!(storage.committed_version(), 1);
+
+        let removed = storage
+            .delete_by_key(&StorageKey {
+                index: "S",
+                components: vec![NodeId::new(1)],
+            })
+            .expect("delete should succeed");
+        assert_eq!(removed, 1);
+        assert_eq!(storage.committed_version(), 2);
+        assert_eq!(storage.version_count(), 2);
+        assert!(storage.default_graph_triples().is_empty());
+
+        // Deleting a missing subject must not mint a version.
+        let removed = storage
+            .delete_by_key(&StorageKey {
+                index: "S",
+                components: vec![NodeId::new(99)],
+            })
+            .expect("delete should succeed");
+        assert_eq!(removed, 0);
+        assert_eq!(storage.committed_version(), 2);
+    }
+
+    #[test]
+    fn wal_replay_rebuilds_version_chain() {
+        let storage = InMemoryStorageEngine::new();
+        for seq in 1..=3u64 {
+            let txn = TxnId::new(3500 + seq as u128);
+            storage
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: vec![WriteOperation::PutTriple(Triple {
+                        subject: NodeId::new(seq),
+                        predicate: Iri::new("urn:test:mvcc:replay"),
+                        object: Term::Iri(Iri::new("urn:test:value")),
+                    })],
+                })
+                .expect("stage should succeed");
+            storage
+                .commit_transaction(txn)
+                .expect("commit should succeed");
+        }
+        assert_eq!(storage.committed_version(), 3);
+
+        let replayed = InMemoryStorageEngine::recover_from_wal(&storage.wal_entries())
+            .expect("wal replay should succeed");
+        assert_eq!(replayed.committed_version(), 3);
+        assert_eq!(replayed.version_count(), 3);
+        assert_eq!(replayed.default_graph_triples().len(), 3);
+
+        let snapshot = replayed.snapshot();
+        assert_eq!(snapshot.version, 3);
     }
 }

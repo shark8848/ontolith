@@ -65,6 +65,11 @@ pub trait WriteAheadLog: Send + Sync {
 ///
 /// ## Dedup
 /// PutTriple/PutQuad are set-semantic: inserting an existing statement is a no-op.
+///
+/// ## MVCC (memory engine)
+/// Commits create an immutable version chain; [`SnapshotRef::version`] captures
+/// the commit sequence so later commits do not affect snapshot reads. Engines
+/// without versioning (RocksDB today) fall back to the latest committed state.
 pub trait StorageEngine: Send + Sync {
     fn apply_write_batch(&self, batch: &WriteBatch) -> Result<(), OntolithError>;
 
@@ -83,6 +88,47 @@ pub trait StorageEngine: Send + Sync {
         consistency: ConsistencyLevel,
         read_txn_id: Option<TxnId>,
     ) -> SnapshotRef;
+
+    /// Latest committed version sequence (`0` = genesis; engines without
+    /// versioning report `0`).
+    fn committed_version(&self) -> u64 {
+        0
+    }
+
+    /// Committed versions created since startup (monotonic, includes pruned).
+    fn version_count(&self) -> u64 {
+        1
+    }
+
+    /// Versions removed by retention pruning.
+    fn pruned_version_count(&self) -> u64 {
+        0
+    }
+
+    /// Snapshots currently pinning a committed version.
+    fn pinned_snapshot_count(&self) -> u64 {
+        0
+    }
+
+    /// Release a snapshot pin acquired by [`Self::snapshot_with`].
+    fn release_snapshot(&self, _snapshot_id: u64) {}
+
+    /// Prune old versions beyond `retention` (keeps the newest committed
+    /// versions and any version pinned by an outstanding snapshot).
+    fn prune_versions(&self, _retention: usize) -> Result<usize, OntolithError> {
+        Ok(0)
+    }
+
+    /// Read the default graph as of a committed version; pruned versions fall
+    /// back to the oldest retained version.
+    fn triples_at_version_in_txn(&self, _version: u64, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.default_graph_triples_in_txn(txn_id)
+    }
+
+    /// Read named-graph quads as of a committed version.
+    fn quads_at_version(&self, _version: u64) -> Vec<Quad> {
+        self.named_graph_quads()
+    }
 
     fn stats(&self) -> StorageStats;
 

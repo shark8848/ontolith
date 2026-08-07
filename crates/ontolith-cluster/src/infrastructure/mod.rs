@@ -1209,6 +1209,7 @@ mod tests {
             snapshot_id: 42,
             read_txn_id: None,
             consistency: ConsistencyLevel::Strong,
+            version: 0,
         };
 
         assert_eq!(rt.pending_syncs(), 0);
@@ -1234,6 +1235,7 @@ mod tests {
             snapshot_id: 1,
             read_txn_id: None,
             consistency: ConsistencyLevel::Strong,
+            version: 0,
         };
 
         let same = rt.transfer_snapshot(&leader, &leader, ShardId::new(0), slots, snapshot);
@@ -1262,6 +1264,7 @@ mod tests {
                     snapshot_id: 7,
                     read_txn_id: None,
                     consistency: ConsistencyLevel::Strong,
+                    version: 0,
                 },
             )
             .unwrap();
