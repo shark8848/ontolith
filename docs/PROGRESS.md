@@ -113,7 +113,7 @@
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
 | P2-01 | RocksDB 适配（抽象层下） | 部分完成 | 80% | `RocksDbStorageEngine` + CF + ADR-0001 | 纯 CF 索引扫描；运维参数调优 |
-| P2-02 | WAL / 快照恢复 / MVCC 基线 | 部分完成 | 90% | 内存+Rocks WAL CF、reopen 恢复、snapshot+consistency；内存 MVCC 版本链（`versions` 链 + 版本快照 pin/剪枝 + WAL 重放重建，storage 30→35 测） | 版本读取接入 repo 层（by_subject/图按快照版本） |
+| P2-02 | WAL / 快照恢复 / MVCC 基线 | 部分完成 | 95% | 内存+Rocks WAL CF、reopen 恢复、snapshot+consistency；内存 MVCC 版本链（`versions` 链 + 版本快照 pin/剪枝 + WAL 重放重建，storage 30→38 测）；repo 层按版本读取（`*_at_version_*`：all/by_subject/by_predicate/by_object/matching + 图 quads） | RocksDB 磁盘 MVCC 版本链（跨重启持久） |
 | P2-03 | 三元组/四元组物理编码 | 部分完成 | 90% | codec + 六置换键 + CF 落盘 | 列族级索引键直接扫描 |
 | P2-04 | 索引基线 SPO/POS/OSP | 部分完成 | 95% | 六置换增量（内存侧）+ GraphIndex + matching | 命名图六置换；Async 维护 |
 | P2-05 | 可恢复耐久写入路径 | 部分完成 | 85% | RocksDB commit/reopen/delete 单测通过 | fsync 策略/备份演练 |
@@ -371,6 +371,7 @@
 | 2026-08-07 | Codex | 计划更新：执行顺序改为自底向上逐层推进（L0→L8，先底层后顶层应用）；§2 焦点表按层重排（P0=L0–L3 底层收尾、P1=L4 多进程 Raft、P2=L5 安全隔离、P3=L6 推理应用化、P4=L7 运维发布）；§8 新增分层后续执行队列，当前光标为 L0–L3 底层收尾。 |
 | 2026-08-07 | Codex | L0/L1 底层契约收尾（自底向上队列首项）——首个实质 RFC [RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)（确定性标识/规范化编码/六置换键/RocksDB 磁盘布局，P0-04 试用 + P1-04 定稿）；[L2-storage-contracts.md](./L2-storage-contracts.md)（P1-02 并发字典契约：线程安全/单调分配/epoch 不可变/批写原子；P1-03 存储接口版本冻结 0.1.0 + 变更流程）。 |
 | 2026-08-07 | Codex | L2：P2-02 内存 MVCC 版本链——`StorageState` 改为不可变提交快照版本链（`versions: BTreeMap<u64, Arc<CommittedGraph>>`，0=genesis）+ `next_version`；`SnapshotRef` 携带 `version`，快照 pin 防剪枝；`prune_versions`/版本保留策略（保留最新+retention+pin+genesis）；`triples_at_version_in_txn`/`quads_at_version` 按版本读取（剪枝回退最旧保留版）；`delete_by_key` 仅在有删除时铸新版本；WAL 重放重建版本链；修正 `prune_locked` 链首 genesis 阻断剪枝的 bug；storage 30→35 测，全量 260 测通过（server 21 测需端口）。 |
+| 2026-08-07 | Codex | L2：P2-02 续——repo 层按版本读取接入——`TripleRepository` 新增 `all/by_subject/by_predicate/by_object/matching_at_version_in_txn`、`QuadRepository` 新增 `all_at_version`/`by_graph_name_at_version`（非 MVCC 引擎默认回退最新）；`InMemoryTripleRepository`/`EngineTripleRepository`/`InMemoryQuadRepository` 覆写走引擎版本链；storage 35→38 测，全量 263 测通过。 |
 
 ---
 
@@ -383,7 +384,7 @@
 > 当前光标：**L0–L3 底层收尾（本队列首项）**
 
 - [x] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局（2026-08-07）
-- [~] **L2 存储内核**：P2-02 真 MVCC 版本链 ✅（2026-08-07，storage 30→35 测）→ P2-01 纯 CF 索引扫描 → P2-04 命名图六置换/Async → P2-05 fsync/备份演练
+- [~] **L2 存储内核**：P2-02 真 MVCC 版本链 ✅（2026-08-07，storage 30→38 测）→ P2-01 纯 CF 索引扫描 → P2-04 命名图六置换/Async → P2-05 fsync/备份演练
 - [ ] **L3 查询引擎**：P3-01 高级 Update（LOAD/CLEAR/WITH）→ P3-02 代价模型/统计 → P3-03 HTTP Explain API → P3-04 异步抢占 → P3-05 W3C 欠账逐项提 PASS
 - [ ] **L4 集群**：P4-02 多进程 Raft M1（单节点 openraft 适配）→ M2（多进程 HTTP RPC + RocksDB raft CF）→ M3（默认运行时切换 + CI 三进程 smoke）；P4-01 多进程 RPC、P4-03 跨节点数据搬迁、P4-04 真实网络分区
 - [ ] **L5 接入与安全**：P5-03 强制分库/行级租户隔离 → P5-02 OIDC/JWT → P5-05 Tracing 全链路 → P5-01 gRPC

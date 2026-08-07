@@ -233,6 +233,69 @@ pub trait TripleRepository: Send + Sync {
 
     fn by_object_in_txn(&self, object: &Term, txn_id: Option<TxnId>) -> Vec<Triple>;
 
+    /// Read all default-graph triples as of a committed MVCC version. Engines
+    /// without versioning ignore `version` and return the latest state.
+    fn all_at_version_in_txn(&self, _version: u64, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.all_in_txn(txn_id)
+    }
+
+    fn by_subject_at_version_in_txn(
+        &self,
+        version: u64,
+        subject: NodeId,
+        txn_id: Option<TxnId>,
+    ) -> Vec<Triple> {
+        self.all_at_version_in_txn(version, txn_id)
+            .into_iter()
+            .filter(|triple| triple.subject == subject)
+            .collect()
+    }
+
+    fn by_predicate_at_version_in_txn(
+        &self,
+        version: u64,
+        predicate: &Iri,
+        txn_id: Option<TxnId>,
+    ) -> Vec<Triple> {
+        self.all_at_version_in_txn(version, txn_id)
+            .into_iter()
+            .filter(|triple| &triple.predicate == predicate)
+            .collect()
+    }
+
+    fn by_object_at_version_in_txn(
+        &self,
+        version: u64,
+        object: &Term,
+        txn_id: Option<TxnId>,
+    ) -> Vec<Triple> {
+        self.all_at_version_in_txn(version, txn_id)
+            .into_iter()
+            .filter(|triple| &triple.object == object)
+            .collect()
+    }
+
+    fn matching_at_version_in_txn(
+        &self,
+        version: u64,
+        subject: Option<NodeId>,
+        predicate: Option<&Iri>,
+        object: Option<&Term>,
+        txn_id: Option<TxnId>,
+    ) -> Vec<Triple> {
+        let mut triples = self.all_at_version_in_txn(version, txn_id);
+        if let Some(p) = predicate {
+            triples.retain(|t| &t.predicate == p);
+        }
+        if let Some(o) = object {
+            triples.retain(|t| &t.object == o);
+        }
+        if let Some(s) = subject {
+            triples.retain(|t| t.subject == s);
+        }
+        triples
+    }
+
     fn matching_in_txn(
         &self,
         subject: Option<NodeId>,
@@ -290,6 +353,17 @@ pub trait QuadRepository: Send + Sync {
     fn all(&self) -> Vec<Quad>;
 
     fn by_graph_name(&self, graph_name: &Iri) -> Vec<Quad>;
+
+    /// Read all named-graph quads as of a committed MVCC version. Engines
+    /// without versioning ignore `version` and return the latest state.
+    fn all_at_version(&self, _version: u64) -> Vec<Quad> {
+        self.all()
+    }
+
+    /// Read quads in a graph as of a committed MVCC version.
+    fn by_graph_name_at_version(&self, _version: u64, graph_name: &Iri) -> Vec<Quad> {
+        self.by_graph_name(graph_name)
+    }
 
     fn by_graph_name_in_txn(&self, graph_name: &Iri, txn_id: Option<TxnId>) -> Vec<Quad> {
         let _ = txn_id;

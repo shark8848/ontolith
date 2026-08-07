@@ -979,6 +979,10 @@ impl TripleRepository for InMemoryTripleRepository {
         self.engine.default_graph_triples_in_txn(txn_id)
     }
 
+    fn all_at_version_in_txn(&self, version: u64, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.engine.triples_at_version_in_txn(version, txn_id)
+    }
+
     fn by_subject_in_txn(&self, subject: NodeId, txn_id: Option<TxnId>) -> Vec<Triple> {
         self.engine.triples_by_subject_in_txn(subject, txn_id)
     }
@@ -1014,6 +1018,10 @@ impl TripleRepository for EngineTripleRepository {
 
     fn all_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Triple> {
         self.engine.default_graph_triples_in_txn(txn_id)
+    }
+
+    fn all_at_version_in_txn(&self, version: u64, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.engine.triples_at_version_in_txn(version, txn_id)
     }
 
     fn by_subject_in_txn(&self, subject: NodeId, txn_id: Option<TxnId>) -> Vec<Triple> {
@@ -1059,6 +1067,18 @@ impl QuadRepository for InMemoryQuadRepository {
             .filter(|quad| quad.graph_name.as_ref() == Some(graph_name))
             .collect()
     }
+
+    fn all_at_version(&self, version: u64) -> Vec<Quad> {
+        self.engine.quads_at_version(version)
+    }
+
+    fn by_graph_name_at_version(&self, version: u64, graph_name: &Iri) -> Vec<Quad> {
+        self.engine
+            .quads_at_version(version)
+            .into_iter()
+            .filter(|quad| quad.graph_name.as_ref() == Some(graph_name))
+            .collect()
+    }
 }
 
 pub fn status() -> &'static str {
@@ -1068,7 +1088,8 @@ pub fn status() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        InMemoryDictionary, InMemoryQuadRepository, InMemoryStorageEngine, InMemoryTripleRepository,
+        EngineTripleRepository, InMemoryDictionary, InMemoryQuadRepository, InMemoryStorageEngine,
+        InMemoryTripleRepository,
     };
     use crate::application::{
         DictionaryCodec, QuadRepository, StorageEngine, TransactionalWriteService,
@@ -2007,5 +2028,155 @@ mod tests {
 
         let snapshot = replayed.snapshot();
         assert_eq!(snapshot.version, 3);
+    }
+
+    #[test]
+    fn triple_repository_reads_snapshot_version() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let repo = InMemoryTripleRepository::new(Arc::clone(&engine));
+        let first_txn = TxnId::new(3701);
+        repo.insert(
+            first_txn,
+            Triple::new(
+                NodeId::new(1),
+                Iri::new("urn:test:mvcc:repo"),
+                Term::Iri(Iri::new("urn:test:value")),
+            ),
+        )
+        .expect("first insert should succeed");
+        engine
+            .commit_transaction(first_txn)
+            .expect("first commit should succeed");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.version, 1);
+
+        let second_txn = TxnId::new(3702);
+        repo.insert(
+            second_txn,
+            Triple::new(
+                NodeId::new(2),
+                Iri::new("urn:test:mvcc:repo"),
+                Term::Iri(Iri::new("urn:test:value")),
+            ),
+        )
+        .expect("second insert should succeed");
+        engine
+            .commit_transaction(second_txn)
+            .expect("second commit should succeed");
+
+        assert_eq!(repo.all().len(), 2);
+        let snapshot_triples = repo.all_at_version_in_txn(snapshot.version, None);
+        assert_eq!(snapshot_triples.len(), 1);
+        assert_eq!(snapshot_triples[0].subject, NodeId::new(1));
+
+        assert_eq!(
+            repo.by_subject_at_version_in_txn(snapshot.version, NodeId::new(1), None)
+                .len(),
+            1
+        );
+        assert!(
+            repo.by_subject_at_version_in_txn(snapshot.version, NodeId::new(2), None)
+                .is_empty()
+        );
+        assert_eq!(
+            repo.matching_at_version_in_txn(
+                snapshot.version,
+                None,
+                Some(&Iri::new("urn:test:mvcc:repo")),
+                Some(&Term::Iri(Iri::new("urn:test:value"))),
+                None,
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            repo.by_predicate_at_version_in_txn(2, &Iri::new("urn:test:mvcc:repo"), None)
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn engine_triple_repository_reads_snapshot_version() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let repo = EngineTripleRepository::new(Arc::clone(&engine) as Arc<dyn StorageEngine>);
+        let txn = TxnId::new(3711);
+        repo.insert(
+            txn,
+            Triple::new(
+                NodeId::new(7),
+                Iri::new("urn:test:mvcc:engine-repo"),
+                Term::Iri(Iri::new("urn:test:value")),
+            ),
+        )
+        .expect("insert should succeed");
+        engine
+            .commit_transaction(txn)
+            .expect("commit should succeed");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(repo.all_at_version_in_txn(snapshot.version, None).len(), 1);
+        assert_eq!(
+            repo.by_subject_at_version_in_txn(snapshot.version, NodeId::new(7), None)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn quad_repository_reads_snapshot_version() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let repo = InMemoryQuadRepository::new(Arc::clone(&engine));
+        let graph = Iri::new("urn:graph:mvcc:repo");
+        let first_txn = TxnId::new(3721);
+        repo.insert(
+            first_txn,
+            Quad::in_named_graph(
+                Triple::new(
+                    NodeId::new(1),
+                    Iri::new("urn:test:p"),
+                    Term::Iri(Iri::new("urn:test:o1")),
+                ),
+                graph.clone(),
+            ),
+        )
+        .expect("first quad insert should succeed");
+        engine
+            .commit_transaction(first_txn)
+            .expect("first commit should succeed");
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.version, 1);
+
+        let second_txn = TxnId::new(3722);
+        repo.insert(
+            second_txn,
+            Quad::in_named_graph(
+                Triple::new(
+                    NodeId::new(2),
+                    Iri::new("urn:test:p"),
+                    Term::Iri(Iri::new("urn:test:o2")),
+                ),
+                graph.clone(),
+            ),
+        )
+        .expect("second quad insert should succeed");
+        engine
+            .commit_transaction(second_txn)
+            .expect("second commit should succeed");
+
+        assert_eq!(repo.all().len(), 2);
+        assert_eq!(repo.all_at_version(snapshot.version).len(), 1);
+        assert_eq!(
+            repo.by_graph_name_at_version(snapshot.version, &graph)
+                .len(),
+            1
+        );
+        assert_eq!(repo.by_graph_name_at_version(2, &graph).len(), 2);
+        assert!(
+            repo.by_graph_name_at_version(snapshot.version, &Iri::new("urn:graph:other"))
+                .is_empty()
+        );
     }
 }
