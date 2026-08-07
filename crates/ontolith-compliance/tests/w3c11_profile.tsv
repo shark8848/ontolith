@@ -95,10 +95,10 @@ cast	xsd:double cast	FAIL	parse-error
 cast	xsd:float cast	FAIL	parse-error
 cast	xsd:integer cast	FAIL	parse-error
 cast	xsd:string cast	FAIL	parse-error
-clear	CLEAR ALL	FAIL	parse-error
-clear	CLEAR DEFAULT	FAIL	parse-error
+clear	CLEAR ALL	PASS	
+clear	CLEAR DEFAULT	PASS	
 clear	CLEAR GRAPH	FAIL	parse-error
-clear	CLEAR NAMED	FAIL	parse-error
+clear	CLEAR NAMED	PASS	
 construct	CONSTRUCT list	FAIL	parse-error
 construct	constructwhere01 - CONSTRUCT WHERE	FAIL	semantic
 construct	constructwhere02 - CONSTRUCT WHERE	FAIL	semantic
@@ -115,25 +115,25 @@ copy	COPY 7	FAIL	semantic
 csv-tsv-res	tsv01 - TSV Result Format	FAIL	semantic
 csv-tsv-res	tsv02 - TSV Result Format	FAIL	semantic
 csv-tsv-res	tsv03 - TSV Result Format	FAIL	semantic
-delete	Graph-specific DELETE 1	FAIL	other
+delete	Graph-specific DELETE 1	FAIL	semantic
 delete	Graph-specific DELETE 1 (USING)	FAIL	data-format
 delete	Graph-specific DELETE 1 (WITH)	FAIL	data-format
 delete	Graph-specific DELETE 2	FAIL	parse-error
 delete	Graph-specific DELETE 2 (USING)	FAIL	data-format
 delete	Graph-specific DELETE 2 (WITH)	FAIL	parse-error
-delete	Simple DELETE 1	FAIL	other
+delete	Simple DELETE 1	FAIL	semantic
 delete	Simple DELETE 1 (USING)	FAIL	parse-error
 delete	Simple DELETE 1 (WITH)	FAIL	data-format
 delete	Simple DELETE 2	FAIL	data-format
 delete	Simple DELETE 2 (USING)	FAIL	parse-error
 delete	Simple DELETE 2 (WITH)	FAIL	data-format
-delete	Simple DELETE 3	FAIL	other
+delete	Simple DELETE 3	PASS	
 delete	Simple DELETE 3 (USING)	FAIL	parse-error
 delete	Simple DELETE 3 (WITH)	FAIL	data-format
 delete	Simple DELETE 4	FAIL	data-format
 delete	Simple DELETE 4 (USING)	FAIL	parse-error
 delete	Simple DELETE 4 (WITH)	FAIL	data-format
-delete	Simple DELETE 7	FAIL	other
+delete	Simple DELETE 7	PASS	
 delete-data	Graph-specific DELETE DATA 1	PASS	
 delete-data	Graph-specific DELETE DATA 2	FAIL	parse-error
 delete-data	Simple DELETE DATA 1	PASS	
@@ -142,7 +142,7 @@ delete-data	Simple DELETE DATA 3	PASS
 delete-data	Simple DELETE DATA 4	FAIL	data-format
 delete-insert	DELETE INSERT 1	FAIL	semantic
 delete-insert	DELETE INSERT 1b	PASS	
-delete-insert	DELETE INSERT 1c	FAIL	other
+delete-insert	DELETE INSERT 1c	FAIL	semantic
 delete-insert	DELETE INSERT 2	PASS	
 delete-insert	DELETE INSERT 3	PASS	
 delete-insert	DELETE INSERT 3b	FAIL	accepted-invalid
@@ -151,7 +151,7 @@ delete-insert	DELETE INSERT 4b	PASS
 delete-insert	DELETE INSERT 5	PASS	
 delete-insert	DELETE INSERT 5b	FAIL	semantic
 delete-insert	DELETE INSERT 6	PASS	
-delete-insert	DELETE INSERT 6b	FAIL	other
+delete-insert	DELETE INSERT 6b	PASS	
 delete-insert	DELETE INSERT 7	PASS	
 delete-insert	DELETE INSERT 7b	PASS	
 delete-insert	DELETE INSERT 8	FAIL	accepted-invalid
@@ -159,14 +159,14 @@ delete-insert	DELETE INSERT 9	FAIL	accepted-invalid
 delete-insert	Halloween Problem: A delete/insert operation should not be able to read its own writes	FAIL	parse-error
 delete-where	Graph-specific DELETE WHERE 1	PASS	
 delete-where	Graph-specific DELETE WHERE 2	FAIL	parse-error
-delete-where	Simple DELETE WHERE 1	FAIL	other
+delete-where	Simple DELETE WHERE 1	FAIL	semantic
 delete-where	Simple DELETE WHERE 2	FAIL	data-format
-delete-where	Simple DELETE WHERE 3	FAIL	other
+delete-where	Simple DELETE WHERE 3	PASS	
 delete-where	Simple DELETE WHERE 4	FAIL	data-format
-drop	DROP ALL	FAIL	semantic
-drop	DROP DEFAULT	FAIL	semantic
-drop	DROP GRAPH	FAIL	semantic
-drop	DROP NAMED	FAIL	semantic
+drop	DROP ALL	PASS	
+drop	DROP DEFAULT	PASS	
+drop	DROP GRAPH	FAIL	parse-error
+drop	DROP NAMED	PASS	
 exists	Exists with ground triple	FAIL	parse-error
 exists	Exists with one constant	FAIL	parse-error
 exists	Exists within graph pattern	FAIL	named-graph
@@ -424,10 +424,10 @@ syntax-query	syntax-subquery-01.rq	PASS
 syntax-query	syntax-subquery-02.rq	PASS	
 syntax-query	syntax-subquery-03.rq	PASS	
 syntax-query	utf8 literal using codepoints at notable unicode boundaries	PASS	
-syntax-update-1	syntax-update-01.ru	FAIL	parse-error
-syntax-update-1	syntax-update-02.ru	FAIL	parse-error
-syntax-update-1	syntax-update-03.ru	FAIL	parse-error
-syntax-update-1	syntax-update-04.ru	FAIL	parse-error
+syntax-update-1	syntax-update-01.ru	PASS	
+syntax-update-1	syntax-update-02.ru	PASS	
+syntax-update-1	syntax-update-03.ru	PASS	
+syntax-update-1	syntax-update-04.ru	PASS	
 syntax-update-1	syntax-update-05.ru	PASS	
 syntax-update-1	syntax-update-06.ru	PASS	
 syntax-update-1	syntax-update-07.ru	PASS	
@@ -438,14 +438,14 @@ syntax-update-1	syntax-update-11.ru	PASS
 syntax-update-1	syntax-update-12.ru	PASS	
 syntax-update-1	syntax-update-13.ru	PASS	
 syntax-update-1	syntax-update-14.ru	PASS	
-syntax-update-1	syntax-update-15.ru	FAIL	parse-error
-syntax-update-1	syntax-update-16.ru	FAIL	parse-error
-syntax-update-1	syntax-update-17.ru	FAIL	parse-error
-syntax-update-1	syntax-update-18.ru	FAIL	parse-error
-syntax-update-1	syntax-update-19.ru	FAIL	parse-error
-syntax-update-1	syntax-update-20.ru	FAIL	parse-error
-syntax-update-1	syntax-update-21.ru	FAIL	parse-error
-syntax-update-1	syntax-update-22.ru	FAIL	parse-error
+syntax-update-1	syntax-update-15.ru	PASS	
+syntax-update-1	syntax-update-16.ru	PASS	
+syntax-update-1	syntax-update-17.ru	PASS	
+syntax-update-1	syntax-update-18.ru	PASS	
+syntax-update-1	syntax-update-19.ru	PASS	
+syntax-update-1	syntax-update-20.ru	PASS	
+syntax-update-1	syntax-update-21.ru	PASS	
+syntax-update-1	syntax-update-22.ru	PASS	
 syntax-update-1	syntax-update-23.ru	FAIL	parse-error
 syntax-update-1	syntax-update-24.ru	FAIL	parse-error
 syntax-update-1	syntax-update-25.ru	FAIL	parse-error
@@ -482,12 +482,12 @@ syntax-update-2	syntax-update-other-01	FAIL	parse-error
 update-silent	ADD SILENT	FAIL	data-format
 update-silent	ADD SILENT TO DEFAULT	FAIL	data-format
 update-silent	CLEAR SILENT DEFAULT	FAIL	data-format
-update-silent	CLEAR SILENT GRAPH iri	FAIL	parse-error
+update-silent	CLEAR SILENT GRAPH iri	PASS	
 update-silent	COPY SILENT	FAIL	data-format
 update-silent	COPY SILENT TO DEFAULT	FAIL	data-format
 update-silent	CREATE SILENT iri	FAIL	data-format
 update-silent	DROP SILENT DEFAULT	FAIL	data-format
-update-silent	DROP SILENT GRAPH iri	FAIL	semantic
+update-silent	DROP SILENT GRAPH iri	PASS	
 update-silent	LOAD SILENT	FAIL	data-format
 update-silent	LOAD SILENT INTO	FAIL	data-format
 update-silent	MOVE SILENT	FAIL	data-format

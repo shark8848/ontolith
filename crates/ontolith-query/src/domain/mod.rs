@@ -127,12 +127,35 @@ pub enum UpdateOp {
     DeleteData(Vec<TriplePattern>),
     /// `DELETE { tpl } INSERT { tpl } WHERE { pattern }` (either side may be empty).
     DeleteInsert {
+        /// Target graph from a `WITH <g>` prefix; `None` = default graph.
+        graph: Option<Iri>,
         delete: Vec<TriplePattern>,
         insert: Vec<TriplePattern>,
         where_pattern: Algebra,
     },
     /// `DELETE WHERE { pattern }` — delete every match of the pattern.
-    DeleteWhere(Vec<TriplePattern>),
+    DeleteWhere {
+        /// Target graph from a `WITH <g>` prefix; `None` = default graph.
+        graph: Option<Iri>,
+        patterns: Vec<TriplePattern>,
+    },
+    /// `CLEAR [SILENT] (DEFAULT | NAMED | ALL | GRAPH <iri>)`.
+    Clear { silent: bool, target: GraphTarget },
+    /// `DROP [SILENT] (DEFAULT | NAMED | ALL | GRAPH <iri>)`.
+    Drop { silent: bool, target: GraphTarget },
+    /// `LOAD [SILENT] <source> [INTO GRAPH <target>]` — offline subset: the
+    /// source is a named graph already present in the store and its contents
+    /// are copied into the default graph (or into `target`).
+    Load { silent: bool, source: Iri, into: Option<Iri> },
+}
+
+/// Graph scope for `CLEAR` / `DROP`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphTarget {
+    Default,
+    Named,
+    All,
+    Graph(Iri),
 }
 
 /// Property path subset used by the L3 executor.

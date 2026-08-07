@@ -3,7 +3,7 @@
 use crate::domain::{QueryExplain, QueryPlan, QueryRequest, QueryResult, QueryResultSummary};
 use ontolith_core::domain::{Iri, NodeId};
 use ontolith_core::error::OntolithError;
-use ontolith_rdf::domain::{Term, Triple};
+use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_storage::application::StorageEngine;
 use ontolith_storage::domain::{WriteBatch, WriteOperation};
 use ontolith_transaction::domain::TxnId;
@@ -142,6 +142,21 @@ pub trait UpdateWriteService: Send + Sync {
     fn commit(&self, txn_id: TxnId) -> Result<(), OntolithError>;
 
     fn abort(&self, txn_id: TxnId) -> Result<(), OntolithError>;
+
+    /// Default-graph triples as of `txn_id` (for CLEAR/DROP DEFAULT).
+    fn default_graph_triples(&self, txn_id: Option<TxnId>) -> Vec<Triple>;
+
+    /// All named-graph quads (for CLEAR/DROP NAMED/ALL).
+    fn named_graph_quads(&self) -> Vec<Quad>;
+
+    /// Quads of one named graph (for CLEAR/DROP GRAPH and LOAD).
+    fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Quad> {
+        let _ = txn_id;
+        self.named_graph_quads()
+            .into_iter()
+            .filter(|q| q.graph_name.as_ref() == Some(graph))
+            .collect()
+    }
 }
 
 /// [`UpdateWriteService`] backed by a [`StorageEngine`] (memory or RocksDB).
@@ -171,6 +186,14 @@ impl UpdateWriteService for EngineUpdateWriteService {
 
     fn abort(&self, txn_id: TxnId) -> Result<(), OntolithError> {
         self.engine.abort_transaction(txn_id)
+    }
+
+    fn default_graph_triples(&self, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.engine.default_graph_triples_in_txn(txn_id)
+    }
+
+    fn named_graph_quads(&self) -> Vec<Quad> {
+        self.engine.named_graph_quads()
     }
 }
 

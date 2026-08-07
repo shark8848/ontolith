@@ -3,11 +3,12 @@
 use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
     AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, PathExpression, QueryKind,
-    QueryPlan, QueryRequest, QueryResult, Solution, TermPattern, TriplePattern, UpdateOp,
+    GraphTarget, QueryPlan, QueryRequest, QueryResult, Solution, TermPattern, TriplePattern,
+    UpdateOp,
 };
 use ontolith_core::domain::{Iri, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
-use ontolith_rdf::domain::{Term, Triple};
+use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_storage::domain::WriteOperation;
 use ontolith_transaction::domain::TxnId;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -197,6 +198,7 @@ pub fn execute_update(
         started,
     };
     let mut affected: u64 = 0;
+    let mut staged = false;
 
     let result = (|| -> Result<(), OntolithError> {
         for op in &plan.update_ops {
@@ -209,6 +211,7 @@ pub fn execute_update(
                         .collect();
                     if !ops.is_empty() {
                         write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
                     }
                     affected += triples.len() as u64;
                 }
@@ -220,46 +223,148 @@ pub fn execute_update(
                         .collect();
                     if !ops.is_empty() {
                         write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
                     }
                     affected += triples.len() as u64;
                 }
                 UpdateOp::DeleteInsert {
+                    graph,
                     delete,
                     insert,
                     where_pattern,
                 } => {
-                    let solutions = eval_algebra(where_pattern, &ctx)?;
+                    let scoped = graph.as_ref().map(|g| GraphScopedRead::new(read, write, g));
+                    let op_read: &dyn QueryReadService =
+                        scoped.as_ref().map(|s| s as &dyn QueryReadService).unwrap_or(read);
+                    let op_ctx = ExecCtx {
+                        read: op_read,
+                        txn_id: Some(txn_id),
+                        request,
+                        started,
+                    };
+                    let solutions = eval_algebra(where_pattern, &op_ctx)?;
                     let mut ops = Vec::new();
                     let mut seen = HashSet::new();
                     for sol in &solutions {
-                        for t in materialize_update_triples(delete, sol, read)? {
-                            if seen.insert(triple_key(&t)) {
-                                ops.push(WriteOperation::DeleteTriple(t));
+                        for t in materialize_update_triples(delete, sol, op_read)? {
+                            let key = match graph {
+                                Some(_) => format!("g|{}", triple_key(&t)),
+                                None => triple_key(&t),
+                            };
+                            if seen.insert(key) {
+                                ops.push(match graph {
+                                    Some(g) => {
+                                        WriteOperation::DeleteQuad(Quad::in_named_graph(t, g.clone()))
+                                    }
+                                    None => WriteOperation::DeleteTriple(t),
+                                });
                             }
                         }
-                        for t in materialize_update_triples(insert, sol, read)? {
-                            ops.push(WriteOperation::PutTriple(t));
+                        for t in materialize_update_triples(insert, sol, op_read)? {
+                            ops.push(match graph {
+                                Some(g) => {
+                                    WriteOperation::PutQuad(Quad::in_named_graph(t, g.clone()))
+                                }
+                                None => WriteOperation::PutTriple(t),
+                            });
                         }
                     }
                     if !ops.is_empty() {
                         affected += ops.len() as u64;
                         write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
                     }
                 }
-                UpdateOp::DeleteWhere(patterns) => {
-                    let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &ctx)?;
+                UpdateOp::DeleteWhere { graph, patterns } => {
+                    let scoped = graph.as_ref().map(|g| GraphScopedRead::new(read, write, g));
+                    let op_read: &dyn QueryReadService =
+                        scoped.as_ref().map(|s| s as &dyn QueryReadService).unwrap_or(read);
+                    let op_ctx = ExecCtx {
+                        read: op_read,
+                        txn_id: Some(txn_id),
+                        request,
+                        started,
+                    };
+                    let solutions = eval_algebra(&Algebra::Bgp(patterns.clone()), &op_ctx)?;
                     let mut ops = Vec::new();
                     let mut seen = HashSet::new();
                     for sol in &solutions {
-                        for t in materialize_update_triples(patterns, sol, read)? {
-                            if seen.insert(triple_key(&t)) {
-                                ops.push(WriteOperation::DeleteTriple(t));
+                        for t in materialize_update_triples(patterns, sol, op_read)? {
+                            let key = match graph {
+                                Some(_) => format!("g|{}", triple_key(&t)),
+                                None => triple_key(&t),
+                            };
+                            if seen.insert(key) {
+                                ops.push(match graph {
+                                    Some(g) => {
+                                        WriteOperation::DeleteQuad(Quad::in_named_graph(t, g.clone()))
+                                    }
+                                    None => WriteOperation::DeleteTriple(t),
+                                });
                             }
                         }
                     }
                     if !ops.is_empty() {
                         affected += ops.len() as u64;
                         write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
+                    }
+                }
+                UpdateOp::Clear { target, .. } | UpdateOp::Drop { target, .. } => {
+                    let mut ops = Vec::new();
+                    match target {
+                        GraphTarget::Default => {
+                            for t in write.default_graph_triples(Some(txn_id)) {
+                                ops.push(WriteOperation::DeleteTriple(t));
+                            }
+                        }
+                        GraphTarget::Graph(g) => {
+                            for q in write.quads_in_graph(g, Some(txn_id)) {
+                                ops.push(WriteOperation::DeleteQuad(q));
+                            }
+                        }
+                        GraphTarget::Named => {
+                            for q in write.named_graph_quads() {
+                                ops.push(WriteOperation::DeleteQuad(q));
+                            }
+                        }
+                        GraphTarget::All => {
+                            for t in write.default_graph_triples(Some(txn_id)) {
+                                ops.push(WriteOperation::DeleteTriple(t));
+                            }
+                            for q in write.named_graph_quads() {
+                                ops.push(WriteOperation::DeleteQuad(q));
+                            }
+                        }
+                    }
+                    if !ops.is_empty() {
+                        affected += ops.len() as u64;
+                        write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
+                    }
+                }
+                UpdateOp::Load { source, into, .. } => {
+                    let quads = write.quads_in_graph(source, Some(txn_id));
+                    let mut ops = Vec::new();
+                    match into {
+                        Some(g) => {
+                            for q in quads {
+                                ops.push(WriteOperation::PutQuad(Quad::in_named_graph(
+                                    q.triple,
+                                    g.clone(),
+                                )));
+                            }
+                        }
+                        None => {
+                            for q in quads {
+                                ops.push(WriteOperation::PutTriple(q.triple));
+                            }
+                        }
+                    }
+                    if !ops.is_empty() {
+                        affected += ops.len() as u64;
+                        write.apply_write_batch(txn_id, ops)?;
+                        staged = true;
                     }
                 }
             }
@@ -269,9 +374,15 @@ pub fn execute_update(
     })();
 
     match result {
-        Ok(()) => write.commit(txn_id)?,
+        Ok(()) => {
+            if staged {
+                write.commit(txn_id)?;
+            }
+        }
         Err(e) => {
-            let _ = write.abort(txn_id);
+            if staged {
+                let _ = write.abort(txn_id);
+            }
             return Err(e);
         }
     }
@@ -367,6 +478,78 @@ fn materialize_update_triples(
 
 fn triple_key(t: &Triple) -> String {
     format!("{}|{}|{t:?}", t.subject.get(), t.predicate.as_str())
+}
+
+/// Read view exposing one named graph's quads as the default graph, used by
+/// `WITH <g>` so the WHERE clause matches against graph `g` while IRI→NodeId
+/// dictionary lookups still delegate to the base read service.
+struct GraphScopedRead<'a> {
+    base: &'a dyn QueryReadService,
+    triples: Vec<Triple>,
+}
+
+impl<'a> GraphScopedRead<'a> {
+    fn new(base: &'a dyn QueryReadService, write: &dyn UpdateWriteService, graph: &Iri) -> Self {
+        let triples = write
+            .quads_in_graph(graph, None)
+            .into_iter()
+            .map(|q| q.triple)
+            .collect();
+        Self { base, triples }
+    }
+}
+
+impl QueryReadService for GraphScopedRead<'_> {
+    fn all_triples(&self, _txn_id: Option<TxnId>) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self.triples.clone())
+    }
+
+    fn by_subject(
+        &self,
+        subject: NodeId,
+        _txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
+            .triples
+            .iter()
+            .filter(|t| t.subject == subject)
+            .cloned()
+            .collect())
+    }
+
+    fn by_predicate(
+        &self,
+        predicate: &Iri,
+        _txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
+            .triples
+            .iter()
+            .filter(|t| &t.predicate == predicate)
+            .cloned()
+            .collect())
+    }
+
+    fn by_object(
+        &self,
+        object: &Term,
+        _txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
+            .triples
+            .iter()
+            .filter(|t| &t.object == object)
+            .cloned()
+            .collect())
+    }
+
+    fn node_for_iri(&self, iri: &Iri) -> Result<Option<NodeId>, OntolithError> {
+        self.base.node_for_iri(iri)
+    }
+
+    fn encode_node(&self, value: &str) -> Option<NodeId> {
+        self.base.encode_node(value)
+    }
 }
 
 fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, OntolithError> {

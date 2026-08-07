@@ -52,7 +52,7 @@ SPARQL / RDF text
 | RDF 序列化导出（N-Triples / N-Quads 写出，`SerializeFormat`） | ✅ |
 | JSON-LD | ❌ 明确 Unsupported |
 | SPARQL Update（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE） | ✅ |
-| SPARQL Update 高级形态（LOAD / CLEAR / WITH 图作用域） / DESCRIBE 执行 | ❌ 明确 Unsupported |
+| SPARQL Update 高级形态（CLEAR/DROP 图作用域、WITH 图作用域 DELETE·INSERT…WHERE、LOAD 本地图复制） / DESCRIBE 执行 | ✅（LOAD 为本地命名图复制子集，远程 HTTP 抓取未实现） |
 | 属性路径扩展（分组/嵌套更完整 1.1 语法） | ❌ 后续增强 |
 | 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合） | ✅ |
 | SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE） | ✅ |
@@ -270,7 +270,7 @@ logical 含 `optimize:before->after`。
 ## 6. 已知限制（完整 L3 边界，非“未开工”）
 
 1. **属性路径扩展（分组/嵌套更完整 1.1 语法）**、**高级子查询（相关子查询等）**、**EXISTS/NOT EXISTS**、**SERVICE** 未实现（已支持完整聚合 GROUP BY/HAVING、嵌套 SELECT+LIMIT 子查询、子查询聚合与属性路径最小集 `p1/p2`、`+`、`*`、`?`、`|`、`^`）。HAVING 中聚合调用需匹配投影聚合表达式（重写为别名求值）。  
-2. **SPARQL Update 高级形态（LOAD / CLEAR / WITH 图作用域）** 明确 Unsupported；DATA 块拒绝变量与 blank 节点；DELETE/INSERT 模板中的 blank 节点按未绑定处理（跳过该三元组）。  
+2. **SPARQL Update 高级形态**：已支持 `CLEAR/DROP [SILENT] DEFAULT|NAMED|ALL|GRAPH <g>`、`WITH <g>` 作用于 DELETE·INSERT…WHERE / DELETE WHERE（WHERE 以图 `g` 为默认图匹配，模板写入图 `g`）、`LOAD [SILENT] <src> [INTO GRAPH <g>]`（离线子集：`<src>` 为库内已有命名图，复制到默认图或目标图；远程 HTTP 抓取留待网络层）。`WITH` 仅组合 modify 形态（与规范一致）；DELETE/INSERT 模板中的 blank 节点按未绑定处理（跳过该三元组）；无匹配的更新为空操作不报错。  
 3. **JSON-LD** 未实现。  
 4. JOIN 为嵌套循环式 solution merge（正确优先，非代价模型）。  
 5. CONSTRUCT 模板中的 blank 生成语义为绑定投影，非全规范 blank 唯一化。  
@@ -307,3 +307,4 @@ logical 含 `optimize:before->after`。
 | 2026-08-06 | 2.7.0 | 新增完整聚合：投影聚合表达式（COUNT/SUM/AVG/MIN/MAX、COUNT(DISTINCT)）解析、GROUP BY（变量或 `(expr AS ?alias)`）、HAVING（聚合调用重写为投影别名）、子查询聚合；执行器按组求值（SUM 整数保精、AVG 十进制、MIN/MAX 序比较）；query 32→39 测，W3C 子集 must-pass 25→27/27，全量测试 190 通过 |
 | 2026-08-06 | 2.8.0 | 新增 SPARQL Update：解析 INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE（LOAD/CLEAR/WITH 明确 Unsupported）；`UpdateOp` 域模型 + `QueryResult.affected`；`UpdateWriteService`/`UpdateQueryExecutor`（字典 IRI→NodeId 桥、单事务写、失败回滚）；server 接入写管线；query 39→46 测，W3C 子集 must-pass 27→30/30（skip=0），全量测试 199 通过 |
 | 2026-08-06 | 2.9.0 | 完整 W3C SPARQL 1.1 套件接入（vendored `w3c/rdf-tests` sparql11，941 文件/28 feature）：manifest 驱动 runner `ontolith-compliance/tests/w3c11_suite.rs` 执行 QueryEvaluation/UpdateEvaluation/PositiveSyntax/NegativeSyntax 四类，SRX/SRJ/TSV/CSV + Turtle 图 + ASK 结果比对；`w3c11_profile.tsv` 锁定 492 条基线（127 PASS/365 FAIL，reason-code 分类：parse-error 223 / data-format 52 / semantic 48 / accepted-invalid 17 / named-graph 16 / other 9），drift 防回归；修复 Turtle 数字字面量词法（`.` 不再作分隔符，完整 INTEGER/DECIMAL/DOUBLE 文法 + `.5`），parser 16→17 测 |
+| 2026-08-07 | 2.10.0 | 新增 SPARQL Update 高级形态：`CLEAR/DROP [SILENT] DEFAULT/NAMED/ALL/GRAPH <g>`、`WITH <g>` 图作用域 DELETE·INSERT…WHERE / DELETE WHERE（WHERE 以图 g 为默认图、模板写入图 g）、`LOAD [SILENT] <src> [INTO GRAPH <g>]` 本地命名图复制子集；修复空更新（无匹配 DELETE/CLEAR 空图）误报 “pending storage transaction not found” 的 bug（无写入不提交）；`UpdateWriteService` 增图范围读取（default/named/graph）；query 46→55 测，W3C 套件基线 127→151 PASS（24 项 FAIL→PASS：clear/drop 5、delete/delete-insert/delete-where 4、syntax-update 13、update-silent 2），无回归 |

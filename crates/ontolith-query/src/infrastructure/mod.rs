@@ -234,10 +234,10 @@ mod tests {
     use crate::application::QueryPipeline;
     use crate::domain::{Algebra, BoundValue, QueryRequest, TermPattern};
     use ontolith_core::domain::{Iri, LiteralValue, NodeId};
-    use ontolith_rdf::domain::{Term, Triple};
-    use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
+    use ontolith_rdf::domain::{Quad, Term, Triple};
+    use ontolith_storage::application::{DictionaryCodec, QuadRepository, StorageEngine, TripleRepository};
     use ontolith_storage::infrastructure::{
-        InMemoryDictionary, InMemoryStorageEngine, InMemoryTripleRepository,
+        InMemoryDictionary, InMemoryQuadRepository, InMemoryStorageEngine, InMemoryTripleRepository,
     };
     use ontolith_transaction::domain::TxnId;
     use std::sync::Arc;
@@ -454,19 +454,240 @@ mod tests {
         assert!(err.message().contains("concrete"));
     }
 
-    #[test]
-    fn update_unsupported_forms() {
-        let planner = SimpleQueryPlanner;
-        for q in [
-            "LOAD <http://example.org/g>",
-            "CLEAR ALL",
-            "WITH <http://ex.org/g> DELETE { ?s ?p ?o }",
-        ] {
-            let err = planner
-                .plan(&QueryRequest::new(q))
-                .expect_err("unsupported");
-            assert!(matches!(err, OntolithError::Failed(_)));
+    /// Seed a named graph `g` with `?s <name> ?n` quads.
+    fn seed_named_graph(
+        engine: &Arc<InMemoryStorageEngine>,
+        dict: &Arc<InMemoryDictionary>,
+        graph: &Iri,
+        names: &[(&str, &str)],
+    ) {
+        let quads = InMemoryQuadRepository::new(Arc::clone(engine));
+        let txn = TxnId::new(90);
+        for (s, name) in names {
+            quads
+                .insert(
+                    txn,
+                    Quad::in_named_graph(
+                        Triple {
+                            subject: dict.encode_node(s),
+                            predicate: Iri::new("http://ex.org/name"),
+                            object: Term::Literal(LiteralValue::String((*name).into())),
+                        },
+                        graph.clone(),
+                    ),
+                )
+                .unwrap();
         }
+        engine.commit_transaction(txn).unwrap();
+    }
+
+    fn count_named_quads(engine: &Arc<InMemoryStorageEngine>, graph: &Iri) -> usize {
+        engine
+            .named_graph_quads()
+            .into_iter()
+            .filter(|q| q.graph_name.as_ref() == Some(graph))
+            .count()
+    }
+
+    #[test]
+    fn update_clear_default_keeps_named_graphs() {
+        let (engine, dict, repo) = seed_update();
+        let g = Iri::new("http://ex.org/g1");
+        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p
+            .execute(&QueryRequest::new("CLEAR DEFAULT"))
+            .unwrap();
+        assert_eq!(r.kind, crate::domain::QueryKind::Update);
+        assert_eq!(r.affected, 2);
+        assert_eq!(count_names(&p), 0);
+        assert_eq!(count_named_quads(&engine, &g), 2);
+    }
+
+    #[test]
+    fn update_clear_named_removes_all_named_graphs() {
+        let (engine, dict, repo) = seed_update();
+        let g1 = Iri::new("http://ex.org/g1");
+        let g2 = Iri::new("http://ex.org/g2");
+        seed_named_graph(&engine, &dict, &g1, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        seed_named_graph(&engine, &dict, &g2, &[("http://ex.org/carol", "Carol"), ("http://ex.org/dave", "Dave")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p.execute(&QueryRequest::new("CLEAR NAMED")).unwrap();
+        assert_eq!(r.affected, 4);
+        assert_eq!(count_named_quads(&engine, &g1), 0);
+        assert_eq!(count_named_quads(&engine, &g2), 0);
+        assert_eq!(count_names(&p), 2);
+    }
+
+    #[test]
+    fn update_clear_graph_removes_only_that_graph() {
+        let (engine, dict, repo) = seed_update();
+        let g1 = Iri::new("http://ex.org/g1");
+        let g2 = Iri::new("http://ex.org/g2");
+        seed_named_graph(&engine, &dict, &g1, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        seed_named_graph(&engine, &dict, &g2, &[("http://ex.org/carol", "Carol"), ("http://ex.org/dave", "Dave")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p
+            .execute(&QueryRequest::new("CLEAR GRAPH <http://ex.org/g1>"))
+            .unwrap();
+        assert_eq!(r.affected, 2);
+        assert_eq!(count_named_quads(&engine, &g1), 0);
+        assert_eq!(count_named_quads(&engine, &g2), 2);
+        assert_eq!(count_names(&p), 2);
+    }
+
+    #[test]
+    fn update_clear_all_and_drop_all() {
+        let (engine, dict, repo) = seed_update();
+        let g = Iri::new("http://ex.org/g1");
+        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p.execute(&QueryRequest::new("CLEAR ALL")).unwrap();
+        assert_eq!(r.affected, 4);
+        assert_eq!(count_names(&p), 0);
+        assert_eq!(count_named_quads(&engine, &g), 0);
+
+        // DROP GRAPH <missing> is an idempotent no-op; DROP NAMED clears quads.
+        let (engine, dict, repo) = seed_update();
+        let g = Iri::new("http://ex.org/g1");
+        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p
+            .execute(&QueryRequest::new("DROP GRAPH <http://ex.org/missing>"))
+            .unwrap();
+        assert_eq!(r.affected, 0);
+        assert_eq!(count_names(&p), 2);
+        let r = p.execute(&QueryRequest::new("DROP NAMED")).unwrap();
+        assert_eq!(r.affected, 2);
+        assert_eq!(count_named_quads(&engine, &g), 0);
+        assert_eq!(count_names(&p), 2);
+    }
+
+    #[test]
+    fn update_load_copies_named_graph_to_default() {
+        let (engine, dict, repo) = seed_update();
+        let g = Iri::new("http://ex.org/src");
+        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/carol", "Carol"), ("http://ex.org/dave", "Dave")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p
+            .execute(&QueryRequest::new("LOAD <http://ex.org/src>"))
+            .unwrap();
+        assert_eq!(r.affected, 2);
+        // Default graph now holds the seed names plus the loaded copy.
+        assert_eq!(count_names(&p), 4);
+        assert_eq!(count_named_quads(&engine, &g), 2);
+    }
+
+    #[test]
+    fn update_load_into_graph_copies_between_graphs() {
+        let (engine, dict, repo) = seed_update();
+        let src = Iri::new("http://ex.org/src");
+        let dst = Iri::new("http://ex.org/dst");
+        seed_named_graph(&engine, &dict, &src, &[("http://ex.org/carol", "Carol"), ("http://ex.org/dave", "Dave")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p
+            .execute(&QueryRequest::new("LOAD <http://ex.org/src> INTO GRAPH <http://ex.org/dst>"))
+            .unwrap();
+        assert_eq!(r.affected, 2);
+        assert_eq!(count_named_quads(&engine, &src), 2);
+        assert_eq!(count_named_quads(&engine, &dst), 2);
+        assert_eq!(count_names(&p), 2);
+    }
+
+    #[test]
+    fn update_with_delete_insert_targets_named_graph() {
+        let (engine, dict, repo) = seed_update();
+        let g = Iri::new("http://ex.org/g1");
+        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "WITH <http://ex.org/g1> DELETE { ?s <http://ex.org/name> ?n } INSERT { ?s <http://ex.org/renamed> ?n } WHERE { ?s <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        assert_eq!(r.affected, 4);
+        let names = engine
+            .named_graph_quads()
+            .into_iter()
+            .filter(|q| {
+                q.graph_name.as_ref() == Some(&g)
+                    && q.triple.predicate == Iri::new("http://ex.org/name")
+            })
+            .count();
+        assert_eq!(names, 0);
+        let renamed = engine
+            .named_graph_quads()
+            .into_iter()
+            .filter(|q| {
+                q.graph_name.as_ref() == Some(&g)
+                    && q.triple.predicate == Iri::new("http://ex.org/renamed")
+            })
+            .count();
+        assert_eq!(renamed, 2);
+        // Default graph untouched by the WITH-scoped delete/insert.
+        assert_eq!(count_names(&p), 2);
+    }
+
+    #[test]
+    fn update_with_delete_where_removes_only_graph() {
+        let (engine, dict, repo) = seed_update();
+        let g = Iri::new("http://ex.org/g1");
+        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "WITH <http://ex.org/g1> DELETE WHERE { ?s <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        assert_eq!(r.affected, 2);
+        assert_eq!(count_named_quads(&engine, &g), 0);
+        assert_eq!(count_names(&p), 2);
+    }
+
+    #[test]
+    fn update_with_where_reads_target_graph() {
+        let (engine, dict, repo) = seed_update();
+        let g = Iri::new("http://ex.org/g1");
+        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        // The WHERE matches only quads inside the WITH graph, so exactly two
+        // insertions happen (alice/bob of g), not four.
+        let r = p
+            .execute(&QueryRequest::new(
+                "WITH <http://ex.org/g1> INSERT { ?s <http://ex.org/seen> ?n } WHERE { ?s <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        assert_eq!(r.affected, 2);
+        let seen = engine
+            .named_graph_quads()
+            .into_iter()
+            .filter(|q| {
+                q.graph_name.as_ref() == Some(&g)
+                    && q.triple.predicate == Iri::new("http://ex.org/seen")
+            })
+            .count();
+        assert_eq!(seen, 2);
+    }
+
+    #[test]
+    fn update_silent_forms_accepted() {
+        let (engine, dict, repo) = seed_update();
+        let g = Iri::new("http://ex.org/g1");
+        seed_named_graph(&engine, &dict, &g, &[("http://ex.org/alice", "Alice"), ("http://ex.org/bob", "Bob")]);
+        let p = update_pipeline(engine.clone(), dict, repo);
+        let r = p
+            .execute(&QueryRequest::new("LOAD SILENT <http://ex.org/g1>"))
+            .unwrap();
+        assert_eq!(r.affected, 2);
+        let r = p
+            .execute(&QueryRequest::new("CLEAR SILENT GRAPH <http://ex.org/g1>"))
+            .unwrap();
+        assert_eq!(r.affected, 2);
+        assert_eq!(count_named_quads(&engine, &g), 0);
+        let r = p.execute(&QueryRequest::new("DROP SILENT ALL")).unwrap();
+        // Named graph was already cleared above; only default triples remain.
+        assert_eq!(r.affected, 2);
+        assert_eq!(count_names(&p), 0);
     }
 
     #[test]

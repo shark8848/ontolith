@@ -5,8 +5,8 @@
 //! VALUES, DISTINCT, ORDER BY, LIMIT/OFFSET, PREFIX/BASE.
 
 use crate::domain::{
-    AggregateFunction, AggregateSpec, Algebra, Expression, OrderKey, PathExpression, QueryKind,
-    QueryPlan, QueryPlanId, QueryRequest, TermPattern, TriplePattern, UpdateOp,
+    AggregateFunction, AggregateSpec, Algebra, Expression, GraphTarget, OrderKey, PathExpression,
+    QueryKind, QueryPlan, QueryPlanId, QueryRequest, TermPattern, TriplePattern, UpdateOp,
 };
 use ontolith_core::domain::{Iri, LiteralValue};
 use ontolith_core::error::OntolithError;
@@ -78,6 +78,7 @@ impl<'a> SparqlParser<'a> {
             || self.looking_at_keyword("WITH")
             || self.looking_at_keyword("LOAD")
             || self.looking_at_keyword("CLEAR")
+            || self.looking_at_keyword("DROP")
         {
             QueryKind::Update
         } else {
@@ -455,7 +456,8 @@ impl<'a> SparqlParser<'a> {
     fn parse_update_ops(&mut self) -> Result<Vec<UpdateOp>, OntolithError> {
         let mut ops = Vec::new();
         self.skip();
-        if self.eat_keyword("INSERT") {
+        if self.looking_at_keyword("INSERT") {
+            self.eat_keyword("INSERT");
             self.skip();
             if self.eat_keyword("DATA") {
                 self.skip();
@@ -467,12 +469,14 @@ impl<'a> SparqlParser<'a> {
                 self.skip();
                 let where_pattern = self.parse_group_graph_pattern()?;
                 ops.push(UpdateOp::DeleteInsert {
+                    graph: None,
                     delete: Vec::new(),
                     insert,
                     where_pattern,
                 });
             }
-        } else if self.eat_keyword("DELETE") {
+        } else if self.looking_at_keyword("DELETE") {
+            self.eat_keyword("DELETE");
             self.skip();
             if self.eat_keyword("DATA") {
                 self.skip();
@@ -480,7 +484,10 @@ impl<'a> SparqlParser<'a> {
             } else if self.looking_at_keyword("WHERE") {
                 self.eat_keyword("WHERE");
                 self.skip();
-                ops.push(UpdateOp::DeleteWhere(self.parse_construct_template()?));
+                ops.push(UpdateOp::DeleteWhere {
+                    graph: None,
+                    patterns: self.parse_construct_template()?,
+                });
             } else {
                 let delete = self.parse_construct_template()?;
                 self.skip();
@@ -494,19 +501,108 @@ impl<'a> SparqlParser<'a> {
                 self.skip();
                 let where_pattern = self.parse_group_graph_pattern()?;
                 ops.push(UpdateOp::DeleteInsert {
+                    graph: None,
                     delete,
                     insert,
                     where_pattern,
                 });
             }
         } else if self.eat_keyword("WITH") {
-            return Err(self.err("WITH graph-scoped updates are not supported"));
-        } else if self.eat_keyword("LOAD") {
-            return Err(self.err("LOAD remote graph is not supported"));
-        } else if self.eat_keyword("CLEAR") {
-            return Err(self.err("CLEAR graph is not supported"));
+            self.skip();
+            let graph = Iri::new(self.parse_iriref()?);
+            self.skip();
+            // WITH composes only with the modify forms (DELETE/INSERT WHERE).
+            if self.looking_at_keyword("DELETE") {
+                self.eat_keyword("DELETE");
+                self.skip();
+                if self.looking_at_keyword("WHERE") {
+                    self.eat_keyword("WHERE");
+                    self.skip();
+                    ops.push(UpdateOp::DeleteWhere {
+                        graph: Some(graph),
+                        patterns: self.parse_construct_template()?,
+                    });
+                } else {
+                    let delete = self.parse_construct_template()?;
+                    self.skip();
+                    let mut insert = Vec::new();
+                    if self.eat_keyword("INSERT") {
+                        self.skip();
+                        insert = self.parse_construct_template()?;
+                        self.skip();
+                    }
+                    self.expect_keyword("WHERE")?;
+                    self.skip();
+                    let where_pattern = self.parse_group_graph_pattern()?;
+                    ops.push(UpdateOp::DeleteInsert {
+                        graph: Some(graph),
+                        delete,
+                        insert,
+                        where_pattern,
+                    });
+                }
+            } else if self.looking_at_keyword("INSERT") {
+                self.eat_keyword("INSERT");
+                self.skip();
+                let insert = self.parse_construct_template()?;
+                self.skip();
+                self.expect_keyword("WHERE")?;
+                self.skip();
+                let where_pattern = self.parse_group_graph_pattern()?;
+                ops.push(UpdateOp::DeleteInsert {
+                    graph: Some(graph),
+                    delete: Vec::new(),
+                    insert,
+                    where_pattern,
+                });
+            } else {
+                return Err(self.err("expected DELETE or INSERT after WITH"));
+            }
+        } else if self.looking_at_keyword("CLEAR") || self.looking_at_keyword("DROP") {
+            let is_drop = self.eat_keyword("DROP");
+            if !is_drop {
+                self.eat_keyword("CLEAR");
+            }
+            let silent = self.eat_keyword("SILENT");
+            self.skip();
+            let target = if self.eat_keyword("DEFAULT") {
+                GraphTarget::Default
+            } else if self.eat_keyword("NAMED") {
+                GraphTarget::Named
+            } else if self.eat_keyword("ALL") {
+                GraphTarget::All
+            } else if self.eat_keyword("GRAPH") {
+                self.skip();
+                GraphTarget::Graph(Iri::new(self.parse_iriref()?))
+            } else {
+                return Err(self.err("expected DEFAULT/NAMED/ALL/GRAPH after CLEAR/DROP"));
+            };
+            ops.push(if is_drop {
+                UpdateOp::Drop { silent, target }
+            } else {
+                UpdateOp::Clear { silent, target }
+            });
+        } else if self.looking_at_keyword("LOAD") {
+            self.eat_keyword("LOAD");
+            let silent = self.eat_keyword("SILENT");
+            self.skip();
+            let source = Iri::new(self.parse_iriref()?);
+            self.skip();
+            let into = if self.eat_keyword("INTO") {
+                self.skip();
+                self.expect_keyword("GRAPH")?;
+                self.skip();
+                Some(Iri::new(self.parse_iriref()?))
+            } else {
+                None
+            };
+            ops.push(UpdateOp::Load {
+                silent,
+                source,
+                into,
+            });
         } else {
-            return Err(self.err("expected update operation INSERT/DELETE"));
+            return Err(self.err("expected update operation INSERT/DELETE/CLEAR/DROP/LOAD"));
         }
         self.logical.push(format!("update_ops:{}", ops.len()));
         Ok(ops)
