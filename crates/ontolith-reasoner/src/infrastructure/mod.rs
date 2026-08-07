@@ -9,10 +9,11 @@ mod shacl;
 
 use crate::application::Reasoner;
 use crate::domain::{MaterializeOutcome, ReasoningReport, ReasoningTask, Rule};
-use ontolith_core::domain::{Iri, NodeId};
+use ontolith_core::domain::{Iri, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
 use ontolith_storage::application::DictionaryCodec;
+use std::collections::HashMap;
 use std::time::Instant;
 
 pub use shacl::ShaclEngine;
@@ -94,6 +95,8 @@ impl Reasoner for ForwardChainReasoner {
             Rule::SubClassOf,
             Rule::SymmetricProperty,
             Rule::TransitiveProperty,
+            Rule::FunctionalProperty,
+            Rule::InverseFunctionalProperty,
             Rule::InverseOfReverse,
             Rule::HasKey,
             Rule::SomeValuesFrom,
@@ -102,9 +105,14 @@ impl Reasoner for ForwardChainReasoner {
             Rule::IntersectionOf,
             Rule::IntersectionOfTyping,
             Rule::UnionOf,
+            Rule::MaxCardinalityOne,
             Rule::SameAsSymmetric,
             Rule::SameAsTransitive,
+            Rule::EqualityReplacementSubject,
+            Rule::EqualityReplacementPredicate,
+            Rule::EqualityReplacementObject,
             Rule::DisjointClasses,
+            Rule::ComplementClasses,
             Rule::NothingTyping,
             Rule::NothingSubClass,
             Rule::DifferentFromSelf,
@@ -292,6 +300,64 @@ fn apply_rules(
         }
     }
 
+    // prp-fp: functional property — same subject with two values → values sameAs.
+    let functional: Vec<Iri> = closure
+        .iter()
+        .filter_map(|t| {
+            (t.predicate == rdf_type && t.object == Term::Iri(owl("FunctionalProperty")))
+                .then(|| node_iri(t.subject))
+                .flatten()
+        })
+        .collect();
+    for p in &functional {
+        let mut by_subject: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for t in closure {
+            if &t.predicate == p
+                && let Some(o) = subject_node(&t.object)
+            {
+                by_subject.entry(t.subject).or_default().push(o);
+            }
+        }
+        for objects in by_subject.values() {
+            for i in 0..objects.len() {
+                for j in (i + 1)..objects.len() {
+                    if let Some(y2_term) = node_term(objects[j]) {
+                        frontier.push(Triple::new(objects[i], owl("sameAs"), y2_term));
+                    }
+                }
+            }
+        }
+    }
+
+    // prp-ifp: inverse functional property — same value with two subjects → subjects sameAs.
+    let inverse_functional: Vec<Iri> = closure
+        .iter()
+        .filter_map(|t| {
+            (t.predicate == rdf_type && t.object == Term::Iri(owl("InverseFunctionalProperty")))
+                .then(|| node_iri(t.subject))
+                .flatten()
+        })
+        .collect();
+    for p in &inverse_functional {
+        let mut by_value: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for t in closure {
+            if &t.predicate == p
+                && let Some(o) = subject_node(&t.object)
+            {
+                by_value.entry(o).or_default().push(t.subject);
+            }
+        }
+        for subjects in by_value.values() {
+            for i in 0..subjects.len() {
+                for j in (i + 1)..subjects.len() {
+                    if let Some(x2_term) = node_term(subjects[j]) {
+                        frontier.push(Triple::new(subjects[i], owl("sameAs"), x2_term));
+                    }
+                }
+            }
+        }
+    }
+
     // rdfs7/rdfs8: domain and range typing.
     for t in closure {
         let domain_class = closure.iter().find_map(|r| {
@@ -365,6 +431,22 @@ fn apply_rules(
             }
             let (restr, c) = (node_term(t.subject)?, iri_of(&t.object)?);
             Some((restr, c))
+        })
+        .collect();
+    // Restriction nodes with owl:maxCardinality "1"^^xsd:nonNegativeInteger.
+    let max_cardinality_one: Vec<(Term, Iri)> = closure
+        .iter()
+        .filter(|t| {
+            t.predicate == owl("maxCardinality")
+                && t.object == Term::Literal(LiteralValue::Integer(1))
+        })
+        .filter_map(|t| {
+            let restr = node_term(t.subject)?;
+            let p = on_property
+                .iter()
+                .find(|(r, _)| *r == restr)
+                .map(|(_, p)| p.clone())?;
+            Some((restr, p))
         })
         .collect();
 
@@ -453,6 +535,33 @@ fn apply_rules(
                 && let Some(y) = subject_node(&u.object)
             {
                 frontier.push(Triple::new(y, rdf_type.clone(), Term::Iri(c.clone())));
+            }
+        }
+    }
+
+    // cls-maxc2: x rdf:type (p max 1) ∧ x p y1 ∧ x p y2 → y1 owl:sameAs y2.
+    for (restr, p) in &max_cardinality_one {
+        let mut by_subject: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for t in closure {
+            if &t.predicate == p
+                && let Some(o) = subject_node(&t.object)
+            {
+                by_subject.entry(t.subject).or_default().push(o);
+            }
+        }
+        for (x, objects) in &by_subject {
+            let typed = closure
+                .iter()
+                .any(|s| s.subject == *x && s.predicate == rdf_type && s.object == *restr);
+            if !typed {
+                continue;
+            }
+            for i in 0..objects.len() {
+                for j in (i + 1)..objects.len() {
+                    if let Some(y2_term) = node_term(objects[j]) {
+                        frontier.push(Triple::new(objects[i], owl("sameAs"), y2_term));
+                    }
+                }
             }
         }
     }
@@ -664,6 +773,45 @@ fn apply_rules(
         }
     }
 
+    // eq-rep-s/o: propagate values across owl:sameAs in subject/object position.
+    let mut same_as_map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for (a, b) in &same_as {
+        same_as_map.entry(*a).or_default().push(*b);
+    }
+    for t in closure {
+        if let Some(replacements) = same_as_map.get(&t.subject) {
+            for &s2 in replacements {
+                frontier.push(Triple::new(s2, t.predicate.clone(), t.object.clone()));
+            }
+        }
+        if let Some(o_node) = subject_node(&t.object)
+            && let Some(replacements) = same_as_map.get(&o_node)
+        {
+            for &o2 in replacements {
+                if let Some(o2_term) = node_term(o2) {
+                    frontier.push(Triple::new(t.subject, t.predicate.clone(), o2_term));
+                }
+            }
+        }
+    }
+
+    // eq-rep-p: predicate replacement via sameAs predicates.
+    let mut same_as_iri: HashMap<Iri, Vec<Iri>> = HashMap::new();
+    for t in closure {
+        if t.predicate == owl("sameAs")
+            && let (Some(s), Some(o)) = (node_iri(t.subject), iri_of(&t.object))
+        {
+            same_as_iri.entry(s).or_default().push(o);
+        }
+    }
+    for t in closure {
+        if let Some(replacements) = same_as_iri.get(&t.predicate) {
+            for p2 in replacements {
+                frontier.push(Triple::new(t.subject, p2.clone(), t.object.clone()));
+            }
+        }
+    }
+
     // Consistency rules: conclusions are ⊥ and surface as `inconsistent`.
     // Indexes include same-iteration derivations (`frontier`) so chain-triggered
     // contradictions are detected even when `max_iterations == 1`.
@@ -683,6 +831,16 @@ fn apply_rules(
         .iter()
         .filter_map(|t| {
             if t.predicate != owl("disjointWith") {
+                return None;
+            }
+            let (s, o) = (node_iri(t.subject)?, iri_of(&t.object)?);
+            Some((s, o))
+        })
+        .collect();
+    let complement: Vec<(Iri, Iri)> = all
+        .iter()
+        .filter_map(|t| {
+            if t.predicate != owl("complementOf") {
                 return None;
             }
             let (s, o) = (node_iri(t.subject)?, iri_of(&t.object)?);
@@ -724,6 +882,13 @@ fn apply_rules(
             })
         };
         if disjoint
+            .iter()
+            .any(|(a, b)| (a == &c1 && typed(b)) || (b == &c1 && typed(a)))
+        {
+            *inconsistent = true;
+        }
+        // cls-com: x rdf:type ?c1 ∧ x rdf:type ?c2 ∧ ?c1 owl:complementOf ?c2 → ⊥.
+        if complement
             .iter()
             .any(|(a, b)| (a == &c1 && typed(b)) || (b == &c1 && typed(a)))
         {
@@ -1059,6 +1224,13 @@ mod tests {
             "cls-nothing2",
             "eq-diff1",
             "eq-diff2",
+            "prp-fp",
+            "prp-ifp",
+            "eq-rep-s",
+            "eq-rep-p",
+            "eq-rep-o",
+            "cls-com",
+            "cls-maxc2",
         ] {
             assert!(names.contains(&expected), "missing rule {expected}");
         }
@@ -1646,6 +1818,142 @@ mod tests {
             tr.subject == dict.encode_node("urn:alice")
                 && tr.predicate.as_str() == same_as
                 && tr.object == Term::Iri(Iri::new("urn:bob"))
+        }));
+    }
+
+    #[test]
+    fn equality_replacement_propagates_values() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let same_as = format!("{owl}sameAs");
+        let input = vec![
+            t("urn:a", &same_as, "urn:b", &dict),
+            t("urn:a", "urn:p", "urn:v", &dict),
+            t("urn:x", "urn:q", "urn:a", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        let subject_replaced = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:b")
+                && tr.predicate.as_str() == "urn:p"
+                && tr.object == Term::Iri(Iri::new("urn:v"))
+        });
+        let object_replaced = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:x")
+                && tr.predicate.as_str() == "urn:q"
+                && tr.object == Term::Iri(Iri::new("urn:b"))
+        });
+        assert!(subject_replaced, "expected b p v (eq-rep-s)");
+        assert!(object_replaced, "expected x q b (eq-rep-o)");
+    }
+
+    #[test]
+    fn equality_replacement_applies_to_predicates() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let same_as = format!("{owl}sameAs");
+        let input = vec![
+            t("urn:p", &same_as, "urn:q", &dict),
+            t("urn:x", "urn:p", "urn:v", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:x")
+                && tr.predicate.as_str() == "urn:q"
+                && tr.object == Term::Iri(Iri::new("urn:v"))
+        }));
+    }
+
+    #[test]
+    fn functional_property_infers_same_values() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let same_as = format!("{owl}sameAs");
+        let input = vec![
+            t(
+                "urn:p",
+                rdf_type,
+                &format!("{owl}FunctionalProperty"),
+                &dict,
+            ),
+            t("urn:x", "urn:p", "urn:y1", &dict),
+            t("urn:x", "urn:p", "urn:y2", &dict),
+            t(
+                "urn:p2",
+                rdf_type,
+                &format!("{owl}InverseFunctionalProperty"),
+                &dict,
+            ),
+            t("urn:x1", "urn:p2", "urn:v", &dict),
+            t("urn:x2", "urn:p2", "urn:v", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        let fp = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:y1")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:y2"))
+        });
+        let ifp = outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:x1")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:x2"))
+        });
+        assert!(fp, "expected y1 sameAs y2 (prp-fp)");
+        assert!(ifp, "expected x1 sameAs x2 (prp-ifp)");
+    }
+
+    #[test]
+    fn complement_classes_mark_inconsistent() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("urn:Cat", &format!("{owl}complementOf"), "urn:Dog", &dict),
+            t("urn:rex", rdf_type, "urn:Cat", &dict),
+            t("urn:rex", rdf_type, "urn:Dog", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.report.inconsistent, "expected cls-com ⊥");
+    }
+
+    #[test]
+    fn max_cardinality_one_infers_same_values() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let same_as = format!("{owl}sameAs");
+        let input = vec![
+            tl(
+                "_:r",
+                &format!("{owl}maxCardinality"),
+                LiteralValue::Integer(1),
+                &dict,
+            ),
+            t("_:r", &format!("{owl}onProperty"), "urn:p", &dict),
+            tb("urn:x", rdf_type, "_:r", &dict),
+            t("urn:x", "urn:p", "urn:y1", &dict),
+            t("urn:x", "urn:p", "urn:y2", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(outcome.triples.iter().any(|tr| {
+            tr.subject == dict.encode_node("urn:y1")
+                && tr.predicate.as_str() == same_as
+                && tr.object == Term::Iri(Iri::new("urn:y2"))
         }));
     }
 }

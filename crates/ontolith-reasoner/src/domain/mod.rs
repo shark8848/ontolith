@@ -71,6 +71,20 @@ pub enum Rule {
     DifferentFromSelf,
     /// x owl:sameAs y ∧ x owl:differentFrom y → ⊥ (eq-diff2).
     SameAsDifferentFrom,
+    /// ?s owl:sameAs ?s' ∧ ?s ?p ?o → ?s' ?p ?o (eq-rep-s).
+    EqualityReplacementSubject,
+    /// ?p owl:sameAs ?p' ∧ ?s ?p ?o → ?s ?p' ?o (eq-rep-p).
+    EqualityReplacementPredicate,
+    /// ?o owl:sameAs ?o' ∧ ?s ?p ?o → ?s ?p ?o' (eq-rep-o).
+    EqualityReplacementObject,
+    /// p rdf:type owl:FunctionalProperty ∧ x p y1 ∧ x p y2 → y1 owl:sameAs y2 (prp-fp).
+    FunctionalProperty,
+    /// p rdf:type owl:InverseFunctionalProperty ∧ x1 p y ∧ x2 p y → x1 owl:sameAs x2 (prp-ifp).
+    InverseFunctionalProperty,
+    /// ?c1 owl:complementOf ?c2 ∧ x rdf:type ?c1 ∧ x rdf:type ?c2 → ⊥ (cls-com).
+    ComplementClasses,
+    /// x rdf:type (p max 1) ∧ x p y1 ∧ x p y2 → y1 owl:sameAs y2 (cls-maxc2).
+    MaxCardinalityOne,
 }
 
 impl Rule {
@@ -100,6 +114,13 @@ impl Rule {
             Self::NothingSubClass => "cls-nothing2",
             Self::DifferentFromSelf => "eq-diff1",
             Self::SameAsDifferentFrom => "eq-diff2",
+            Self::EqualityReplacementSubject => "eq-rep-s",
+            Self::EqualityReplacementPredicate => "eq-rep-p",
+            Self::EqualityReplacementObject => "eq-rep-o",
+            Self::FunctionalProperty => "prp-fp",
+            Self::InverseFunctionalProperty => "prp-ifp",
+            Self::ComplementClasses => "cls-com",
+            Self::MaxCardinalityOne => "cls-maxc2",
         }
     }
 }

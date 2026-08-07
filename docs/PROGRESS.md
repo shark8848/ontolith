@@ -45,7 +45,7 @@
 | Phase 3 查询引擎 | 部分完成 | ~96% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）+ SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+ 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 30/30）+ strict 观测轨 + **完整 W3C 套件 manifest 基线（492 条，127 PASS/365 FAIL）** |
 | Phase 4 集群与一致性 MVP | 部分完成 | ~82% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API + 数据面同步接口（快照迁移入队/回执）；无多进程 Raft |
 | Phase 5 接入层与安全基线 | 部分完成 | ~90% | HTTP 全路由 + 文件审计（含哈希链）+ cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
-| Phase 6 推理与验证 | 部分完成 | ~55% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、eq-sym/trans、prp-key、一致性 ⊥ 检测 cax-dw/cls-nothing1/2/eq-diff1/2（bnode 感知 + 同迭代检测），迭代上限 + 墙钟超时护栏）可用；**SHACL 基线校验引擎落地（目标/约束子集/逻辑形状/数值范围/属性对 + 验证报告，reasoner 4→47 测）** |
+| Phase 6 推理与验证 | 部分完成 | ~55% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2（bnode 感知 + 同迭代检测），迭代上限 + 墙钟超时护栏）可用；**SHACL 基线校验引擎落地（目标/约束子集/逻辑形状/数值范围/属性对 + 验证报告，reasoner 4→52 测）** |
 | Phase 7 企业运维与发布 | 部分完成 | ~33% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业）+ license 审计 CI 作业；无发布/回滚 |
 | Phase 8 AI-Native 扩展 | 未开始 | 0% | — |
 | **分层内核 L0–L3** | **部分完成** | **~92–96%** | 语义+存储+查询主路径可用，完整聚合/Update/子查询/属性路径最小集（含 `?`）已纳入回归保护 |
@@ -62,7 +62,7 @@
 | L3 parser/query | ~96% | 完整核心，非仅 MVP；完整聚合 + SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+子查询（含聚合）+属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ RDF 序列化导出；W3C 子集 required-lite（30/30）+ strict 观测双轨 + 完整 W3C 套件 manifest 基线 |
 | L4 cluster | ~82% | +session/partition/rebalance/commit + HTTP /cluster + 数据面同步（快照迁移/回执）；17 测 |
 | L5 server/security/obs | ~90% | 双后端、文件审计（哈希链）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
-| L6 reasoner | ~55% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、eq-sym/trans、prp-key（值→成员桶索引）、一致性 ⊥ 检测 cax-dw/cls-nothing1/2/eq-diff1/2（bnode 感知 + 同迭代检测）、迭代上限 + 墙钟超时）+ SHACL 基线校验（目标四选 + 隐式类目标；class/datatype/nodeKind/min-max count/length/pattern(+flags)/in/hasValue/node/and/or/not/数值范围 min-max Inclusive/Exclusive/属性对 equals/disjoint/lessThan/lessThanOrEquals/qualifiedValueShape(+min/max count、disjoint)/closed(+ignoredProperties)；severity/message；ValidationReport）；47 测 |
+| L6 reasoner | ~55% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key（值→成员桶索引）、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2（bnode 感知 + 同迭代检测）、迭代上限 + 墙钟超时）+ SHACL 基线校验（目标四选 + 隐式类目标；class/datatype/nodeKind/min-max count/length/pattern(+flags)/in/hasValue/node/and/or/not/数值范围 min-max Inclusive/Exclusive/属性对 equals/disjoint/lessThan/lessThanOrEquals/qualifiedValueShape(+min/max count、disjoint)/closed(+ignoredProperties)；severity/message；ValidationReport）；52 测 |
 | L7 平台工程 | ~33% | CI workflow + ci-local + compliance crate + systemd 安装脚本 + 管理面 smoke + 窗口化 SLO 校验 + 存储微基准 + license 审计作业 |
 | L8 AI-Native | 0% | — |
 
@@ -166,7 +166,7 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P6-01 | OWL 2 RL 核心规则 | 部分完成 | 82% | `ForwardChainReasoner`：rdfs5/6/7/8/9 + prp-inv1/2 + prp-symp + prp-trp + cax-sco + cls-svf1/2 + cls-avf + cls-int1/2 + cls-uni + eq-sym/trans + prp-key（owl:hasKey 列表键共享值→sameAs，值→成员桶索引）+ 一致性 ⊥ 检测（cax-dw/cls-nothing1/2/eq-diff1/2，`ReasoningReport.inconsistent` 标记；bnode 感知 + 同迭代 frontier 检测）（含 bnode 限定词/列表表达式）、迭代闭包、`InferenceMode` 开关、25 测 | 扩展规则集（eq-rep-s/p/o 等价替换、cls-com、prp-fp/ifp、cls-maxc2 基数键） |
+| P6-01 | OWL 2 RL 核心规则 | 部分完成 | 85% | `ForwardChainReasoner`：rdfs5/6/7/8/9 + prp-inv1/2 + prp-symp + prp-trp + prp-fp（功能属性→值 sameAs）+ prp-ifp（逆功能属性→主词 sameAs）+ cax-sco + cls-svf1/2 + cls-avf + cls-int1/2 + cls-uni + cls-maxc2（maxCardinality 1 → 值 sameAs）+ eq-sym/trans + eq-rep-s/p/o（sameAs 主/谓/宾替换）+ prp-key（owl:hasKey 列表键共享值→sameAs，值→成员桶索引）+ 一致性 ⊥ 检测（cax-dw/cls-com/cls-nothing1/2/eq-diff1/2，`ReasoningReport.inconsistent` 标记；bnode 感知 + 同迭代 frontier 检测）（含 bnode 限定词/列表表达式）、迭代闭包、`InferenceMode` 开关、30 测 | 扩展规则集（cls-hv1/2 hasValue、prp-irp/cax-adc/eq-diff2/3 AllDifferent、prp-chain 属性链） |
 | P6-02 | SHACL 基线验证 | 部分完成 | 75% | `ShaclEngine`（[infrastructure/shacl.rs](../crates/ontolith-reasoner/src/infrastructure/shacl.rs)）：形状解析（节点/属性形状、`sh:property` 嵌套、RDF 列表 `sh:in`/`sh:and`/`sh:or`/`sh:ignoredProperties`）、目标选择（targetClass/targetNode/targetSubjectsOf/targetObjectsOf + sh:class 隐式目标）、约束子集（class/datatype/nodeKind/minCount/maxCount/minLength/maxLength/pattern(+flags)/in/hasValue/node/and/or/not/closed + 数值范围 min-max Inclusive/Exclusive + 属性对 equals/disjoint/lessThan/lessThanOrEquals）、属性形状参数（qualifiedValueShape + qualifiedMinCount/qualifiedMaxCount/qualifiedValueShapesDisjoint、ignoredProperties 并入 closed 白名单）、severity/message、`ValidationReport`（conforms 仅 Violation 判定不合规）；`sh:pattern` 内置小正则子集（全串匹配，无分组/交替，flags 支持 i）；21 测（reasoner 共 25） | 其余约束组件（`sh:languageIn` 等，需语言标签管道重构）与 W3C SHACL 套件接入（需网络） |
 | P6-03 | 可配置推理模式与保护 | 部分完成 | 60% | `InferenceMode` + `max_iterations` 迭代上限 + `max_elapsed_ms` 墙钟超时护栏（`ReasoningReport.timed_out` 标记早停） | 接入 server 查询/推理管线 |
 
@@ -295,7 +295,7 @@
 | ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）+ 哈希链验证/篡改检测（9 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
 | ontolith-observability | sink、导出、采样循环、Prometheus 文本（6 测） | `crates/ontolith-observability/src/**` |
 | ontolith-server | metrics、采样配置、HTTP query decode + 管理面 API/ACL/probe（15 测） | `crates/ontolith-server/src/{api,bootstrap,http,management}.rs` |
-| ontolith-reasoner | 前向链推理（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、eq-sym/trans、prp-key、一致性 ⊥ 检测 cax-dw/cls-nothing1/2/eq-diff1/2、`InferenceMode` 开关 + 迭代/超时护栏 + `ReasoningReport.inconsistent`）+ SHACL 基线校验（目标选择/约束子集/逻辑形状/数值范围/属性对/qualified 计数/报告，47 测） | `crates/ontolith-reasoner/src/infrastructure/{mod,shacl}.rs` |
+| ontolith-reasoner | 前向链推理（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2、`InferenceMode` 开关 + 迭代/超时护栏 + `ReasoningReport.inconsistent`）+ SHACL 基线校验（目标选择/约束子集/逻辑形状/数值范围/属性对/qualified 计数/报告，52 测） | `crates/ontolith-reasoner/src/infrastructure/{mod,shacl}.rs` |
 | ontolith-compliance | R1 烟雾 17 + W3C 子集 profile 1（must-pass 30/30，skip=0）+ 完整 W3C 套件 manifest runner（`w3c11_suite`，492 条基线 profile 锁定） | `crates/ontolith-compliance/tests/**` |
 
 ---
@@ -364,6 +364,7 @@
 | 2026-08-07 | Codex | L6：OWL 2 RL 类表达式与等价——`cls-int1`/`cls-int2`（intersectionOf 正向定型 + 反向全成员定型）、`cls-uni`（unionOf 成员→并集定型）、`eq-sym`/`eq-trans`（owl:sameAs 对称/传递闭包）；RDF 列表成员遍历；reasoner 34→37 测（forward-chain 12→15），全量测试待本波提交前验证。 |
 | 2026-08-07 | Codex | L6：OWL 2 RL 键与一致性规则——`prp-key`（owl:hasKey 列表键全部共享值 → owl:sameAs，支持多键/列表遍历）、一致性 ⊥ 检测（`cax-dw` 互斥类、`cls-nothing1`/2、`eq-diff1`/2；`ReasoningReport.inconsistent` 标记）；reasoner 37→41 测（forward-chain 15→19），全量测试 244 通过。 |
 | 2026-08-07 | Codex | L6：Claude Code 审查修复——F1 prp-key 改值→成员桶索引（消除 O(m^2·k·n^2) 对扫）；F2 eq-sym/eq-trans/eq-diff 改 bnode 感知（NodeId 索引）；F3 一致性规则并入同迭代 frontier（max_iterations=1 也能检出链式 ⊥）；F4 补 6 测（一致输入负断言/单键 hasKey/字面量键值/反向 differentFrom/传递链到 Nothing/环列表）；reasoner 41→47 测（forward-chain 19→25），全量测试 250 通过。 |
+| 2026-08-07 | Codex | L6：OWL 2 RL 等价与基数规则——`prp-fp`/`prp-ifp`（功能/逆功能属性 → 值/主词 sameAs）、`eq-rep-s/p/o`（sameAs 主/谓/宾替换，HashMap 索引）、`cls-maxc2`（maxCardinality 1 基数键）、`cls-com`（complementOf 一致性 ⊥）；reasoner 47→52 测（forward-chain 25→30），全量测试 255 通过。 |
 
 ---
 
