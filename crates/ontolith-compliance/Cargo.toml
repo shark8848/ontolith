@@ -30,6 +30,14 @@ path = "tests/w3c11_suite.rs"
 name = "shacl_suite"
 path = "tests/shacl_suite.rs"
 
+[[test]]
+name = "r2_explain_gate"
+path = "tests/r2_explain_gate.rs"
+
+[[test]]
+name = "r2_reasoner_gate"
+path = "tests/r2_reasoner_gate.rs"
+
 [dev-dependencies]
 quick-xml = "0.37"
 serde_json = "1"

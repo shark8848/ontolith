@@ -198,6 +198,31 @@ jobs:
           echo "raft smoke: majority commit survived follower loss (commit ${commit} -> ${commit2})"
           echo "multi-node raft smoke OK"
 
+  # R2 exit-criteria gates: Explain quality & optimizer stability + reasoner
+  # correctness & performance guardrails (PLAN §6 R2).
+  r2-gates:
+    name: r2 gates (explain + reasoner)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+
+      - name: Explain gate (cost optimizer completeness/stability/preservation)
+        run: cargo test -p ontolith-compliance --test r2_explain_gate -- --nocapture
+
+      - name: Reasoner gate (OWL 2 RL correctness + guardrails)
+        run: cargo test -p ontolith-compliance --test r2_reasoner_gate -- --nocapture
+
   # Required-lite gate: block regressions in must-pass subset without requiring
   # zero known-gap / zero unsupported yet.
   w3c-subset:

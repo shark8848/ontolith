@@ -1,7 +1,7 @@
 //! Rule-based SPARQL algebra optimizer (L3).
 
 use crate::application::{QueryOptimizer, QueryStatistics};
-use crate::domain::{Algebra, PatternCost, QueryPlan, TermPattern, TriplePattern};
+use crate::domain::{Algebra, PathExpression, PatternCost, QueryPlan, TermPattern, TriplePattern};
 use ontolith_core::error::OntolithError;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -459,22 +459,57 @@ fn collect_bgp_estimates(
         | Algebra::Aggregate { input, .. } => {
             collect_bgp_estimates(input, stats, total, out, max_rows);
         }
+        Algebra::Graph { inner, .. } => {
+            collect_bgp_estimates(inner, stats, total, out, max_rows);
+        }
+        // Unknown-cardinality path: uniform worst case (no selectivity
+        // reduction), so path-only queries still carry a cost estimate.
+        Algebra::Path {
+            subject,
+            path,
+            object,
+        } => {
+            let sel = 1.0;
+            out.push(PatternCost {
+                pattern: path_pattern_signature(subject, path, object),
+                selectivity: sel,
+                estimated_rows: (sel * total).ceil() as u64,
+            });
+            let rows = (sel * total).ceil() as u64;
+            *max_rows = Some(max_rows.unwrap_or(0).max(rows));
+        }
         _ => {}
     }
 }
 
 fn pattern_signature(p: &TriplePattern) -> String {
-    let sig = |t: &TermPattern| match t {
+    format!(
+        "{} {} {}",
+        term_pattern_signature(&p.subject),
+        term_pattern_signature(&p.predicate),
+        term_pattern_signature(&p.object)
+    )
+}
+
+fn term_pattern_signature(t: &TermPattern) -> String {
+    match t {
         TermPattern::Variable(v) | TermPattern::Blank(v) => format!("?{v}"),
         TermPattern::Iri(i) => format!("<{}>", i.as_str()),
         TermPattern::Node(n) => format!("node:{}", n.get()),
         TermPattern::Literal(l) => format!("{l:?}"),
-    };
+    }
+}
+
+/// Signature for a `Path` algebra node, e.g. `?s OneOrMore(Predicate(<p>)) ?o`.
+fn path_pattern_signature(
+    subject: &TermPattern,
+    path: &PathExpression,
+    object: &TermPattern,
+) -> String {
     format!(
-        "{} {} {}",
-        sig(&p.subject),
-        sig(&p.predicate),
-        sig(&p.object)
+        "{} {path:?} {}",
+        term_pattern_signature(subject),
+        term_pattern_signature(object)
     )
 }
 

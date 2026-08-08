@@ -274,13 +274,13 @@ sudo -v# Ontolith 开发计划
 
 ### R2（Rust）
 范围：
-- 代价优化。
-- OWL 2 RL 核心。
-- SHACL 基线。✅（约束子集已落地，W3C SHACL 套件未接）
+- 代价优化。✅（`CostBasedOptimizer` + `EngineQueryStatistics`，P3-02）
+- OWL 2 RL 核心。✅（`ForwardChainReasoner`，P6-01）
+- SHACL 基线。✅（W3C SHACL 核心套件 97/98，唯一缺口 uniqueLang-002 词法差异 profile 锁定）
 
 退出标准：
-- Explain 质量与优化稳定性门禁通过。
-- 推理正确性与性能护栏门禁通过。
+- Explain 质量与优化稳定性门禁通过。✅（2026-08-08：`ontolith-compliance` `r2_explain_gate` 5 测 + CI `r2-gates` 作业）
+- 推理正确性与性能护栏门禁通过。✅（2026-08-08：`ontolith-compliance` `r2_reasoner_gate` 7 测 + CI `r2-gates` 作业）
 
 ### R3（Rust）
 范围：

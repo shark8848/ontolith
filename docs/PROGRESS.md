@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.35  
+版本: 0.1.36  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -51,7 +51,7 @@
 | Phase 8 AI-Native 扩展 | 未开始 | 0% | — |
 | **分层内核 L0–L3** | **部分完成** | **~92–96%** | 语义+存储+查询主路径可用，完整聚合/Update/子查询/属性路径最小集（含 `?`）已纳入回归保护 |
 | **相对 R1 退出标准** | **进行中** | **~95%** | 内核+HTTP+集群数据面（多进程 raft M1–M3 + P4-01–P4-04）+ CI/烟雾合规 + W3C 子集 required-lite（30/30）+ 完整 W3C 套件 492/492 全绿 + 核心 SLO 实测达标（success 100%、p95=0ms）+ 恢复/灾备演练 DRILL PASS + 实际发布回滚演练 DRILL PASS + **R1 正式验收包全 PASS**；剩余：OIDC 完整链路（R2+） |
-| **相对 R1–R4 全计划** | **进行中** | **~12–15%** | — |
+| **相对 R1–R4 全计划** | **进行中** | **~16%** | — |
 
 ### 架构分层完成度（实现视图）
 
@@ -307,6 +307,7 @@
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-08 | Codex | **R2 退出标准门禁 DONE（PLAN §6 R2 全项勾选）**：新增 `ontolith-compliance` `r2_explain_gate` 5 测（Explain 完整性——BGP/join/filter/union/left join/distinct/aggregate/construct/ask/path/graph 全类别都有 logical/physical steps + algebra summary + 成本估计；成本合理性——selectivity ∈ (0,1]、estimated_rows ≥ 1；代价序——最选择性 BGP 模式排首；语义保持——cost 管线与 rule 管线结果集逐项一致；稳定性——重复 explain 字节级一致）+ `r2_reasoner_gate` 7 测（OWL 2 RL 正确性——subClassOf 传递闭包/domain·range 定型/对称+传递属性/逆属性/功能属性 sameAs/hasValue；不一致检测——disjointWith + AllDifferent members；属性链 prp-spo2 + hasKey prp-key；护栏——迭代上限部分闭包、墙钟 1ms 超时触发且及时返回、40 节点链 741 推理 5s 预算内收敛、Off 模式原样返回）；优化器补全 Path/Graph 成本估计（Path 统一最坏情形 selectivity=1.0，path-only 查询也可出成本），`pattern_signature` 重构为可复用 term/path 签名；CI 新增 `r2-gates` 作业（needs: check，显式跑两门禁）；query 88 测 + compliance +12 测，W3C 492/492 零漂移，clippy 零警告；PLAN §6 R2 范围与退出标准全部 ✅；PROGRESS.md 0.1.35→0.1.36 |
 | 2026-08-08 | Codex | **项目进度同步至 GitHub Projects #2 DONE（SYNC-PROJ-0001）**：`docs/github-projects-sync.md` 固化同步契约（认证要求——用户级 Projects v2 不支持 fine-grained PAT，实测 FORBIDDEN，需 Classic PAT `project` scope 或 GitHub App 安装令牌；条目映射表；GraphQL 读写操作；同步流程）；Classic PAT 验证通过后全量同步 44 条：P0–P8 交付物 + R1 退出标准全表 + R2 后续轨，Status（Todo/In progress/Done）与 Priority（P0/P1/P2）按 0.1.34 快照写入并回读验证 total=44；看板 <https://github.com/users/shark8848/projects/2>；后续随 PROGRESS.md 增量按契约 §5 流程同步；PROGRESS.md 0.1.34→0.1.35 |
 | 2026-08-08 | Codex | **OIDC 完整链路 R2+ DONE（R1 唯一剩余项勾选完成）**：`crates/ontolith-security/src/infrastructure/oidc.rs`（~760 行，无第三方 JWT 依赖）——RFC 7517 JWKS/JWK（kid+alg 选键、RSA/oct 可用、EC/OKP 解析期过滤 fail-fast）、RS256 自研无依赖大整数 RSA 验签（RFC 7515 A.2.1 官方向量背书；调试期发现样例 signing input 必须保留 JSON 换行缩进 `LA0K…`，Python cryptography 独立复核后修复）、HS256 复用树内 HMAC、`exp`/`nbf`/`iss`/`aud` 策略（`JwtClaims.not_before` + `ONTOLITH_JWT_LEEWAY_SECS`）、RFC 8414 发现文档 issuer 强制匹配、`JwksFetcher`/`CachingJwks`/`JwksVerifier` TTL 缓存刷新（坏响应保留旧钥）；server 接线 `ONTOLITH_OIDC_ISSUER`/`AUDIENCE`/`JWKS_URL`/`CACHE_TTL_SECS`（file:// 快照 + http:// 树内抓取，https 明确拒绝启动并文档化反向代理路径），`HeaderAuthenticator.jwt_oidc` 优先于共享密钥 HS256；`/health`（HTTP+管理面）与 gRPC `HealthResponse` 暴露 `oidc` 姿态；security 18→24、server 44→49 测，workspace 全量 20 套件全绿，clippy 零警告，`--no-default-features` 构建通过；[L5-ontolith-access-security.md](./L5-ontolith-access-security.md) §2 OIDC 小节 + env 契约 + 限制；PROGRESS.md 0.1.33→0.1.34 |
 | 2026-08-08 | Codex | **R1 正式验收包 DONE**：`docs/R1-acceptance-package.md`（ACC-R1-0001）+ `scripts/acceptance-r1.sh`（G1 fmt/clippy → G2 workspace 全量 → G3 w3c11 492/492 + shacl 97/98 → G4 内存 INSERT/SELECT 闭环 → G5 RocksDB reopen 持久闭环）首次执行 `=== ACCEPTANCE PASS ===`（20 个 test binary 全 ok 共 400 测、drift=0）。验收中发现并修复 HTTP 结果 JSON 缺陷：`/sparql` SELECT/CONSTRUCT 将存储的 IRI 主语渲染为 bnode（`bound_value_json`/CONSTRUCT 主语渲染未走 `DictionaryCodec::decode_node`，W3C 套件进程内比较有解码故未暴露）；`sparql_results_json`/`bound_value_json` 增字典参数按解码判定 uri/bnode（与引擎 `node_id_term` 同语义），gRPC 调用点同步，新增回归测试 `sparql_http_json_renders_stored_iri_subject_as_uri`（server 43→44 测）；另全仓对齐当前 stable rustfmt 1.9.0 规范格式（24 文件纯格式化）。R1 退出标准全表勾选完成（唯一剩余：OIDC 完整链路 R2+），R1 判定上修至 ~95%；PROGRESS.md 0.1.32→0.1.33 |
