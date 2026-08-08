@@ -63,14 +63,21 @@ pub enum Rule {
     HasKey,
     /// ?c1 owl:disjointWith ?c2 ∧ x rdf:type ?c1 ∧ x rdf:type ?c2 → ⊥ (cax-dw).
     DisjointClasses,
+    /// p rdf:type owl:IrreflexiveProperty ∧ x p x → ⊥ (prp-irp).
+    IrreflexiveProperty,
     /// x rdf:type owl:Nothing → ⊥ (cls-nothing1).
     NothingTyping,
     /// ?c rdfs:subClassOf owl:Nothing ∧ x rdf:type ?c → ⊥ (cls-nothing2).
     NothingSubClass,
-    /// x owl:differentFrom x → ⊥ (eq-diff1).
-    DifferentFromSelf,
-    /// x owl:sameAs y ∧ x owl:differentFrom y → ⊥ (eq-diff2).
+    /// x owl:sameAs y ∧ x owl:differentFrom y → ⊥ (eq-diff1; x differentFrom x
+    /// is the reflexive-sameAs corollary and is detected by the same check).
     SameAsDifferentFrom,
+    /// ?x rdf:type owl:AllDifferent ∧ ?x owl:members (?z1 … ?zn) ∧ ?zi owl:sameAs ?zj → ⊥ (eq-diff2).
+    AllDifferentMembers,
+    /// ?x rdf:type owl:AllDifferent ∧ ?x owl:distinctMembers (?z1 … ?zn) ∧ ?zi owl:sameAs ?zj → ⊥ (eq-diff3).
+    AllDifferentDistinctMembers,
+    /// ?x rdf:type owl:AllDisjointClasses ∧ ?x owl:members (?c1 … ?cn) ∧ z rdf:type ?ci ∧ z rdf:type ?cj → ⊥ (cax-adc).
+    AllDisjointClasses,
     /// ?s owl:sameAs ?s' ∧ ?s ?p ?o → ?s' ?p ?o (eq-rep-s).
     EqualityReplacementSubject,
     /// ?p owl:sameAs ?p' ∧ ?s ?p ?o → ?s ?p' ?o (eq-rep-p).
@@ -83,8 +90,14 @@ pub enum Rule {
     InverseFunctionalProperty,
     /// ?c1 owl:complementOf ?c2 ∧ x rdf:type ?c1 ∧ x rdf:type ?c2 → ⊥ (cls-com).
     ComplementClasses,
+    /// x rdf:type (p value y) ∧ restr owl:hasValue y ∧ restr owl:onProperty p → x p y (cls-hv1).
+    HasValue,
+    /// x p y ∧ restr owl:hasValue y ∧ restr owl:onProperty p → x rdf:type (p value y) (cls-hv2).
+    HasValueTyping,
     /// x rdf:type (p max 1) ∧ x p y1 ∧ x p y2 → y1 owl:sameAs y2 (cls-maxc2).
     MaxCardinalityOne,
+    /// ?p owl:propertyChainAxiom (?p1 … ?pn) ∧ u1 p1 u2 ∧ … ∧ un pn un+1 → u1 p un+1 (prp-spo2).
+    PropertyChain,
 }
 
 impl Rule {
@@ -110,17 +123,23 @@ impl Rule {
             Self::SameAsTransitive => "eq-trans",
             Self::HasKey => "prp-key",
             Self::DisjointClasses => "cax-dw",
+            Self::IrreflexiveProperty => "prp-irp",
             Self::NothingTyping => "cls-nothing1",
             Self::NothingSubClass => "cls-nothing2",
-            Self::DifferentFromSelf => "eq-diff1",
-            Self::SameAsDifferentFrom => "eq-diff2",
+            Self::SameAsDifferentFrom => "eq-diff1",
+            Self::AllDifferentMembers => "eq-diff2",
+            Self::AllDifferentDistinctMembers => "eq-diff3",
+            Self::AllDisjointClasses => "cax-adc",
             Self::EqualityReplacementSubject => "eq-rep-s",
             Self::EqualityReplacementPredicate => "eq-rep-p",
             Self::EqualityReplacementObject => "eq-rep-o",
             Self::FunctionalProperty => "prp-fp",
             Self::InverseFunctionalProperty => "prp-ifp",
             Self::ComplementClasses => "cls-com",
+            Self::HasValue => "cls-hv1",
+            Self::HasValueTyping => "cls-hv2",
             Self::MaxCardinalityOne => "cls-maxc2",
+            Self::PropertyChain => "prp-spo2",
         }
     }
 }

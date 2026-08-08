@@ -99,9 +99,12 @@ impl Reasoner for ForwardChainReasoner {
             Rule::InverseFunctionalProperty,
             Rule::InverseOfReverse,
             Rule::HasKey,
+            Rule::PropertyChain,
             Rule::SomeValuesFrom,
             Rule::SomeValuesFromTyping,
             Rule::AllValuesFrom,
+            Rule::HasValue,
+            Rule::HasValueTyping,
             Rule::IntersectionOf,
             Rule::IntersectionOfTyping,
             Rule::UnionOf,
@@ -113,10 +116,13 @@ impl Reasoner for ForwardChainReasoner {
             Rule::EqualityReplacementObject,
             Rule::DisjointClasses,
             Rule::ComplementClasses,
+            Rule::AllDisjointClasses,
             Rule::NothingTyping,
             Rule::NothingSubClass,
-            Rule::DifferentFromSelf,
+            Rule::IrreflexiveProperty,
             Rule::SameAsDifferentFrom,
+            Rule::AllDifferentMembers,
+            Rule::AllDifferentDistinctMembers,
         ]
     }
 
@@ -449,6 +455,15 @@ fn apply_rules(
             Some((restr, p))
         })
         .collect();
+    // Restriction nodes with owl:hasValue; the value may be an IRI, blank node, or literal.
+    let has_value: Vec<(Term, Term)> = closure
+        .iter()
+        .filter(|t| t.predicate == owl("hasValue"))
+        .filter_map(|t| {
+            let restr = node_term(t.subject)?;
+            Some((restr, t.object.clone()))
+        })
+        .collect();
 
     // cls-svf1: x rdf:type restr ∧ restr onProperty p ∧ restr someValuesFrom c ∧ x p y → y rdf:type c.
     for t in closure {
@@ -539,6 +554,47 @@ fn apply_rules(
         }
     }
 
+    // cls-hv1: x rdf:type restr ∧ restr onProperty p ∧ restr hasValue y → x p y.
+    for t in closure {
+        if t.predicate != rdf_type {
+            continue;
+        }
+        let Some(restr) = node_term_from_term(&t.object) else {
+            continue;
+        };
+        let Some(p) = on_property
+            .iter()
+            .find(|(r, _)| *r == restr)
+            .map(|(_, p)| p.clone())
+        else {
+            continue;
+        };
+        let Some(value) = has_value
+            .iter()
+            .find(|(r, _)| *r == restr)
+            .map(|(_, v)| v.clone())
+        else {
+            continue;
+        };
+        frontier.push(Triple::new(t.subject, p, value));
+    }
+
+    // cls-hv2: x p y ∧ restr onProperty p ∧ restr hasValue y → x rdf:type restr.
+    for (restr, value) in &has_value {
+        let Some(p) = on_property
+            .iter()
+            .find(|(r, _)| r == restr)
+            .map(|(_, p)| p.clone())
+        else {
+            continue;
+        };
+        for t in closure {
+            if t.predicate == p && &t.object == value {
+                frontier.push(Triple::new(t.subject, rdf_type.clone(), restr.clone()));
+            }
+        }
+    }
+
     // cls-maxc2: x rdf:type (p max 1) ∧ x p y1 ∧ x p y2 → y1 owl:sameAs y2.
     for (restr, p) in &max_cardinality_one {
         let mut by_subject: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -566,8 +622,8 @@ fn apply_rules(
         }
     }
 
-    // Members of an RDF list starting at `start`.
-    let list_members = |start: &Term| -> Vec<Iri> {
+    // Members of an RDF list starting at `start`, preserving term kinds.
+    let list_terms = |start: &Term| -> Vec<Term> {
         let mut out = Vec::new();
         let mut cur = start.clone();
         let mut seen: Vec<Term> = Vec::new();
@@ -582,7 +638,7 @@ fn apply_rules(
             let first = closure
                 .iter()
                 .find(|t| t.subject == cur_node && t.predicate.as_str() == RDF_FIRST)
-                .and_then(|t| iri_of(&t.object));
+                .map(|t| t.object.clone());
             let rest = closure
                 .iter()
                 .find(|t| t.subject == cur_node && t.predicate.as_str() == RDF_REST)
@@ -600,6 +656,13 @@ fn apply_rules(
             }
         }
         out
+    };
+    // IRI-only members (class/property lists).
+    let list_members = |start: &Term| -> Vec<Iri> {
+        list_terms(start)
+            .into_iter()
+            .filter_map(|term| iri_of(&term))
+            .collect()
     };
 
     // List-valued class expressions: (restriction node, list members).
@@ -743,6 +806,46 @@ fn apply_rules(
         for (x, y) in pairs {
             if let Some(y_term) = node_term(y) {
                 frontier.push(Triple::new(x, owl("sameAs"), y_term));
+            }
+        }
+    }
+
+    // prp-spo2: ?p owl:propertyChainAxiom (?p1 … ?pn) ∧ u1 p1 u2 ∧ … ∧ un pn un+1 → u1 p un+1.
+    let property_chains: Vec<(Iri, Vec<Iri>)> = closure
+        .iter()
+        .filter(|t| t.predicate == owl("propertyChainAxiom"))
+        .filter_map(|t| {
+            let p = node_iri(t.subject)?;
+            let chain = list_members(&t.object);
+            (!chain.is_empty()).then_some((p, chain))
+        })
+        .collect();
+    for (p, chain) in &property_chains {
+        let mut reachable: Vec<(NodeId, NodeId)> = closure
+            .iter()
+            .filter(|t| t.predicate == chain[0])
+            .filter_map(|t| {
+                let o = subject_node(&t.object)?;
+                Some((t.subject, o))
+            })
+            .collect();
+        for next in chain.iter().skip(1) {
+            let mut step = Vec::new();
+            for (start, mid) in &reachable {
+                for t in closure {
+                    if t.subject == *mid
+                        && &t.predicate == next
+                        && let Some(o) = subject_node(&t.object)
+                    {
+                        step.push((*start, o));
+                    }
+                }
+            }
+            reachable = step;
+        }
+        for (u1, un1) in reachable {
+            if let Some(un1_term) = node_term(un1) {
+                frontier.push(Triple::new(u1, p.clone(), un1_term));
             }
         }
     }
@@ -902,16 +1005,103 @@ fn apply_rules(
         let Some(obj_node) = subject_node(&t.object) else {
             continue;
         };
-        // eq-diff1: x owl:differentFrom x → ⊥.
+        // eq-diff1: x owl:sameAs y ∧ x owl:differentFrom y → ⊥. The reflexive
+        // corollary x owl:differentFrom x is detected by the same check (eq-refl).
         if t.subject == obj_node {
             *inconsistent = true;
         }
-        // eq-diff2: x owl:sameAs y ∧ x owl:differentFrom y → ⊥.
         if same_as_all
             .iter()
             .any(|(a, b)| *a == t.subject && *b == obj_node)
         {
             *inconsistent = true;
+        }
+    }
+
+    // prp-irp: x ?p x ∧ ?p rdf:type owl:IrreflexiveProperty → ⊥.
+    let irreflexive: Vec<Iri> = all
+        .iter()
+        .filter_map(|t| {
+            (t.predicate == rdf_type && t.object == Term::Iri(owl("IrreflexiveProperty")))
+                .then(|| node_iri(t.subject))
+                .flatten()
+        })
+        .collect();
+    if irreflexive.iter().any(|p| {
+        all.iter()
+            .any(|t| &t.predicate == p && subject_node(&t.object) == Some(t.subject))
+    }) {
+        *inconsistent = true;
+    }
+
+    // cax-adc: ?x rdf:type owl:AllDisjointClasses ∧ ?x owl:members (?c1 … ?cn)
+    // ∧ z rdf:type ?ci ∧ z rdf:type ?cj → ⊥.
+    let all_disjoint_classes: Vec<Vec<Iri>> = all
+        .iter()
+        .filter(|t| t.predicate == owl("members"))
+        .filter_map(|t| {
+            let typed = all.iter().any(|u| {
+                u.subject == t.subject
+                    && u.predicate == rdf_type
+                    && u.object == Term::Iri(owl("AllDisjointClasses"))
+            });
+            typed.then(|| list_members(&t.object))
+        })
+        .collect();
+    for classes in &all_disjoint_classes {
+        let mut by_subject: HashMap<NodeId, Vec<Iri>> = HashMap::new();
+        for t in &all {
+            if t.predicate == rdf_type
+                && let Some(c) = iri_of(&t.object)
+                && classes.contains(&c)
+            {
+                by_subject.entry(t.subject).or_default().push(c);
+            }
+        }
+        if by_subject.values().any(|typed| {
+            let mut seen = Vec::new();
+            for c in typed {
+                if !seen.contains(c) {
+                    seen.push(c.clone());
+                }
+            }
+            seen.len() >= 2
+        }) {
+            *inconsistent = true;
+        }
+    }
+
+    // eq-diff2/3: ?x rdf:type owl:AllDifferent ∧ ?x owl:members / owl:distinctMembers
+    // (?z1 … ?zn) ∧ ?zi owl:sameAs ?zj → ⊥.
+    for members_predicate in [owl("members"), owl("distinctMembers")] {
+        let all_different_lists: Vec<Vec<Term>> = all
+            .iter()
+            .filter(|t| t.predicate == members_predicate)
+            .filter_map(|t| {
+                let typed = all.iter().any(|u| {
+                    u.subject == t.subject
+                        && u.predicate == rdf_type
+                        && u.object == Term::Iri(owl("AllDifferent"))
+                });
+                typed.then(|| list_terms(&t.object))
+            })
+            .collect();
+        for members in &all_different_lists {
+            for i in 0..members.len() {
+                for j in (i + 1)..members.len() {
+                    let (Some(zi), Some(zj)) =
+                        (subject_node(&members[i]), subject_node(&members[j]))
+                    else {
+                        continue;
+                    };
+                    if same_as_all
+                        .iter()
+                        .any(|(a, b)| (*a == zi && *b == zj) || (*a == zj && *b == zi))
+                    {
+                        *inconsistent = true;
+                    }
+                }
+            }
         }
     }
 }
@@ -960,6 +1150,30 @@ mod tests {
 
     fn tl(s: &str, p: &str, o: LiteralValue, dict: &InMemoryDictionary) -> Triple {
         Triple::new(dict.encode_node(s), Iri::new(p), Term::Literal(o))
+    }
+
+    /// Two-triple-per-node RDF list encoding: `start` → first/member + rest/nil.
+    fn rdf_list(dict: &InMemoryDictionary, start: &str, members: &[&str]) -> Vec<Triple> {
+        let rdf_first = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+        let rdf_rest = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+        let rdf_nil = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+        let prefix = start.trim_start_matches("_:");
+        let mut out = Vec::new();
+        for (i, m) in members.iter().enumerate() {
+            let node = if i == 0 {
+                start.to_string()
+            } else {
+                format!("_:{prefix}{i}")
+            };
+            out.push(t(&node, rdf_first, m, dict));
+            let rest = if i + 1 == members.len() {
+                rdf_nil.to_string()
+            } else {
+                format!("_:{prefix}{}", i + 1)
+            };
+            out.push(t(&node, rdf_rest, &rest, dict));
+        }
+        out
     }
 
     fn task_max_iterations(n: u32) -> ReasoningTask {
@@ -1219,11 +1433,17 @@ mod tests {
             "eq-sym",
             "eq-trans",
             "prp-key",
+            "prp-spo2",
             "cax-dw",
+            "prp-irp",
             "cls-nothing1",
             "cls-nothing2",
+            "cls-hv1",
+            "cls-hv2",
             "eq-diff1",
             "eq-diff2",
+            "eq-diff3",
+            "cax-adc",
             "prp-fp",
             "prp-ifp",
             "eq-rep-s",
@@ -1435,6 +1655,217 @@ mod tests {
     }
 
     #[test]
+    fn has_value_infers_triple_from_typing() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("_:r", &format!("{owl}onProperty"), "urn:knows", &dict),
+            t("_:r", &format!("{owl}hasValue"), "urn:bob", &dict),
+            tb("urn:alice", rdf_type, "_:r", &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(
+            outcome.triples.iter().any(|tr| {
+                tr.subject == dict.encode_node("urn:alice")
+                    && tr.predicate.as_str() == "urn:knows"
+                    && tr.object == Term::Iri(Iri::new("urn:bob"))
+            }),
+            "expected alice knows bob (cls-hv1)"
+        );
+    }
+
+    #[test]
+    fn has_value_typing_infers_restriction() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let input = vec![
+            t("_:r", &format!("{owl}onProperty"), "urn:age", &dict),
+            tl("_:r", &format!("{owl}hasValue"), LiteralValue::Integer(42), &dict),
+            tl("urn:alice", "urn:age", LiteralValue::Integer(42), &dict),
+        ];
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(
+            outcome.triples.iter().any(|tr| {
+                tr.subject == dict.encode_node("urn:alice")
+                    && tr.predicate.as_str() == rdf_type
+                    && tr.object == Term::BlankNode(dict.encode_node("_:r"))
+            }),
+            "expected alice rdf:type _:r from literal hasValue match (cls-hv2)"
+        );
+    }
+
+    #[test]
+    fn property_chain_infers_chained_triple() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let mut input = vec![
+            t("urn:uncleOf", &format!("{owl}propertyChainAxiom"), "_:u", &dict),
+            t(
+                "urn:ancestorOf",
+                &format!("{owl}propertyChainAxiom"),
+                "_:a",
+                &dict,
+            ),
+        ];
+        input.extend(rdf_list(&dict, "_:u", &["urn:siblingOf", "urn:parentOf"]));
+        input.extend(rdf_list(
+            &dict,
+            "_:a",
+            &["urn:parentOf", "urn:parentOf", "urn:parentOf"],
+        ));
+        input.push(t("urn:alice", "urn:parentOf", "urn:bob", &dict));
+        input.push(t("urn:alice", "urn:siblingOf", "urn:bob", &dict));
+        input.push(t("urn:bob", "urn:parentOf", "urn:carol", &dict));
+        input.push(t("urn:carol", "urn:parentOf", "urn:dave", &dict));
+        input.push(t("urn:dave", "urn:parentOf", "urn:erin", &dict));
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(
+            outcome.triples.iter().any(|tr| {
+                tr.subject == dict.encode_node("urn:alice")
+                    && tr.predicate.as_str() == "urn:uncleOf"
+                    && tr.object == Term::Iri(Iri::new("urn:carol"))
+            }),
+            "expected alice uncleOf carol (2-member prp-spo2)"
+        );
+        assert!(
+            outcome.triples.iter().any(|tr| {
+                tr.subject == dict.encode_node("urn:alice")
+                    && tr.predicate.as_str() == "urn:ancestorOf"
+                    && tr.object == Term::Iri(Iri::new("urn:dave"))
+            }),
+            "expected alice ancestorOf dave (3-member prp-spo2)"
+        );
+    }
+
+    #[test]
+    fn irreflexive_property_marks_inconsistent() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let reasoner = ForwardChainReasoner::new();
+        let conflicting = vec![
+            t("urn:p", rdf_type, &format!("{owl}IrreflexiveProperty"), &dict),
+            t("urn:x", "urn:p", "urn:x", &dict),
+        ];
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &conflicting)
+            .expect("materialize");
+        assert!(outcome.report.inconsistent, "expected prp-irp ⊥ (x p x)");
+        let fine = vec![
+            t("urn:p", rdf_type, &format!("{owl}IrreflexiveProperty"), &dict),
+            t("urn:x", "urn:p", "urn:y", &dict),
+        ];
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &fine)
+            .expect("materialize");
+        assert!(
+            !outcome.report.inconsistent,
+            "x p y must not flag prp-irp ⊥"
+        );
+    }
+
+    #[test]
+    fn all_disjoint_classes_marks_inconsistent() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let reasoner = ForwardChainReasoner::new();
+        let mut conflicting = vec![
+            t("_:adc", rdf_type, &format!("{owl}AllDisjointClasses"), &dict),
+            t("_:adc", &format!("{owl}members"), "_:l", &dict),
+            t("urn:z", rdf_type, "urn:A", &dict),
+            t("urn:z", rdf_type, "urn:B", &dict),
+        ];
+        conflicting.extend(rdf_list(&dict, "_:l", &["urn:A", "urn:B"]));
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &conflicting)
+            .expect("materialize");
+        assert!(
+            outcome.report.inconsistent,
+            "expected cax-adc ⊥ (z typed into two disjoint classes)"
+        );
+        let mut fine = vec![
+            t("_:adc", rdf_type, &format!("{owl}AllDisjointClasses"), &dict),
+            t("_:adc", &format!("{owl}members"), "_:l", &dict),
+            t("urn:z", rdf_type, "urn:A", &dict),
+            t("urn:w", rdf_type, "urn:B", &dict),
+        ];
+        fine.extend(rdf_list(&dict, "_:l", &["urn:A", "urn:B"]));
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &fine)
+            .expect("materialize");
+        assert!(
+            !outcome.report.inconsistent,
+            "disjoint classes with distinct members must stay consistent"
+        );
+    }
+
+    #[test]
+    fn all_different_members_marks_inconsistent() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let reasoner = ForwardChainReasoner::new();
+        let mut conflicting = vec![
+            t("_:ad", rdf_type, &format!("{owl}AllDifferent"), &dict),
+            t("_:ad", &format!("{owl}members"), "_:l", &dict),
+            t("urn:a", &format!("{owl}sameAs"), "urn:b", &dict),
+        ];
+        conflicting.extend(rdf_list(&dict, "_:l", &["urn:a", "urn:b"]));
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &conflicting)
+            .expect("materialize");
+        assert!(
+            outcome.report.inconsistent,
+            "expected eq-diff2 ⊥ (owl:members pair sameAs)"
+        );
+        let mut fine = vec![
+            t("_:ad", rdf_type, &format!("{owl}AllDifferent"), &dict),
+            t("_:ad", &format!("{owl}members"), "_:l", &dict),
+        ];
+        fine.extend(rdf_list(&dict, "_:l", &["urn:a", "urn:b"]));
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &fine)
+            .expect("materialize");
+        assert!(
+            !outcome.report.inconsistent,
+            "AllDifferent without sameAs pair must stay consistent"
+        );
+    }
+
+    #[test]
+    fn all_different_distinct_members_marks_inconsistent() {
+        let dict = InMemoryDictionary::new();
+        let owl = "http://www.w3.org/2002/07/owl#";
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let mut input = vec![
+            t("_:ad", rdf_type, &format!("{owl}AllDifferent"), &dict),
+            t("_:ad", &format!("{owl}distinctMembers"), "_:l", &dict),
+            t("urn:a", &format!("{owl}sameAs"), "urn:b", &dict),
+        ];
+        input.extend(rdf_list(&dict, "_:l", &["urn:a", "urn:b"]));
+        let reasoner = ForwardChainReasoner::new();
+        let outcome = reasoner
+            .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
+            .expect("materialize");
+        assert!(
+            outcome.report.inconsistent,
+            "expected eq-diff3 ⊥ (owl:distinctMembers pair sameAs)"
+        );
+    }
+
+    #[test]
     fn wall_clock_budget_guards_materialization() {
         let dict = InMemoryDictionary::new();
         let rdfs = "http://www.w3.org/2000/01/rdf-schema#";
@@ -1591,7 +2022,7 @@ mod tests {
         let outcome = reasoner
             .materialize(&dict, &task(InferenceMode::ForwardChaining), &input)
             .expect("materialize");
-        assert!(outcome.report.inconsistent, "expected eq-diff1/2 ⊥");
+        assert!(outcome.report.inconsistent, "expected eq-diff1 ⊥");
     }
 
     #[test]
@@ -1739,7 +2170,7 @@ mod tests {
             .expect("materialize");
         assert!(
             outcome.report.inconsistent,
-            "expected eq-diff2 ⊥ after same-iteration eq-sym"
+            "expected eq-diff1 ⊥ after same-iteration eq-sym"
         );
     }
 
