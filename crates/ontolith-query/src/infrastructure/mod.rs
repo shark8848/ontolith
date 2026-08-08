@@ -334,7 +334,7 @@ pub fn status() -> &'static str {
 mod tests {
     use super::*;
     use crate::application::QueryPipeline;
-    use crate::domain::{Algebra, BoundValue, QueryRequest, TermPattern, TriplePattern};
+    use crate::domain::{Algebra, BoundValue, QueryRequest, TenantScope, TermPattern, TriplePattern};
     use ontolith_core::domain::{Iri, LiteralValue, NodeId};
     use ontolith_rdf::domain::{Quad, Term, Triple};
     use ontolith_storage::application::{
@@ -2470,5 +2470,135 @@ mod tests {
             BoundValue::Literal(LiteralValue::String("test".into())),
             BoundValue::Literal(LiteralValue::String("test".into()))
         )));
+    }
+
+    // ---- P5-03: enforced tenant scope (read isolation + write stamping) ----
+
+    /// Pipeline seeded with one named-graph quad per tenant.
+    fn tenant_seeded_pipeline(
+    ) -> (
+        Arc<InMemoryStorageEngine>,
+        crate::application::QueryPipeline<
+            SimpleQueryPlanner,
+            CostBasedOptimizer<EngineQueryStatistics>,
+            UpdateQueryExecutor<EngineUpdateWriteService>,
+        >,
+    ) {
+        let (engine, dict, repo) = seed_update();
+        let engine_clone = Arc::clone(&engine);
+        let p = update_pipeline(engine, dict, repo);
+        p.execute(&QueryRequest::new(
+            "INSERT DATA { GRAPH <urn:tenant:acme> { <http://ex.org/carol> <http://ex.org/name> \"Carol\" } }",
+        ))
+        .unwrap();
+        p.execute(&QueryRequest::new(
+            "INSERT DATA { GRAPH <urn:tenant:other> { <http://ex.org/dave> <http://ex.org/name> \"Dave\" } }",
+        ))
+        .unwrap();
+        (engine_clone, p)
+    }
+
+    #[test]
+    fn tenant_scope_limits_default_graph_to_tenant() {
+        let (_engine, p) = tenant_seeded_pipeline();
+
+        // Unscoped: the shared default graph holds the seeded alice/bob triples.
+        let r = p
+            .execute(&QueryRequest::new(
+                "SELECT ?s WHERE { ?s <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        assert_eq!(r.solutions.len(), 2, "unscoped sees the shared default graph");
+
+        // Scoped: the default graph becomes the tenant graph only.
+        let req = QueryRequest::new("SELECT ?s WHERE { ?s <http://ex.org/name> ?n }")
+            .with_tenant_scope(TenantScope::new("acme"));
+        let r = p.execute(&req).unwrap();
+        assert_eq!(
+            r.solutions.len(),
+            1,
+            "acme must see only its own tenant graph (carol), not alice/bob/dave"
+        );
+
+        let other = QueryRequest::new("SELECT ?s WHERE { ?s <http://ex.org/name> ?n }")
+            .with_tenant_scope(TenantScope::new("other"));
+        let r = p.execute(&other).unwrap();
+        assert_eq!(r.solutions.len(), 1, "other sees only its own tenant graph (dave)");
+    }
+
+    #[test]
+    fn tenant_scope_rejects_foreign_graph_references() {
+        let (_engine, p) = tenant_seeded_pipeline();
+        let scope = TenantScope::new("acme");
+
+        let err = p
+            .execute(
+                &QueryRequest::new("SELECT * WHERE { GRAPH <urn:tenant:other> { ?s ?p ?o } }")
+                    .with_tenant_scope(scope.clone()),
+            )
+            .unwrap_err();
+        assert!(
+            err.message().starts_with("forbidden"),
+            "GRAPH to foreign tenant must be forbidden, got: {err}"
+        );
+
+        let err = p
+            .execute(
+                &QueryRequest::new("SELECT * FROM <urn:tenant:other> WHERE { ?s ?p ?o }")
+                    .with_tenant_scope(scope),
+            )
+            .unwrap_err();
+        assert!(
+            err.message().starts_with("forbidden"),
+            "FROM foreign tenant must be forbidden, got: {err}"
+        );
+    }
+
+    #[test]
+    fn tenant_scope_update_stamps_into_tenant_graph() {
+        let (engine, p) = tenant_seeded_pipeline();
+
+        // Default-graph INSERT DATA is re-pointed at the tenant graph.
+        let r = p
+            .execute(
+                &QueryRequest::new(
+                    "INSERT DATA { <http://ex.org/eve> <http://ex.org/name> \"Eve\" }",
+                )
+                .with_tenant_scope(TenantScope::new("acme")),
+            )
+            .unwrap();
+        assert_eq!(r.affected, 1);
+
+        let acme_graph = Iri::new("urn:tenant:acme");
+        let acme_quads: Vec<_> = engine
+            .named_graph_quads()
+            .into_iter()
+            .filter(|q| q.graph_name.as_ref() == Some(&acme_graph))
+            .collect();
+        assert_eq!(acme_quads.len(), 2, "acme graph holds carol + eve");
+
+        // The shared default graph is untouched by scoped writes.
+        let default = engine.default_graph_triples_in_txn(None);
+        assert_eq!(default.len(), 2, "alice/bob remain in the shared default graph");
+
+        // A scoped read sees the stamped data.
+        let req = QueryRequest::new("SELECT ?n WHERE { <http://ex.org/eve> <http://ex.org/name> ?n }")
+            .with_tenant_scope(TenantScope::new("acme"));
+        let r = p.execute(&req).unwrap();
+        assert_eq!(r.solutions.len(), 1);
+
+        // Explicit foreign-graph writes are rejected.
+        let err = p
+            .execute(
+                &QueryRequest::new(
+                    "INSERT DATA { GRAPH <urn:tenant:other> { <http://ex.org/x> <http://ex.org/name> \"X\" } }",
+                )
+                .with_tenant_scope(TenantScope::new("acme")),
+            )
+            .unwrap_err();
+        assert!(
+            err.message().starts_with("forbidden"),
+            "write to foreign tenant graph must be forbidden, got: {err}"
+        );
     }
 }

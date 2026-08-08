@@ -1,8 +1,8 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.3.0  
-状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON + management server)  
+版本: 2.5.0  
+状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03)  
 日期: 2026-07-23  
 对应 crate:
 
@@ -99,14 +99,23 @@ CONSTRUCT → `{ "results": { "triples": [...], "count": N } }`
 | `?format=` | `nt` `turtle` `trig` `nq` |
 | Content-Type | `text/turtle`, `application/trig`, `application/n-triples`, `application/n-quads` |
 
-租户图隔离（可选）：
+租户图隔离：
 
 ```http
+# 可选模式（默认）：请求级选择
 POST /data/nt?tenant_graph=1
+X-Ontolith-Tenant: acme
+
+# 强制模式（P5-03）：`ONTOLITH_TENANT_MODE=enforced`
+POST /data/nt
 X-Ontolith-Tenant: acme
 ```
 
-语句写入命名图 `urn:tenant:acme`。
+语句写入命名图 `urn:tenant:acme`。强制模式下隔离为**分库/行级**：
+
+- 写路径无条件盖章：默认图语句写入 `urn:tenant:<t>`；`?graph=`/TriG/NQuads 命名图引用必须在 `urn:tenant:<t>` 命名空间内，越权返回 403
+- 读路径（SPARQL）注入 `tenant_scope`：默认图重指向租户图，`FROM`/`GRAPH`/`USING`/图管理目标越权返回 403，跨租户数据结构性不可达
+- `X-Ontolith-Tenant`/`X-Ontolith-User`/`X-API-Key` 仍由鉴权层强制（`ONTOLITH_AUTH_MODE=enforced`）
 
 ### 鉴权（`ONTOLITH_AUTH_MODE=enforced`）
 
@@ -127,6 +136,7 @@ X-Ontolith-Tenant: acme
 | `ONTOLITH_BIND` | `127.0.0.1:8080` | 监听地址 |
 | `ONTOLITH_MANAGEMENT_BIND` | `127.0.0.1:9091` | 管理服务监听地址 |
 | `ONTOLITH_AUTH_MODE` | `disabled` | `disabled` \| `enforced` |
+| `ONTOLITH_TENANT_MODE` | `disabled` | `disabled` \| `enforced`（P5-03 强制租户隔离：写盖章 + 读作用域 + 越权 403） |
 | `ONTOLITH_API_KEY` | — | Enforced 时校验 |
 | `ONTOLITH_MANAGEMENT_READ_KEY` | — | 管理面只读 key（可选） |
 | `ONTOLITH_MANAGEMENT_WRITE_KEY` | — | 管理面写操作 key（可选） |
@@ -204,7 +214,7 @@ systemctl --user status ontolith-server
 - Disabled → system admin  
 - Enforced → API key + tenant/user  
 - 审计 allow/deny；`/audit` 租户过滤  
-- 写入可选 tenant 命名图  
+- 写入可选 tenant 命名图；`ONTOLITH_TENANT_MODE=enforced` 时为强制分库/行级隔离（写盖章 + 读作用域 + 越权 403）  
 
 ---
 
@@ -212,8 +222,8 @@ systemctl --user status ontolith-server
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
-| ontolith-security | 9 | 鉴权/权限/审计（含哈希链完整性验证） |
-| ontolith-server | **21** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁** |
+| ontolith-security | 12 | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 |
+| ontolith-server | **24** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）** |
 
 ---
 
@@ -222,7 +232,7 @@ systemctl --user status ontolith-server
 1. TLS 已落地（rustls 进程内终止 + R2 非 loopback 门禁）；仍无 HTTP/2 / 完整框架中间件链  
 2. 鉴权非 OIDC/JWT  
 3. 审计哈希链为完整性级（FNV-1a 64，非加密级；加密升级保持同 schema）  
-4. 租户隔离为可选命名图，非强制全库分片  
+4. 租户隔离已升级为强制分库/行级（`ONTOLITH_TENANT_MODE=enforced`：命名图命名空间隔离 + 执行器租户视图）；分库物理隔离（每租户独立 RocksDB 实例）仍为后续增强  
 5. SPARQL Results JSON 为兼容子集（非完整 XML/CSV）  
 
 ---
@@ -257,3 +267,5 @@ ONTOLITH_API_KEY=...
 ```
 
 ## 9. 变更
+
+| 2026-08-08 | 2.5.0 | **P5-03 强制租户隔离**：`TenantMode`/`TenantNamespace`（`ONTOLITH_TENANT_MODE`，`urn:tenant:<t>` 命名空间 + `require_owned` 403）；`QueryRequest.tenant_scope` 下沉执行器（`TenantScopedRead/Write`：默认图重指向 + 命名图过滤 + 更新盖章），`FROM`/`GRAPH`/`USING`/图管理目标越权 403；server 写路径强制盖章、读路径注入作用域、`/health`+`/admin/config` 暴露 `tenant_mode`；security 9→12、query 83→86、server 22→24 测 |

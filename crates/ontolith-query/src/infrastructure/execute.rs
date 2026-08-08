@@ -3,7 +3,7 @@
 use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
     AggregateExpr, AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, GraphRef,
-    GraphTarget,
+    GraphTarget, TenantScope,
     PathExpression, PreemptionReason, PreemptionToken, QueryKind, QueryPlan, QueryRequest,
     QueryResult, Solution, TermPattern, TriplePattern, UpdateOp, UpdatePattern,
 };
@@ -55,19 +55,30 @@ impl AlgebraExecutor {
         }
 
         let token = request.preemption_token();
+        // P5-03: enforced tenant scope restricts the dataset to the tenant's
+        // namespace before `FROM`/`GRAPH` handling.
+        let tenant_view;
+        let base_read: &dyn QueryReadService = match &request.tenant_scope {
+            Some(scope) => {
+                validate_tenant_read_plan(plan, scope)?;
+                tenant_view = TenantScopedRead::new(self.read.as_ref(), scope);
+                tenant_view.as_read()
+            }
+            None => self.read.as_ref(),
+        };
         // Query-side `FROM`/`FROM NAMED` dataset (SPARQL 1.1 §18.2.1): the
         // listed graphs become the dataset for the WHERE clause.
         let dataset_view: DatasetView;
         let read: &dyn QueryReadService = if !plan.from.is_empty() || !plan.from_named.is_empty() {
             dataset_view = DatasetView::Merged(MergedGraphRead::new(
-                self.read.as_ref(),
+                base_read,
                 &plan.from,
                 &plan.from_named,
                 request.txn_id,
             ));
             dataset_view.as_read()
         } else {
-            self.read.as_ref()
+            base_read
         };
         let ctx = ExecCtx {
             read,
@@ -265,6 +276,20 @@ pub fn execute_update(
     let started = Instant::now();
     let txn_id = next_update_txn();
     let token = request.preemption_token();
+    // P5-03: enforced tenant scope validates every graph reference and
+    // re-points default-graph writes at the tenant graph.
+    let tenant_read;
+    let tenant_write;
+    let (read, write): (&dyn QueryReadService, &dyn UpdateWriteService) =
+        match &request.tenant_scope {
+            Some(scope) => {
+                validate_tenant_update_plan(plan, scope)?;
+                tenant_read = TenantScopedRead::new(read, scope);
+                tenant_write = TenantScopedWrite::new(write, scope);
+                (tenant_read.as_read(), tenant_write.as_write())
+            }
+            None => (read, write),
+        };
     let ctx = ExecCtx {
         read,
         txn_id: Some(txn_id),
@@ -1015,6 +1040,325 @@ impl QueryReadService for MergedGraphRead<'_> {
     fn named_graph_names(&self, _txn_id: Option<TxnId>) -> Vec<Iri> {
         self.named.clone()
     }
+}
+
+/// Read view scoping a query to one tenant namespace (P5-03): the tenant's
+/// graph becomes the default graph and named-graph visibility is restricted
+/// to graphs owned by the tenant. Cross-tenant data is structurally
+/// unreachable through this view.
+struct TenantScopedRead<'a> {
+    base: &'a dyn QueryReadService,
+    scope: &'a TenantScope,
+    tenant_graph: Iri,
+}
+
+impl<'a> TenantScopedRead<'a> {
+    fn new(base: &'a dyn QueryReadService, scope: &'a TenantScope) -> Self {
+        Self {
+            base,
+            scope,
+            tenant_graph: Iri::new(scope.graph_prefix()),
+        }
+    }
+
+    fn as_read(&self) -> &dyn QueryReadService {
+        self
+    }
+
+    /// Default-graph triples: the tenant graph's quads (in enforced mode all
+    /// tenant data lives there; the shared default graph is not visible).
+    fn default_triples(&self, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.base.quads_in_graph(&self.tenant_graph, txn_id)
+    }
+}
+
+impl QueryReadService for TenantScopedRead<'_> {
+    fn all_triples(&self, txn_id: Option<TxnId>) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self.default_triples(txn_id))
+    }
+
+    fn by_subject(
+        &self,
+        subject: NodeId,
+        txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
+            .default_triples(txn_id)
+            .into_iter()
+            .filter(|t| t.subject == subject)
+            .collect())
+    }
+
+    fn by_predicate(
+        &self,
+        predicate: &Iri,
+        txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
+            .default_triples(txn_id)
+            .into_iter()
+            .filter(|t| &t.predicate == predicate)
+            .collect())
+    }
+
+    fn by_object(
+        &self,
+        object: &Term,
+        txn_id: Option<TxnId>,
+    ) -> Result<Vec<Triple>, OntolithError> {
+        Ok(self
+            .default_triples(txn_id)
+            .into_iter()
+            .filter(|t| &t.object == object)
+            .collect())
+    }
+
+    fn node_for_iri(&self, iri: &Iri) -> Result<Option<NodeId>, OntolithError> {
+        self.base.node_for_iri(iri)
+    }
+
+    fn encode_node(&self, value: &str) -> Option<NodeId> {
+        self.base.encode_node(value)
+    }
+
+    fn decode_node(&self, node_id: NodeId) -> Option<String> {
+        self.base.decode_node(node_id)
+    }
+
+    fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
+        if self.scope.is_owned(graph.as_str()) {
+            self.base.quads_in_graph(graph, txn_id)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn named_graph_names(&self, txn_id: Option<TxnId>) -> Vec<Iri> {
+        self.base
+            .named_graph_names(txn_id)
+            .into_iter()
+            .filter(|g| self.scope.is_owned(g.as_str()))
+            .collect()
+    }
+}
+
+/// Write view scoping SPARQL Update to one tenant namespace (P5-03):
+/// default-graph writes are re-pointed at the tenant graph and named-graph
+/// reads only observe tenant-owned graphs.
+struct TenantScopedWrite<'a> {
+    base: &'a dyn UpdateWriteService,
+    scope: &'a TenantScope,
+    tenant_graph: Iri,
+}
+
+impl<'a> TenantScopedWrite<'a> {
+    fn new(base: &'a dyn UpdateWriteService, scope: &'a TenantScope) -> Self {
+        Self {
+            base,
+            scope,
+            tenant_graph: Iri::new(scope.graph_prefix()),
+        }
+    }
+
+    fn as_write(&self) -> &dyn UpdateWriteService {
+        self
+    }
+
+    fn owned(&self, graph: &Iri) -> bool {
+        self.scope.is_owned(graph.as_str())
+    }
+}
+
+impl UpdateWriteService for TenantScopedWrite<'_> {
+    fn apply_write_batch(
+        &self,
+        txn_id: TxnId,
+        operations: Vec<WriteOperation>,
+    ) -> Result<(), OntolithError> {
+        let scoped = operations
+            .into_iter()
+            .map(|op| match op {
+                WriteOperation::PutTriple(t) => {
+                    WriteOperation::PutQuad(Quad::in_named_graph(t, self.tenant_graph.clone()))
+                }
+                WriteOperation::DeleteTriple(t) => {
+                    WriteOperation::DeleteQuad(Quad::in_named_graph(t, self.tenant_graph.clone()))
+                }
+                other => other,
+            })
+            .collect();
+        self.base.apply_write_batch(txn_id, scoped)
+    }
+
+    fn commit(&self, txn_id: TxnId) -> Result<(), OntolithError> {
+        self.base.commit(txn_id)
+    }
+
+    fn abort(&self, txn_id: TxnId) -> Result<(), OntolithError> {
+        self.base.abort(txn_id)
+    }
+
+    fn default_graph_triples(&self, txn_id: Option<TxnId>) -> Vec<Triple> {
+        self.base
+            .quads_in_graph(&self.tenant_graph, txn_id)
+            .into_iter()
+            .map(|t| t.triple)
+            .collect()
+    }
+
+    fn named_graph_quads(&self) -> Vec<Quad> {
+        self.named_graph_quads_in_txn(None)
+    }
+
+    fn named_graph_quads_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Quad> {
+        self.base
+            .named_graph_quads_in_txn(txn_id)
+            .into_iter()
+            .filter(|q| {
+                q.graph_name
+                    .as_ref()
+                    .is_some_and(|g| self.owned(g))
+            })
+            .collect()
+    }
+
+    fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Quad> {
+        if self.owned(graph) {
+            self.base.quads_in_graph(graph, txn_id)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Reject graph references outside the tenant namespace (P5-03).
+fn forbidden_tenant_graph(scope: &TenantScope, graph: &str) -> OntolithError {
+    OntolithError::Failed(format!(
+        "forbidden: tenant {} cannot access graph {graph} outside namespace {}",
+        scope.tenant,
+        scope.graph_prefix()
+    ))
+}
+
+fn require_owned_graph(scope: &TenantScope, graph: &Iri) -> Result<(), OntolithError> {
+    if scope.is_owned(graph.as_str()) {
+        Ok(())
+    } else {
+        Err(forbidden_tenant_graph(scope, graph.as_str()))
+    }
+}
+
+/// Validate every explicit graph reference in a read query plan (FROM,
+/// FROM NAMED and `GRAPH <iri>` algebra nodes) against the tenant scope.
+fn validate_tenant_read_plan(plan: &QueryPlan, scope: &TenantScope) -> Result<(), OntolithError> {
+    for g in plan.from.iter().chain(plan.from_named.iter()) {
+        require_owned_graph(scope, g)?;
+    }
+    validate_tenant_algebra(&plan.algebra, scope)
+}
+
+fn validate_tenant_algebra(algebra: &Algebra, scope: &TenantScope) -> Result<(), OntolithError> {
+    match algebra {
+        Algebra::Join { left, right }
+        | Algebra::LeftJoin { left, right, .. }
+        | Algebra::Union { left, right }
+        | Algebra::Minus { left, right } => {
+            validate_tenant_algebra(left, scope)?;
+            validate_tenant_algebra(right, scope)
+        }
+        Algebra::Filter { input, .. }
+        | Algebra::Extend { input, .. }
+        | Algebra::Distinct { input }
+        | Algebra::Project { input, .. }
+        | Algebra::OrderBy { input, .. }
+        | Algebra::Slice { input, .. }
+        | Algebra::Aggregate { input, .. } => validate_tenant_algebra(input, scope),
+        Algebra::Graph {
+            graph: TermPattern::Iri(g),
+            inner,
+        } => {
+            require_owned_graph(scope, g)?;
+            validate_tenant_algebra(inner, scope)
+        }
+        Algebra::Graph { inner, .. } => validate_tenant_algebra(inner, scope),
+        _ => Ok(()),
+    }
+}
+
+/// Validate every explicit graph reference in a SPARQL Update plan (target
+/// graphs, USING datasets, graph-management sources/destinations).
+fn validate_tenant_update_plan(plan: &QueryPlan, scope: &TenantScope) -> Result<(), OntolithError> {
+    for op in &plan.update_ops {
+        match op {
+            UpdateOp::InsertData(patterns) | UpdateOp::DeleteData(patterns) => {
+                for p in patterns {
+                    if let Some(g) = &p.graph {
+                        require_owned_graph(scope, g)?;
+                    }
+                }
+            }
+            UpdateOp::DeleteInsert {
+                graph,
+                using,
+                using_named,
+                delete,
+                insert,
+                where_pattern,
+            } => {
+                for g in graph.iter().chain(using.iter().chain(using_named.iter())) {
+                    require_owned_graph(scope, g)?;
+                }
+                for p in delete {
+                    if let Some(g) = &p.graph {
+                        require_owned_graph(scope, g)?;
+                    }
+                }
+                for p in insert {
+                    if let Some(g) = &p.graph {
+                        require_owned_graph(scope, g)?;
+                    }
+                }
+                validate_tenant_algebra(where_pattern, scope)?;
+            }
+            UpdateOp::DeleteWhere {
+                graph,
+                using,
+                using_named,
+                patterns,
+            } => {
+                for g in graph.iter().chain(using.iter().chain(using_named.iter())) {
+                    require_owned_graph(scope, g)?;
+                }
+                for p in patterns {
+                    if let Some(g) = &p.graph {
+                        require_owned_graph(scope, g)?;
+                    }
+                }
+            }
+            UpdateOp::Add { from, to, .. } | UpdateOp::Copy { from, to, .. }
+            | UpdateOp::Move { from, to, .. } => {
+                if let GraphRef::Graph(g) = from {
+                    require_owned_graph(scope, g)?;
+                }
+                if let GraphRef::Graph(g) = to {
+                    require_owned_graph(scope, g)?;
+                }
+            }
+            UpdateOp::Create { graph, .. } => require_owned_graph(scope, graph)?,
+            UpdateOp::Clear { target, .. } | UpdateOp::Drop { target, .. } => {
+                if let GraphTarget::Graph(g) = target {
+                    require_owned_graph(scope, g)?;
+                }
+            }
+            UpdateOp::Load { source, into, .. } => {
+                require_owned_graph(scope, source)?;
+                if let Some(g) = into {
+                    require_owned_graph(scope, g)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, OntolithError> {

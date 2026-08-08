@@ -19,7 +19,9 @@ use ontolith_query::infrastructure::update_pipeline;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
-use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode};
+use ontolith_security::domain::{
+    AuditOutcome, AuthContext, AuthMode, TenantMode, TenantNamespace,
+};
 use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
 use ontolith_storage::domain::{StorageStats, WriteBatch, WriteOperation};
 use ontolith_storage::infrastructure::{
@@ -68,19 +70,28 @@ pub struct AppState {
     pub bind_address: String,
     pub backend: StorageBackendKind,
     pub data_dir: Option<PathBuf>,
+    /// Tenant isolation posture (P5-03): `Enforced` scopes every read/write
+    /// to the caller's tenant namespace.
+    pub tenant_mode: TenantMode,
     pub cluster: Arc<dyn ClusterRuntime>,
     pub cluster_tick: AtomicU64,
 }
 
 impl AppState {
     pub fn new_memory(bind_address: String, auth: HeaderAuthenticator) -> Arc<Self> {
-        Self::new_memory_with_audit(bind_address, auth, InMemoryAuditLog::new())
+        Self::new_memory_with_audit(
+            bind_address,
+            auth,
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+        )
     }
 
     pub fn new_memory_with_audit(
         bind_address: String,
         auth: HeaderAuthenticator,
         audit: InMemoryAuditLog,
+        tenant_mode: TenantMode,
     ) -> Arc<Self> {
         let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
         let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
@@ -96,6 +107,7 @@ impl AppState {
             None,
             default_cluster(),
             audit,
+            tenant_mode,
         )
     }
 
@@ -106,6 +118,7 @@ impl AppState {
         bind_address: String,
         auth: HeaderAuthenticator,
         audit: InMemoryAuditLog,
+        tenant_mode: TenantMode,
         cluster: Arc<dyn ClusterRuntime>,
     ) -> Arc<Self> {
         let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
@@ -122,6 +135,7 @@ impl AppState {
             None,
             cluster,
             audit,
+            tenant_mode,
         )
     }
 
@@ -131,7 +145,13 @@ impl AppState {
         auth: HeaderAuthenticator,
         path: PathBuf,
     ) -> Result<Arc<Self>, OntolithError> {
-        Self::new_rocksdb_with_audit(bind_address, auth, path, InMemoryAuditLog::new())
+        Self::new_rocksdb_with_audit(
+            bind_address,
+            auth,
+            path,
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+        )
     }
 
     #[cfg(feature = "rocksdb-backend")]
@@ -140,6 +160,7 @@ impl AppState {
         auth: HeaderAuthenticator,
         path: PathBuf,
         audit: InMemoryAuditLog,
+        tenant_mode: TenantMode,
     ) -> Result<Arc<Self>, OntolithError> {
         let engine = Arc::new(ontolith_storage::open_durable_engine(&path)?);
         let dictionary: Arc<dyn DictionaryCodec> = Arc::clone(&engine) as Arc<dyn DictionaryCodec>;
@@ -156,6 +177,7 @@ impl AppState {
             Some(path),
             default_cluster(),
             audit,
+            tenant_mode,
         ))
     }
 
@@ -166,6 +188,7 @@ impl AppState {
         auth: HeaderAuthenticator,
         path: PathBuf,
         audit: InMemoryAuditLog,
+        tenant_mode: TenantMode,
         cluster: Arc<dyn ClusterRuntime>,
     ) -> Result<Arc<Self>, OntolithError> {
         let engine = Arc::new(ontolith_storage::open_durable_engine(&path)?);
@@ -183,6 +206,7 @@ impl AppState {
             Some(path),
             cluster,
             audit,
+            tenant_mode,
         ))
     }
 
@@ -197,6 +221,7 @@ impl AppState {
         data_dir: Option<PathBuf>,
         cluster: Arc<dyn ClusterRuntime>,
         audit: InMemoryAuditLog,
+        tenant_mode: TenantMode,
     ) -> Arc<Self> {
         Arc::new(Self {
             storage,
@@ -216,6 +241,7 @@ impl AppState {
             bind_address,
             backend,
             data_dir,
+            tenant_mode,
             cluster,
             cluster_tick: AtomicU64::new(0),
         })
@@ -305,7 +331,7 @@ impl AppState {
             200,
             "OK",
             format!(
-                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"data_dir":{}}}"#,
+                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"data_dir":{}}}"#,
                 json_string(&self.bind_address),
                 json_string(self.backend.as_str()),
                 stats.triple_count,
@@ -315,6 +341,7 @@ impl AppState {
                     AuthMode::Disabled => "disabled",
                     AuthMode::Enforced => "enforced",
                 }),
+                json_string(self.tenant_mode.as_str()),
                 match &self.data_dir {
                     Some(p) => json_string(&p.display().to_string()),
                     None => "null".into(),
@@ -517,6 +544,11 @@ impl AppState {
 
         let mut qreq = QueryRequest::new(query_text.clone()).with_consistency(consistency);
         qreq.tenant = Some(ctx.tenant.as_str().to_owned());
+        if self.tenant_mode == TenantMode::Enforced {
+            qreq = qreq.with_tenant_scope(ontolith_query::domain::TenantScope::new(
+                ctx.tenant.as_str().to_owned(),
+            ));
+        }
         if let Some(t) = timeout_ms {
             qreq = qreq.with_timeout(t);
         }
@@ -605,19 +637,32 @@ impl AppState {
             }
         };
 
-        // Tenant isolation at write path: stamp graph name with tenant if requested.
-        let tenant_graph = req.query.get("graph").cloned().or_else(|| {
-            if req
-                .query
-                .get("tenant_graph")
-                .map(|v| v == "1" || v == "true")
-                .unwrap_or(false)
-            {
-                Some(format!("urn:tenant:{}", ctx.tenant.as_str()))
-            } else {
-                None
+        // Tenant isolation at write path (P5-03): enforced mode ALWAYS stamps
+        // default-graph statements into the tenant's graph and rejects any
+        // graph reference outside the tenant namespace.
+        let namespace = TenantNamespace::new(ctx.tenant.as_str());
+        let tenant_graph = if self.tenant_mode == TenantMode::Enforced {
+            match req.query.get("graph") {
+                Some(g) => {
+                    namespace.require_owned(g)?;
+                    Some(g.clone())
+                }
+                None => Some(namespace.tenant_graph()),
             }
-        });
+        } else {
+            req.query.get("graph").cloned().or_else(|| {
+                if req
+                    .query
+                    .get("tenant_graph")
+                    .map(|v| v == "1" || v == "true")
+                    .unwrap_or(false)
+                {
+                    Some(namespace.tenant_graph())
+                } else {
+                    None
+                }
+            })
+        };
 
         let mut ops = Vec::new();
         for t in parsed.dataset.default_graph {
@@ -633,6 +678,9 @@ impl AppState {
             }
         }
         for ng in parsed.dataset.named_graphs {
+            if self.tenant_mode == TenantMode::Enforced {
+                namespace.require_owned(ng.name.as_str())?;
+            }
             for t in ng.triples {
                 ops.push(WriteOperation::PutQuad(
                     ontolith_rdf::domain::Quad::in_named_graph(t, ng.name.clone()),
@@ -1487,6 +1535,206 @@ mod tests {
             headers,
             body: query.as_bytes().to_vec(),
         }
+    }
+
+    /// Authenticated request for enforced tenant-mode tests.
+    fn tenant_req(
+        method: &str,
+        path: &str,
+        query: HashMap<String, String>,
+        body: &[u8],
+        tenant: &str,
+        user: &str,
+    ) -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert("x-ontolith-tenant".to_owned(), tenant.to_owned());
+        headers.insert("x-ontolith-user".to_owned(), user.to_owned());
+        headers.insert("x-api-key".to_owned(), "s3cret".to_owned());
+        HttpRequest {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            query,
+            headers,
+            body: body.to_vec(),
+        }
+    }
+
+    /// Enforced auth + enforced tenant isolation.
+    fn enforced_tenant_state() -> Arc<AppState> {
+        AppState::new_memory_with_audit(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator {
+                mode: AuthMode::Enforced,
+                api_key: Some("s3cret".to_owned()),
+                ..HeaderAuthenticator::default()
+            },
+            InMemoryAuditLog::new(),
+            TenantMode::Enforced,
+        )
+    }
+
+    #[test]
+    fn enforced_tenant_mode_isolates_reads_and_writes() {
+        let state = enforced_tenant_state();
+
+        // Health surfaces the tenant posture.
+        let health = dispatch_for_test(
+            &state,
+            tenant_req(
+                "GET",
+                "/health",
+                HashMap::new(),
+                b"",
+                "acme",
+                "u1",
+            ),
+        );
+        assert_eq!(health.status, 200);
+        assert!(String::from_utf8_lossy(&health.body).contains("\"tenant_mode\":\"enforced\""));
+
+        // Tenant acme writes; the data is stamped into its tenant graph.
+        let write = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                b"INSERT DATA { <http://ex.org/s1> <http://ex.org/p> \"acme-data\" }",
+                "acme",
+                "u1",
+            ),
+        );
+        assert_eq!(
+            write.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&write.body)
+        );
+
+        // Tenant other writes its own data.
+        let write = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                b"INSERT DATA { <http://ex.org/s2> <http://ex.org/p> \"other-data\" }",
+                "other",
+                "u2",
+            ),
+        );
+        assert_eq!(write.status, 200);
+
+        // Each tenant's default graph is its own namespace.
+        let acme_read = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                b"SELECT ?s ?o WHERE { ?s <http://ex.org/p> ?o }",
+                "acme",
+                "u1",
+            ),
+        );
+        let body = String::from_utf8_lossy(&acme_read.body);
+        assert!(body.contains("acme-data"), "acme read: {body}");
+        assert!(!body.contains("other-data"), "acme must not see other tenant: {body}");
+
+        let other_read = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                b"SELECT ?s ?o WHERE { ?s <http://ex.org/p> ?o }",
+                "other",
+                "u2",
+            ),
+        );
+        let body = String::from_utf8_lossy(&other_read.body);
+        assert!(body.contains("other-data"), "other read: {body}");
+        assert!(!body.contains("acme-data"), "other must not see acme tenant: {body}");
+    }
+
+    #[test]
+    fn enforced_tenant_mode_rejects_cross_tenant_references() {
+        let state = enforced_tenant_state();
+
+        // Explicit graph write outside the tenant namespace -> 403.
+        let mut query = HashMap::new();
+        query.insert("graph".to_owned(), "urn:tenant:other".to_owned());
+        let resp = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/data/nt",
+                query,
+                b"<http://ex.org/s> <http://ex.org/p> \"o\" .",
+                "acme",
+                "u1",
+            ),
+        );
+        assert_eq!(resp.status, 403, "body={}", String::from_utf8_lossy(&resp.body));
+
+        // Named-graph quad in the payload outside the namespace -> 403.
+        let resp = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/data/trig",
+                HashMap::new(),
+                b"<urn:tenant:other> { <http://ex.org/s> <http://ex.org/p> \"o\" }",
+                "acme",
+                "u1",
+            ),
+        );
+        assert_eq!(resp.status, 403, "body={}", String::from_utf8_lossy(&resp.body));
+
+        // SPARQL GRAPH reference to a foreign tenant -> 403.
+        let resp = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                b"SELECT * WHERE { GRAPH <urn:tenant:other> { ?s ?p ?o } }",
+                "acme",
+                "u1",
+            ),
+        );
+        assert_eq!(resp.status, 403, "body={}", String::from_utf8_lossy(&resp.body));
+
+        // SPARQL FROM reference to a foreign tenant -> 403.
+        let resp = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                b"SELECT * FROM <urn:tenant:other> WHERE { ?s ?p ?o }",
+                "acme",
+                "u1",
+            ),
+        );
+        assert_eq!(resp.status, 403, "body={}", String::from_utf8_lossy(&resp.body));
+
+        // An owned sub-graph write succeeds.
+        let mut query = HashMap::new();
+        query.insert("graph".to_owned(), "urn:tenant:acme:sub".to_owned());
+        let resp = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/data/nt",
+                query,
+                b"<http://ex.org/s> <http://ex.org/p> \"o\" .",
+                "acme",
+                "u1",
+            ),
+        );
+        assert_eq!(resp.status, 200, "body={}", String::from_utf8_lossy(&resp.body));
+        assert!(String::from_utf8_lossy(&resp.body).contains("urn:tenant:acme:sub"));
     }
 
     #[test]

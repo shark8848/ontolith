@@ -7,7 +7,7 @@ use ontolith_core::error::OntolithError;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
-use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode};
+use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode, TenantMode};
 use ontolith_security::infrastructure::FileAuditLog;
 use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -21,6 +21,7 @@ const API_BIND_ENV: &str = "ONTOLITH_BIND";
 const STORAGE_ENV: &str = "ONTOLITH_STORAGE";
 const DATA_DIR_ENV: &str = "ONTOLITH_DATA_DIR";
 const AUTH_MODE_ENV: &str = "ONTOLITH_AUTH_MODE";
+const TENANT_MODE_ENV: &str = "ONTOLITH_TENANT_MODE";
 const API_KEY_ENV: &str = "ONTOLITH_API_KEY";
 const AUDIT_PATH_ENV: &str = "ONTOLITH_AUDIT_PATH";
 const CLUSTER_MODE_ENV: &str = "ONTOLITH_CLUSTER_MODE";
@@ -234,7 +235,7 @@ impl ManagementState {
             200,
             "OK",
             format!(
-                r#"{{"management_bind":{},"runtime_bind":{},"storage_backend":{},"data_dir":{},"auth_mode":{},"audit_path":{},"tls":{},"started_at_ms":{}}}"#,
+                r#"{{"management_bind":{},"runtime_bind":{},"storage_backend":{},"data_dir":{},"auth_mode":{},"tenant_mode":{},"audit_path":{},"tls":{},"started_at_ms":{}}}"#,
                 json_string(&self.management_bind),
                 json_string(&self.app.bind_address),
                 json_string(self.app.backend.as_str()),
@@ -247,6 +248,7 @@ impl ManagementState {
                     AuthMode::Disabled => "disabled",
                     AuthMode::Enforced => "enforced",
                 }),
+                json_string(self.app.tenant_mode.as_str()),
                 self.app
                     .audit
                     .file_path()
@@ -461,7 +463,8 @@ pub fn run() -> Result<(), String> {
 
     let authenticator = load_authenticator();
     let audit = load_audit_log_from_env().map_err(|e| e.message().to_owned())?;
-    let app = build_managed_app_state(api_bind, authenticator, audit)?;
+    let tenant_mode = load_tenant_mode();
+    let app = build_managed_app_state(api_bind, authenticator, audit, tenant_mode)?;
     let state = ManagementState::new(
         app,
         management_bind.clone(),
@@ -553,6 +556,14 @@ fn load_authenticator() -> HeaderAuthenticator {
     }
 }
 
+/// `ONTOLITH_TENANT_MODE` → [`TenantMode`] (P5-03). Defaults to `disabled`
+/// so legacy single-tenant deployments keep their behavior.
+fn load_tenant_mode() -> TenantMode {
+    TenantMode::parse(
+        &env::var(TENANT_MODE_ENV).unwrap_or_else(|_| "disabled".to_owned()),
+    )
+}
+
 fn load_management_acl_from_env() -> ManagementAcl {
     let read_key = env::var(MGMT_READ_KEY_ENV)
         .ok()
@@ -642,6 +653,7 @@ fn build_managed_app_state(
     bind_address: String,
     auth: HeaderAuthenticator,
     audit: InMemoryAuditLog,
+    tenant_mode: TenantMode,
 ) -> Result<Arc<AppState>, String> {
     let cluster = build_cluster_runtime()?;
     let wants_rocks = env::var(STORAGE_ENV)
@@ -661,7 +673,9 @@ fn build_managed_app_state(
     {
         if wants_rocks || data_dir.is_some() {
             let path = data_dir.unwrap_or_else(|| PathBuf::from("./data/ontolith"));
-            return AppState::new_rocksdb_with_cluster(bind_address, auth, path, audit, cluster)
+            return AppState::new_rocksdb_with_cluster(
+                bind_address, auth, path, audit, tenant_mode, cluster,
+            )
                 .map_err(|e| e.message().to_owned());
         }
     }
@@ -673,7 +687,9 @@ fn build_managed_app_state(
         }
     }
 
-    Ok(AppState::new_memory_with_cluster(bind_address, auth, audit, cluster))
+    Ok(AppState::new_memory_with_cluster(
+        bind_address, auth, audit, tenant_mode, cluster,
+    ))
 }
 
 /// Select the L4 cluster runtime for the management binary.
@@ -806,6 +822,7 @@ mod tests {
             "127.0.0.1:8080".to_owned(),
             auth,
             InMemoryAuditLog::new(),
+            TenantMode::Disabled,
         );
         ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl, 10, false)
     }

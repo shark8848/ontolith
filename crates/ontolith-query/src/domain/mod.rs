@@ -677,12 +677,44 @@ pub struct QueryRequest {
     pub query: QueryText,
     pub txn_id: Option<TxnId>,
     pub tenant: Option<String>,
+    /// Tenant read/write scope (P5-03): when set, the dataset is restricted
+    /// to the tenant's named-graph namespace and cross-tenant references are
+    /// rejected. Filled by the access layer when tenant isolation is enforced.
+    pub tenant_scope: Option<TenantScope>,
     pub timeout_ms: Option<u64>,
     /// Cooperative cancellation flag; set true to stop execution.
     pub cancel: Option<Arc<AtomicBool>>,
     /// Client-visible read consistency (SAS-0001 §8); single-node engines treat
     /// Strong/Session equivalently for committed data.
     pub consistency: ConsistencyLevel,
+}
+
+/// Tenant scope for a single query (P5-03): the reserved named-graph
+/// namespace (`urn:tenant:<t>` and sub-graphs) that the query may observe
+/// and mutate. Kept in the query crate so the executor can enforce isolation
+/// without depending on the security crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantScope {
+    pub tenant: String,
+}
+
+impl TenantScope {
+    pub fn new(tenant: impl Into<String>) -> Self {
+        Self {
+            tenant: tenant.into(),
+        }
+    }
+
+    /// The namespace prefix (also the tenant's default graph).
+    pub fn graph_prefix(&self) -> String {
+        format!("urn:tenant:{}", self.tenant)
+    }
+
+    /// Whether `graph` belongs to this tenant's namespace.
+    pub fn is_owned(&self, graph: &str) -> bool {
+        let prefix = self.graph_prefix();
+        graph == prefix || graph.starts_with(&format!("{prefix}:"))
+    }
 }
 
 /// Async preemption token: a wall-clock deadline combined with a cooperative
@@ -750,6 +782,7 @@ impl PartialEq for QueryRequest {
         self.query == other.query
             && self.txn_id == other.txn_id
             && self.tenant == other.tenant
+            && self.tenant_scope == other.tenant_scope
             && self.timeout_ms == other.timeout_ms
             && self.consistency == other.consistency
             && self.is_cancelled() == other.is_cancelled()
@@ -762,6 +795,7 @@ impl QueryRequest {
             query: QueryText(query.into()),
             txn_id: None,
             tenant: None,
+            tenant_scope: None,
             timeout_ms: None,
             cancel: None,
             consistency: ConsistencyLevel::Strong,
@@ -794,6 +828,12 @@ impl QueryRequest {
 
     pub fn with_consistency(mut self, level: ConsistencyLevel) -> Self {
         self.consistency = level;
+        self
+    }
+
+    /// Scope the query to a tenant namespace (P5-03 enforced isolation).
+    pub fn with_tenant_scope(mut self, scope: TenantScope) -> Self {
+        self.tenant_scope = Some(scope);
         self
     }
 
