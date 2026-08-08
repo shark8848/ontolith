@@ -8,8 +8,13 @@ use ontolith_cluster::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
 use ontolith_cluster::infrastructure::raft::{RaftClusterConfig, RaftClusterRuntime};
 use ontolith_core::domain::ConsistencyLevel;
 use ontolith_core::error::OntolithError;
-use ontolith_observability::domain::{MetricKind, MetricPoint};
-use ontolith_observability::infrastructure::{InMemoryMetricSink, render_prometheus_text};
+use ontolith_observability::domain::{
+    MetricKind, MetricPoint, SpanEvent, SpanName, SpanStatus, TraceContext,
+};
+use ontolith_observability::infrastructure::{
+    InMemoryMetricSink, InMemoryTraceStore, TraceScope, current_trace, format_traceparent,
+    generate_span_id, generate_trace_id, parse_traceparent, render_prometheus_text,
+};
 use ontolith_parser::domain::ParseFormat;
 use ontolith_parser::infrastructure::{
     parse_nquads, parse_ntriples, parse_trig_doc, parse_turtle_doc,
@@ -60,6 +65,7 @@ pub struct AppState {
     pub authenticator: HeaderAuthenticator,
     pub audit: InMemoryAuditLog,
     pub metrics: InMemoryMetricSink,
+    pub traces: InMemoryTraceStore,
     pub requests_total: AtomicU64,
     pub sparql_total: AtomicU64,
     pub sparql_errors: AtomicU64,
@@ -231,6 +237,7 @@ impl AppState {
             authenticator: auth,
             audit,
             metrics: InMemoryMetricSink::new(),
+            traces: InMemoryTraceStore::new(1024),
             requests_total: AtomicU64::new(0),
             sparql_total: AtomicU64::new(0),
             sparql_errors: AtomicU64::new(0),
@@ -256,6 +263,22 @@ impl AppState {
         if method == "OPTIONS" {
             return cors(HttpResponse::text(204, "No Content", ""));
         }
+
+        // Tracing (P5-05): continue an upstream W3C `traceparent` context or
+        // start a new trace; the root span is recorded after dispatch and the
+        // context is echoed back so downstream hops continue the same trace.
+        let upstream = parse_traceparent(req.header("traceparent"));
+        let trace_id = upstream
+            .as_ref()
+            .map(|ctx| ctx.trace_id.clone())
+            .unwrap_or_else(generate_trace_id);
+        let root_span_id = generate_span_id();
+        let parent_span_id = upstream.as_ref().map(|ctx| ctx.span_id.clone());
+        let _scope = TraceScope::enter(TraceContext {
+            trace_id: trace_id.clone(),
+            span_id: root_span_id.clone(),
+        });
+        let started_at_ms = now_ms();
 
         let result = match (method.as_str(), path) {
             ("GET", "/health") | ("GET", "/healthz") => self.health(&req),
@@ -303,6 +326,31 @@ impl AppState {
         if let Ok(mut map) = self.status_counts.lock() {
             *map.entry(resp.status).or_insert(0) += 1;
         }
+        // Record the request root span and propagate the trace context.
+        let _ = self.traces.record(SpanEvent {
+            trace_id: trace_id.clone(),
+            span_id: root_span_id.clone(),
+            parent_span_id,
+            name: SpanName("http.request".into()),
+            start_ms: started_at_ms,
+            duration_ms: elapsed,
+            status: if resp.status >= 400 {
+                SpanStatus::Error
+            } else {
+                SpanStatus::Ok
+            },
+            attributes: vec![
+                ("method".into(), method.clone()),
+                ("path".into(), path.to_owned()),
+                ("status".into(), resp.status.to_string()),
+                ("latency_ms".into(), elapsed.to_string()),
+            ],
+        });
+        let mut resp = resp;
+        resp.headers.push((
+            "Traceparent".into(),
+            format_traceparent(&trace_id, &root_span_id),
+        ));
         // Request access log line (structured-ish plain text).
         eprintln!(
             "access method={} path={} status={} latency_ms={} bytes={}",
@@ -316,12 +364,30 @@ impl AppState {
     }
 
     fn auth(&self, req: &HttpRequest) -> Result<AuthContext, OntolithError> {
-        self.authenticator.authenticate_with_bearer(
+        let start_ms = now_ms();
+        let result = self.authenticator.authenticate_with_bearer(
             req.header("x-ontolith-tenant"),
             req.header("x-ontolith-user"),
             req.header("x-api-key"),
             req.header("authorization"),
-        )
+        );
+        if let Some(trace) = current_trace() {
+            let _ = self.traces.record(SpanEvent {
+                trace_id: trace.trace_id,
+                span_id: generate_span_id(),
+                parent_span_id: Some(trace.span_id),
+                name: SpanName("http.auth".into()),
+                start_ms,
+                duration_ms: now_ms() - start_ms,
+                status: if result.is_ok() {
+                    SpanStatus::Ok
+                } else {
+                    SpanStatus::Error
+                },
+                attributes: vec![],
+            });
+        }
+        result
     }
 
     fn health(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
@@ -332,7 +398,7 @@ impl AppState {
             200,
             "OK",
             format!(
-                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"jwt":{},"data_dir":{}}}"#,
+                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"jwt":{},"tracing":"on","data_dir":{}}}"#,
                 json_string(&self.bind_address),
                 json_string(self.backend.as_str()),
                 stats.triple_count,
@@ -566,58 +632,84 @@ impl AppState {
             Some(Arc::clone(&self.dictionary)),
         );
 
-        if explain {
-            let plan = pipeline.explain(&qreq)?;
-            let body = format!(
-                r#"{{"head":{{"plan_id":{},"kind":{}}},"algebra":{},"logical_steps":{},"physical_steps":{},"estimated_rows":{},"pattern_costs":{},"tenant":{},"consistency":{}}}"#,
-                plan.plan_id.0,
-                json_string(plan.kind.as_str()),
-                json_string(&plan.algebra_summary),
-                json_string_array(&plan.logical_steps),
-                json_string_array(&plan.physical_steps),
-                json_opt_number(plan.estimated_rows),
-                json_pattern_costs(&plan.pattern_costs),
-                json_string(ctx.tenant.as_str()),
-                json_string(consistency.as_str()),
-            );
+        let start_ms = now_ms();
+        let executed = (|| -> Result<HttpResponse, OntolithError> {
+            if explain {
+                let plan = pipeline.explain(&qreq)?;
+                let body = format!(
+                    r#"{{"head":{{"plan_id":{},"kind":{}}},"algebra":{},"logical_steps":{},"physical_steps":{},"estimated_rows":{},"pattern_costs":{},"tenant":{},"consistency":{}}}"#,
+                    plan.plan_id.0,
+                    json_string(plan.kind.as_str()),
+                    json_string(&plan.algebra_summary),
+                    json_string_array(&plan.logical_steps),
+                    json_string_array(&plan.physical_steps),
+                    json_opt_number(plan.estimated_rows),
+                    json_pattern_costs(&plan.pattern_costs),
+                    json_string(ctx.tenant.as_str()),
+                    json_string(consistency.as_str()),
+                );
+                self.audit.record(
+                    now_ms(),
+                    &ctx,
+                    "explain",
+                    "sparql",
+                    AuditOutcome::Allow,
+                    format!("plan={}", plan.plan_id.0),
+                );
+                return Ok(HttpResponse::json(200, "OK", body));
+            }
+
+            let result = pipeline.execute(&qreq)?;
             self.audit.record(
                 now_ms(),
                 &ctx,
-                "explain",
+                "query",
                 "sparql",
                 AuditOutcome::Allow,
-                format!("plan={}", plan.plan_id.0),
+                if result.kind == QueryKind::Update {
+                    format!("affected={}", result.affected)
+                } else {
+                    format!("rows={}", result.row_count())
+                },
             );
-            return Ok(HttpResponse::json(200, "OK", body));
-        }
 
-        let result = pipeline.execute(&qreq)?;
-        self.audit.record(
-            now_ms(),
-            &ctx,
-            "query",
-            "sparql",
-            AuditOutcome::Allow,
-            if result.kind == QueryKind::Update {
-                format!("affected={}", result.affected)
-            } else {
-                format!("rows={}", result.row_count())
-            },
-        );
-
-        // SPARQL Query Results JSON Format (W3C-inspired) when accept/format asks for it.
-        if format.contains("sparql-results") || format == "srj" || format == "json" {
-            return Ok(HttpResponse::json(
+            // SPARQL Query Results JSON Format (W3C-inspired) when accept/format asks for it.
+            if format.contains("sparql-results") || format == "srj" || format == "json" {
+                return Ok(HttpResponse::json(
+                    200,
+                    "OK",
+                    sparql_results_json(&result, &ctx, consistency),
+                ));
+            }
+            Ok(HttpResponse::json(
                 200,
                 "OK",
                 sparql_results_json(&result, &ctx, consistency),
-            ));
+            ))
+        })();
+        if let Some(trace) = current_trace() {
+            let _ = self.traces.record(SpanEvent {
+                trace_id: trace.trace_id,
+                span_id: generate_span_id(),
+                parent_span_id: Some(trace.span_id),
+                name: SpanName("sparql.execute".into()),
+                start_ms,
+                duration_ms: now_ms() - start_ms,
+                status: if executed.is_ok() {
+                    SpanStatus::Ok
+                } else {
+                    SpanStatus::Error
+                },
+                attributes: vec![
+                    (
+                        "kind".into(),
+                        (if explain { "explain" } else { "query" }).to_owned(),
+                    ),
+                    ("tenant".into(), ctx.tenant.as_str().to_owned()),
+                ],
+            });
         }
-        Ok(HttpResponse::json(
-            200,
-            "OK",
-            sparql_results_json(&result, &ctx, consistency),
-        ))
+        executed
     }
 
     fn ingest(&self, req: &HttpRequest, path: &str) -> Result<HttpResponse, OntolithError> {
@@ -625,49 +717,51 @@ impl AppState {
         authorize(&self.audit, &ctx, "data", "write", now_ms())?;
         self.ingest_total.fetch_add(1, Ordering::Relaxed);
 
-        let format = detect_ingest_format(req, path)?;
-        let text = req.body_str();
-        if text.trim().is_empty() {
-            return Err(OntolithError::InvalidArgument("empty ingest body"));
-        }
-
-        let dict = self.dictionary.as_ref();
-        let parsed = match format {
-            ParseFormat::NTriples => parse_ntriples(text, dict)?,
-            ParseFormat::NQuads => parse_nquads(text, dict)?,
-            ParseFormat::Turtle => parse_turtle_doc(text, dict)?,
-            ParseFormat::TriG => parse_trig_doc(text, dict)?,
-            ParseFormat::JsonLd => {
-                return Err(OntolithError::Unsupported("json-ld"));
+        let start_ms = now_ms();
+        let ingested = (|| -> Result<HttpResponse, OntolithError> {
+            let format = detect_ingest_format(req, path)?;
+            let text = req.body_str();
+            if text.trim().is_empty() {
+                return Err(OntolithError::InvalidArgument("empty ingest body"));
             }
-        };
 
-        // Tenant isolation at write path (P5-03): enforced mode ALWAYS stamps
-        // default-graph statements into the tenant's graph and rejects any
-        // graph reference outside the tenant namespace.
-        let namespace = TenantNamespace::new(ctx.tenant.as_str());
-        let tenant_graph = if self.tenant_mode == TenantMode::Enforced {
-            match req.query.get("graph") {
-                Some(g) => {
-                    namespace.require_owned(g)?;
-                    Some(g.clone())
+            let dict = self.dictionary.as_ref();
+            let parsed = match format {
+                ParseFormat::NTriples => parse_ntriples(text, dict)?,
+                ParseFormat::NQuads => parse_nquads(text, dict)?,
+                ParseFormat::Turtle => parse_turtle_doc(text, dict)?,
+                ParseFormat::TriG => parse_trig_doc(text, dict)?,
+                ParseFormat::JsonLd => {
+                    return Err(OntolithError::Unsupported("json-ld"));
                 }
-                None => Some(namespace.tenant_graph()),
-            }
-        } else {
-            req.query.get("graph").cloned().or_else(|| {
-                if req
-                    .query
-                    .get("tenant_graph")
-                    .map(|v| v == "1" || v == "true")
-                    .unwrap_or(false)
-                {
-                    Some(namespace.tenant_graph())
-                } else {
-                    None
+            };
+
+            // Tenant isolation at write path (P5-03): enforced mode ALWAYS
+            // stamps default-graph statements into the tenant's graph and
+            // rejects any graph reference outside the tenant namespace.
+            let namespace = TenantNamespace::new(ctx.tenant.as_str());
+            let tenant_graph = if self.tenant_mode == TenantMode::Enforced {
+                match req.query.get("graph") {
+                    Some(g) => {
+                        namespace.require_owned(g)?;
+                        Some(g.clone())
+                    }
+                    None => Some(namespace.tenant_graph()),
                 }
-            })
-        };
+            } else {
+                req.query.get("graph").cloned().or_else(|| {
+                    if req
+                        .query
+                        .get("tenant_graph")
+                        .map(|v| v == "1" || v == "true")
+                        .unwrap_or(false)
+                    {
+                        Some(namespace.tenant_graph())
+                    } else {
+                        None
+                    }
+                })
+            };
 
         let mut ops = Vec::new();
         for t in parsed.dataset.default_graph {
@@ -727,21 +821,42 @@ impl AppState {
             ),
         );
 
-        Ok(HttpResponse::json(
-            200,
-            "OK",
-            format!(
-                r#"{{"format":{},"triples":{},"quads":{},"tenant":{},"graph":{}}}"#,
-                json_string(format.as_str()),
-                triple_n,
-                quad_n,
-                json_string(ctx.tenant.as_str()),
-                match tenant_graph {
-                    Some(g) => json_string(&g),
-                    None => "null".into(),
-                }
-            ),
-        ))
+            Ok(HttpResponse::json(
+                200,
+                "OK",
+                format!(
+                    r#"{{"format":{},"triples":{},"quads":{},"tenant":{},"graph":{}}}"#,
+                    json_string(format.as_str()),
+                    triple_n,
+                    quad_n,
+                    json_string(ctx.tenant.as_str()),
+                    match tenant_graph {
+                        Some(g) => json_string(&g),
+                        None => "null".into(),
+                    }
+                ),
+            ))
+        })();
+        if let Some(trace) = current_trace() {
+            let _ = self.traces.record(SpanEvent {
+                trace_id: trace.trace_id,
+                span_id: generate_span_id(),
+                parent_span_id: Some(trace.span_id),
+                name: SpanName("data.ingest".into()),
+                start_ms,
+                duration_ms: now_ms() - start_ms,
+                status: if ingested.is_ok() {
+                    SpanStatus::Ok
+                } else {
+                    SpanStatus::Error
+                },
+                attributes: vec![
+                    ("path".into(), path.to_owned()),
+                    ("tenant".into(), ctx.tenant.as_str().to_owned()),
+                ],
+            });
+        }
+        ingested
     }
 
     // ---- L4 cluster control plane HTTP ----
@@ -1834,6 +1949,100 @@ mod tests {
         );
         let body = String::from_utf8_lossy(&read.body);
         assert!(body.contains("jwt-tenant-wins"), "acme read: {body}");
+    }
+
+    #[test]
+    fn tracing_records_full_chain_spans() {
+        use ontolith_observability::infrastructure::{
+            format_traceparent, generate_span_id, generate_trace_id,
+        };
+        let state = AppState::new_memory(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator::default(),
+        );
+        let upstream_trace = generate_trace_id();
+        let upstream_span = generate_span_id();
+
+        let mut req = sparql_req("POST", "SELECT * WHERE { ?s ?p ?o } LIMIT 1");
+        req.headers.insert(
+            "traceparent".to_owned(),
+            format_traceparent(&upstream_trace, &upstream_span),
+        );
+        let resp = dispatch_for_test(&state, req);
+        assert_eq!(resp.status, 200, "body={}", String::from_utf8_lossy(&resp.body));
+
+        // The response echoes the same trace id for downstream propagation.
+        let echoed = resp
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("traceparent"))
+            .expect("response must carry a traceparent header");
+        assert!(echoed.1.starts_with(&format!("00-{}", upstream_trace.0)));
+
+        // Full chain: http.request (root) -> http.auth + sparql.execute.
+        let spans = state.traces.spans();
+        let names: Vec<&str> = spans.iter().map(|s| s.name.0.as_str()).collect();
+        assert!(names.contains(&"http.request"), "spans={names:?}");
+        assert!(names.contains(&"http.auth"), "spans={names:?}");
+        assert!(names.contains(&"sparql.execute"), "spans={names:?}");
+
+        let root = spans
+            .iter()
+            .find(|s| s.name.0 == "http.request")
+            .expect("root span");
+        assert_eq!(root.parent_span_id.as_ref().unwrap().0, upstream_span.0);
+        let query_span = spans
+            .iter()
+            .find(|s| s.name.0 == "sparql.execute")
+            .expect("query span");
+        assert_eq!(
+            query_span.parent_span_id.as_ref().unwrap().0,
+            root.span_id.0
+        );
+        assert!(query_span
+            .attributes
+            .iter()
+            .any(|(k, v)| k == "tenant" && v == "system"));
+        assert_eq!(root.status, SpanStatus::Ok);
+    }
+
+    #[test]
+    fn tracing_records_error_spans_for_failed_auth() {
+        let state = AppState::new_memory(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator {
+                mode: AuthMode::Enforced,
+                api_key: Some("s3cret".to_owned()),
+                ..HeaderAuthenticator::default()
+            },
+        );
+        let resp = dispatch_for_test(
+            &state,
+            HttpRequest {
+                method: "GET".to_owned(),
+                path: "/health".to_owned(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(resp.status, 401);
+
+        let spans = state.traces.spans();
+        let root = spans
+            .iter()
+            .find(|s| s.name.0 == "http.request")
+            .expect("root span");
+        assert_eq!(root.status, SpanStatus::Error);
+        let auth_span = spans
+            .iter()
+            .find(|s| s.name.0 == "http.auth")
+            .expect("auth span");
+        assert_eq!(auth_span.status, SpanStatus::Error);
+        assert_eq!(
+            auth_span.parent_span_id.as_ref().unwrap().0,
+            root.span_id.0
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.6.0  
-状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC-ready JWT P5-02)  
+版本: 2.7.0  
+状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC-ready JWT P5-02 + full-chain tracing P5-05)  
 日期: 2026-07-23  
 对应 crate:
 
@@ -132,7 +132,7 @@ JWT Bearer 鉴权（P5-02，OIDC-ready 基线）：配置 `ONTOLITH_JWT_SECRET` 
 RFC 2104，常量时间比对，RFC 4231/FIPS 180-4 向量背书）；`exp` 强制过期校验，
 `ONTOLITH_JWT_ISSUER`/`ONTOLITH_JWT_AUDIENCE` 可选设置 `iss`/`aud` 精确匹配策略。
 自定义 `tenant` claim 解析为租户（优先于 `X-Ontolith-Tenant` 传输头），`scope` claim
-（空格分隔 `resource:action`）可覆盖默认权限，`sub` 为用户。`/health` 暴露 `jwt` 姿态（`on`/`off`）。
+（空格分隔 `resource:action`）可覆盖默认权限，`sub` 为用户。`/health` 暴露 `jwt` 与 `tracing` 姿态（`on`/`off`）。
 
 ```bash
 ONTOLITH_JWT_SECRET=...        # 启用 JWT Bearer 鉴权
@@ -238,7 +238,7 @@ systemctl --user status ontolith-server
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
 | ontolith-security | **18** | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权） |
-| ontolith-server | **26** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）** |
+| ontolith-server | **29** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）** |
 
 ---
 
@@ -285,3 +285,4 @@ ONTOLITH_API_KEY=...
 
 | 2026-08-08 | 2.5.0 | **P5-03 强制租户隔离**：`TenantMode`/`TenantNamespace`（`ONTOLITH_TENANT_MODE`，`urn:tenant:<t>` 命名空间 + `require_owned` 403）；`QueryRequest.tenant_scope` 下沉执行器（`TenantScopedRead/Write`：默认图重指向 + 命名图过滤 + 更新盖章），`FROM`/`GRAPH`/`USING`/图管理目标越权 403；server 写路径强制盖章、读路径注入作用域、`/health`+`/admin/config` 暴露 `tenant_mode`；security 9→12、query 83→86、server 22→24 测 |
 | 2026-08-08 | 2.6.0 | **P5-02 OIDC/JWT 鉴权基线**：树内 HS256 JWT 验证（RFC 7519 子集 + FIPS 180-4/RFC 4231 向量背书）+ `Authorization: Bearer` 接入（`ONTOLITH_JWT_SECRET`/`ISSUER`/`AUDIENCE`，`exp`/`iss`/`aud` 校验、JWT tenant claim 优先于传输头、`scope` 权限覆盖）；`/health` 暴露 `jwt` 姿态；security 12→18、server 24→26 测 |
+| 2026-08-08 | 2.7.0 | **P5-05 Tracing 全链路**：`ontolith-observability` 追踪域模型 + `InMemoryTraceStore` + W3C `traceparent` 解析/生成 + 线程本地 `TraceScope`；server 网关 `http.request` 根 span + `http.auth`/`sparql.execute`/`data.ingest` 子 span、响应回带 `Traceparent`、`/health`+`/admin/config` 暴露 `tracing` 姿态、`GET /admin/traces`；observability 6→11、server 26→29 测 |

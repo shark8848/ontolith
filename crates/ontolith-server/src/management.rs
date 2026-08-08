@@ -9,6 +9,7 @@ use ontolith_security::application::{
 };
 use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode, TenantMode};
 use ontolith_security::infrastructure::FileAuditLog;
+use ontolith_observability::infrastructure::render_traces_json;
 use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
@@ -117,6 +118,7 @@ impl ManagementState {
             ("GET", "/admin/config") => self.admin_config(&req),
             ("GET", "/admin/layers") => self.admin_layers(&req),
             ("GET", "/admin/monitoring") => self.admin_monitoring(&req),
+            ("GET", "/admin/traces") => self.admin_traces(&req),
             ("GET", "/admin/data/stats") => self.admin_data_stats(&req),
             ("GET", "/admin/data/audit") => self.admin_data_audit(&req),
             ("POST", "/admin/data/replicate") => self.admin_data_replicate(&req),
@@ -238,7 +240,7 @@ impl ManagementState {
             200,
             "OK",
             format!(
-                r#"{{"management_bind":{},"runtime_bind":{},"storage_backend":{},"data_dir":{},"auth_mode":{},"tenant_mode":{},"audit_path":{},"tls":{},"started_at_ms":{}}}"#,
+                r#"{{"management_bind":{},"runtime_bind":{},"storage_backend":{},"data_dir":{},"auth_mode":{},"tenant_mode":{},"audit_path":{},"tls":{},"tracing":"on","started_at_ms":{}}}"#,
                 json_string(&self.management_bind),
                 json_string(&self.app.bind_address),
                 json_string(self.app.backend.as_str()),
@@ -264,6 +266,22 @@ impl ManagementState {
                 },
                 self.started_at_ms,
             ),
+        ))
+    }
+
+    fn admin_traces(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_read(req, "metrics", "read")?;
+        let limit = req
+            .query
+            .get("limit")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(20)
+            .min(200);
+        let spans = self.app.traces.spans();
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            render_traces_json(&spans, limit),
         ))
     }
 
@@ -870,6 +888,25 @@ mod tests {
         let body = String::from_utf8(resp.body).expect("valid utf8");
         assert!(body.contains("\"requests_total\""));
         assert!(body.contains("\"cluster\""));
+    }
+
+    #[test]
+    fn traces_endpoint_lists_recorded_spans() {
+        let state = test_state(HeaderAuthenticator::default());
+        // Generate a trace through the runtime gateway.
+        let _ = state.app.handle(req("GET", "/health"));
+
+        let resp = dispatch_for_test(&state, req("GET", "/admin/traces"));
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8(resp.body).expect("valid utf8");
+        assert!(body.contains("\"name\":\"http.request\""), "body={body}");
+        assert!(body.contains("\"span_count\":2"), "body={body}");
+        assert!(body.contains("\"total\":1"), "body={body}");
+
+        // Admin config surfaces the tracing posture.
+        let resp = dispatch_for_test(&state, req("GET", "/admin/config"));
+        let body = String::from_utf8(resp.body).expect("valid utf8");
+        assert!(body.contains("\"tracing\":\"on\""), "body={body}");
     }
 
     #[test]
