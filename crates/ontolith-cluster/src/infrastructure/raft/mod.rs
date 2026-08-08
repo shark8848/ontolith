@@ -76,6 +76,10 @@ pub struct RaftClusterConfig {
     pub region: String,
     pub slot_count: u32,
     pub shard_count: u32,
+    /// Initial slot bias for the control-plane shard map (see
+    /// `ClusterConfig::initial_slot_bias`); lets an online rebalance move
+    /// real slots in the P7-01 drill.
+    pub initial_slot_bias: u32,
     pub max_eventual_lag: u64,
     /// Raft heartbeat interval in milliseconds (tuned down in tests).
     pub heartbeat_interval_ms: u64,
@@ -98,6 +102,7 @@ impl Default for RaftClusterConfig {
             region: "default".into(),
             slot_count: 1024,
             shard_count: 2,
+            initial_slot_bias: 0,
             max_eventual_lag: 100,
             heartbeat_interval_ms: 200,
             http_listen_addr: None,
@@ -664,6 +669,7 @@ impl RaftClusterRuntime {
             region: config.region.clone(),
             slot_count: config.slot_count,
             shard_count: config.shard_count,
+            initial_slot_bias: config.initial_slot_bias,
             ..ClusterConfig::default()
         });
         let secret = config.raft_secret.clone();

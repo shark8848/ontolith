@@ -1317,6 +1317,10 @@ pub(crate) fn default_raft_cluster() -> Result<Arc<dyn ClusterRuntime>, String> 
         .ok()
         .filter(|v| !v.trim().is_empty());
     let secret = env::var("ONTOLITH_RAFT_SECRET").unwrap_or_default();
+    let initial_slot_bias = env::var("ONTOLITH_RAFT_SLOT_BIAS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(0);
     let storage_path = env::var("ONTOLITH_RAFT_STORAGE_PATH")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -1337,6 +1341,7 @@ pub(crate) fn default_raft_cluster() -> Result<Arc<dyn ClusterRuntime>, String> 
         http_listen_addr: listen,
         raft_secret: secret,
         raft_storage_path: storage_path,
+        initial_slot_bias,
         ..RaftClusterConfig::default()
     }));
 

@@ -29,6 +29,10 @@ pub struct ClusterConfig {
     pub region: String,
     pub slot_count: u32,
     pub shard_count: u32,
+    /// Optional initial slot bias: shifts the shard boundaries right by this
+    /// many slots at boot (shrinking the last shard), so an online rebalance
+    /// has real slot movement to perform (P7-01 drill).
+    pub initial_slot_bias: u32,
     pub suspect_after_ticks: u64,
     pub dead_after_ticks: u64,
     pub max_eventual_lag: u64,
@@ -40,6 +44,7 @@ impl Default for ClusterConfig {
             region: "default".into(),
             slot_count: 1024,
             shard_count: 2,
+            initial_slot_bias: 0,
             suspect_after_ticks: 5,
             dead_after_ticks: 10,
             max_eventual_lag: 100,
@@ -82,7 +87,8 @@ impl ClusterState {
     fn new(config: ClusterConfig) -> Self {
         let shard_count = config.shard_count.max(1);
         let slot_count = config.slot_count.max(shard_count);
-        let assignments = even_assignments(shard_count, slot_count);
+        let mut assignments = even_assignments(shard_count, slot_count);
+        apply_initial_slot_bias(&mut assignments, config.initial_slot_bias);
         Self {
             config,
             epoch: ClusterEpoch::new(0),
@@ -274,6 +280,23 @@ fn even_assignments(shard_count: u32, slot_count: u32) -> Vec<ShardAssignment> {
         });
     }
     assignments
+}
+
+/// Skew the boot-time assignments by moving `bias` slots from the last shard
+/// to the first (boundaries shift right, ranges stay contiguous). A later
+/// `rebalance()` then redistributes them back evenly.
+fn apply_initial_slot_bias(assignments: &mut [ShardAssignment], bias: u32) {
+    let n = assignments.len();
+    if bias == 0 || n < 2 {
+        return;
+    }
+    let last = &assignments[n - 1];
+    let last_end = last.slots.end;
+    let bias = bias.min(last_end.saturating_sub(last.slots.start));
+    for i in 0..n - 1 {
+        assignments[i].slots.end = assignments[i].slots.end.saturating_add(bias);
+        assignments[i + 1].slots.start = assignments[i + 1].slots.start.saturating_add(bias);
+    }
 }
 
 /// In-process cluster runtime implementing all L4 contracts.
@@ -1174,6 +1197,39 @@ mod tests {
         // Status reflects shard count
         assert_eq!(rt.status().shard_count, 2);
         assert!(!rt.rebalance_history().is_empty() || after.epoch > before.epoch);
+    }
+
+    #[test]
+    fn rebalance_moves_slots_after_initial_bias() {
+        // A boot-time slot bias makes the first shard larger; rebalance must
+        // produce real plans that redistribute the slots back to even.
+        let rt = InMemoryClusterRuntime::new(ClusterConfig {
+            slot_count: 1024,
+            shard_count: 2,
+            initial_slot_bias: 256,
+            ..ClusterConfig::default()
+        });
+        let before = rt.shard_map();
+        let biased = &before.assignments[0].slots;
+        let shrunk = &before.assignments[1].slots;
+        assert!(
+            biased.end - biased.start + 1 > shrunk.end - shrunk.start + 1,
+            "bias should skew the first shard larger"
+        );
+        let plans = rt.rebalance().unwrap();
+        assert!(
+            !plans.is_empty(),
+            "rebalance after bias must generate slot-movement plans"
+        );
+        let after = rt.shard_map();
+        let even_first = &after.assignments[0].slots;
+        let even_second = &after.assignments[1].slots;
+        assert_eq!(
+            even_first.end - even_first.start,
+            even_second.end - even_second.start,
+            "post-rebalance shard ranges must be even"
+        );
+        assert!(after.epoch > before.epoch);
     }
 
     #[test]

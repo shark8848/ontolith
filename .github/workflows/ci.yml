@@ -349,7 +349,7 @@ jobs:
         run: cargo test -p ontolith-server --features rocksdb-backend rocksdb_backend -- --nocapture
 
   bench:
-    name: storage bench smoke
+    name: storage bench thresholds + trend
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: check
@@ -359,8 +359,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: workspace
-      - name: storage micro-benchmarks
-        run: cargo bench -p ontolith-storage --bench storage_bench
+      - name: storage bench thresholds + trend
+        run: |
+          ONTOLITH_BENCH_TREND_PATH="benchmarks/trends/storage-bench.jsonl" \
+          bash scripts/check-bench-thresholds.sh
 
   license-audit:
     name: license audit

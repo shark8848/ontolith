@@ -335,7 +335,7 @@ impl ManagementState {
             200,
             "OK",
             format!(
-                r#"{{"requests_total":{},"sparql_total":{},"sparql_errors":{},"ingest_total":{},"latency_avg_ms":{},"http_status_counts":{},"runtime_probe":{{"target":{},"reachable":{},"latency_ms":{},"error":{}}},"cluster":{{"epoch":{},"leader":{},"nodes":{},"healthy":{},"shards":{},"commit_index":{}}}}}"#,
+                r#"{{"requests_total":{},"sparql_total":{},"sparql_errors":{},"ingest_total":{},"latency_avg_ms":{},"http_status_counts":{},"runtime_probe":{{"target":{},"reachable":{},"latency_ms":{},"error":{}}},"cluster":{{"epoch":{},"leader":{},"nodes":{},"healthy":{},"shards":{},"shard_map_epoch":{},"commit_index":{}}}}}"#,
                 requests_total,
                 sparql_total,
                 sparql_errors,
@@ -358,6 +358,7 @@ impl ManagementState {
                 cluster.node_count,
                 cluster.healthy_count,
                 cluster.shard_count,
+                self.app.cluster.shard_map().epoch.get(),
                 cluster.commit_index,
             ),
         ))
@@ -458,10 +459,11 @@ impl ManagementState {
             200,
             "OK",
             format!(
-                r#"{{"plans":{},"epoch":{},"shards":{}}}"#,
+                r#"{{"plans":{},"epoch":{},"shards":{},"shard_map_epoch":{}}}"#,
                 plans.len(),
                 self.app.cluster.current_epoch().get(),
                 self.app.cluster.shard_map().assignments.len(),
+                self.app.cluster.shard_map().epoch.get(),
             ),
         ))
     }

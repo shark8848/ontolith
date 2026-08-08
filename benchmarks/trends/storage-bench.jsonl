@@ -1,0 +1,3 @@
+{"run_id":"ec1d539","case":"dict encode_node","iterations":20000,"per_op_ns":148,"total_ms":2.961127}
+{"run_id":"ec1d539","case":"triple insert + commit","iterations":20000,"per_op_ns":818,"total_ms":16.379945}
+{"run_id":"ec1d539","case":"match by subject (1k triples)","iterations":1000,"per_op_ns":746517,"total_ms":746.51735}
