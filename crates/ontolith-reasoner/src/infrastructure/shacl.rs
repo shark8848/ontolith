@@ -5,7 +5,8 @@
 //! `sh:targetObjectsOf` + implicit class target), constraints (`sh:class`,
 //! `sh:datatype`, `sh:nodeKind`, `sh:minCount`/`sh:maxCount`,
 //! `sh:minLength`/`sh:maxLength`, `sh:pattern`, `sh:in`, `sh:hasValue`,
-//! `sh:node`, `sh:and`/`sh:or`/`sh:not`, `sh:qualifiedValueShape` with
+//! `sh:languageIn`, `sh:uniqueLang`, `sh:node`, `sh:and`/`sh:or`/`sh:xone`/`sh:not`,
+//! `sh:qualifiedValueShape` with
 //! `sh:qualifiedMinCount`/`sh:qualifiedMaxCount`/`sh:qualifiedValueShapesDisjoint`,
 //! numeric ranges (`sh:minInclusive`/`sh:maxInclusive`/`sh:minExclusive`/
 //! `sh:maxExclusive`), property pairs (`sh:equals`/`sh:disjoint`/`sh:lessThan`/
@@ -20,7 +21,7 @@ use crate::domain::{
     ConstraintComponent, NodeKind, PropertyShape, SHACL_NS, Severity, Shape, Target,
     ValidationReport, ValidationResult, shacl,
 };
-use ontolith_core::domain::{Iri, LiteralValue, NodeId};
+use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
 use ontolith_storage::application::DictionaryCodec;
@@ -30,6 +31,7 @@ use std::collections::{BTreeSet, HashMap};
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
 /// SHACL baseline validator.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ShaclEngine;
@@ -49,7 +51,16 @@ fn term_key(dict: &dyn DictionaryCodec, term: &Term) -> String {
     match term {
         Term::Iri(iri) => iri.as_str().to_owned(),
         Term::BlankNode(id) => subject_key(dict, *id),
-        Term::Literal(v) => format!("literal:{}|{}", v.lexical_form(), v.xsd_datatype_iri()),
+        Term::Literal(v) => match v.language_tag() {
+            // Language tags participate in RDF term equality (P6-02).
+            Some(tag) => format!(
+                "literal:{}|{}|{}",
+                v.lexical_form(),
+                v.xsd_datatype_iri(),
+                tag.as_str()
+            ),
+            None => format!("literal:{}|{}", v.lexical_form(), v.xsd_datatype_iri()),
+        },
     }
 }
 
@@ -68,8 +79,10 @@ fn literal_usize(term: &Term) -> Option<usize> {
 }
 
 fn literal_string(term: &Term) -> Option<String> {
+    // SHACL string-based constraints operate on the literal's string value
+    // (its lexical form), including language-tagged strings (P6-02).
     match term {
-        Term::Literal(LiteralValue::String(s)) => Some(s.clone()),
+        Term::Literal(lv) => Some(lv.lexical_form()),
         _ => None,
     }
 }
@@ -350,6 +363,20 @@ fn parse_shape_body(
             x if x == shacl("hasValue") => {
                 constraints.push(ConstraintComponent::HasValue(o.clone()));
             }
+            x if x == shacl("languageIn") => {
+                let tags: Vec<String> = collect_list(dict, map, o)
+                    .into_iter()
+                    .filter_map(|t| literal_string(&t))
+                    .collect();
+                if !tags.is_empty() {
+                    constraints.push(ConstraintComponent::LanguageIn(tags));
+                }
+            }
+            x if x == shacl("uniqueLang") => {
+                if literal_bool(o) == Some(true) {
+                    constraints.push(ConstraintComponent::UniqueLang);
+                }
+            }
             x if x == shacl("node") => {
                 constraints.push(ConstraintComponent::Node(term_key(dict, o)));
             }
@@ -369,6 +396,15 @@ fn parse_shape_body(
                     .collect();
                 if !shapes_list.is_empty() {
                     constraints.push(ConstraintComponent::Or(shapes_list));
+                }
+            }
+            x if x == shacl("xone") => {
+                let shapes_list: Vec<String> = collect_list(dict, map, o)
+                    .into_iter()
+                    .map(|t| term_key(dict, &t))
+                    .collect();
+                if !shapes_list.is_empty() {
+                    constraints.push(ConstraintComponent::Xone(shapes_list));
                 }
             }
             x if x == shacl("not") => {
@@ -548,12 +584,21 @@ fn default_message(component: &str, detail: &str) -> String {
         }
         c if c == shacl("InConstraintComponent") => "value not in allowed list".to_owned(),
         c if c == shacl("HasValueConstraintComponent") => "required value not present".to_owned(),
+        c if c == shacl("LanguageInConstraintComponent") => {
+            "value is not a literal with an allowed language tag".to_owned()
+        }
+        c if c == shacl("UniqueLangConstraintComponent") => {
+            "multiple values share the same language tag".to_owned()
+        }
         c if c == shacl("NodeConstraintComponent") => "node does not conform".to_owned(),
         c if c == shacl("AndConstraintComponent") => {
             "value does not conform to all shapes in sh:and".to_owned()
         }
         c if c == shacl("OrConstraintComponent") => {
             "value does not conform to any shape in sh:or".to_owned()
+        }
+        c if c == shacl("XoneConstraintComponent") => {
+            "value does not conform to exactly one shape in sh:xone".to_owned()
         }
         c if c == shacl("NotConstraintComponent") => {
             "value conforms to the shape in sh:not".to_owned()
@@ -968,6 +1013,51 @@ fn check_values(
                 );
             }
         }
+        ConstraintComponent::LanguageIn(allowed) => {
+            for (vkey, v) in values {
+                let ok = matches!(v, Term::Literal(lv) if lv.language_tag().is_some_and(|tag| {
+                    allowed.iter().any(|a| a.eq_ignore_ascii_case(tag.as_str()))
+                }));
+                if !ok {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("LanguageInConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::UniqueLang => {
+            let mut seen: Vec<&str> = Vec::new();
+            for (vkey, v) in values {
+                if let Term::Literal(lv) = v
+                    && let Some(tag) = lv.language_tag()
+                    && seen.iter().any(|s| s.eq_ignore_ascii_case(tag.as_str()))
+                {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("UniqueLangConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                } else if let Term::Literal(lv) = v
+                    && let Some(tag) = lv.language_tag()
+                {
+                    seen.push(tag.as_str());
+                }
+            }
+        }
         ConstraintComponent::Node(shape_key) => {
             for (vkey, _) in values {
                 evaluate_shape(dict, data, shapes, shape_key, vkey, results, depth + 1);
@@ -1006,6 +1096,27 @@ fn check_values(
                         Some(vkey.clone()),
                         source_shape,
                         &shacl("OrConstraintComponent"),
+                        "",
+                        severity,
+                        message,
+                    );
+                }
+            }
+        }
+        ConstraintComponent::Xone(shape_keys) => {
+            for (vkey, _) in values {
+                let conforming = shape_keys
+                    .iter()
+                    .filter(|k| conforms_to(dict, data, shapes, k, vkey, depth))
+                    .count();
+                if conforming != 1 {
+                    push_result(
+                        results,
+                        focus,
+                        path.map(str::to_owned),
+                        Some(vkey.clone()),
+                        source_shape,
+                        &shacl("XoneConstraintComponent"),
                         "",
                         severity,
                         message,
@@ -1302,23 +1413,37 @@ fn evaluate_shape(
 /// Materialize a focus node key back to a `Term` for constraint evaluation.
 fn focus_as_term(key: &str) -> Term {
     if let Some(rest) = key.strip_prefix("literal:") {
-        let (lex, dt) = rest.rsplit_once('|').unwrap_or((rest, ""));
-        if dt == "http://www.w3.org/2001/XMLSchema#integer"
-            && let Ok(n) = lex.parse::<i64>()
-        {
-            return Term::Literal(LiteralValue::Integer(n));
+        // Formats: `lex|datatype` or `lex|rdf:langString|tag`.
+        if let Some((head, tail)) = rest.rsplit_once('|') {
+            if let Some(lex) = head.strip_suffix(RDF_LANG_STRING).and_then(|h| h.strip_suffix('|'))
+            {
+                let lang = LanguageTag::parse(tail)
+                    .unwrap_or_else(|_| LanguageTag::parse("und").expect("und is a valid tag"));
+                return Term::Literal(LiteralValue::Lang {
+                    value: lex.to_owned(),
+                    lang,
+                });
+            }
+            let lex = head;
+            let dt = tail;
+            if dt == "http://www.w3.org/2001/XMLSchema#integer"
+                && let Ok(n) = lex.parse::<i64>()
+            {
+                return Term::Literal(LiteralValue::Integer(n));
+            }
+            if dt == "http://www.w3.org/2001/XMLSchema#boolean"
+                && let Ok(b) = lex.parse::<bool>()
+            {
+                return Term::Literal(LiteralValue::Boolean(b));
+            }
+            if dt == "http://www.w3.org/2001/XMLSchema#double"
+                && let Ok(f) = lex.parse::<f64>()
+            {
+                return Term::Literal(LiteralValue::Decimal(f));
+            }
+            return Term::Literal(LiteralValue::String(lex.to_owned()));
         }
-        if dt == "http://www.w3.org/2001/XMLSchema#boolean"
-            && let Ok(b) = lex.parse::<bool>()
-        {
-            return Term::Literal(LiteralValue::Boolean(b));
-        }
-        if dt == "http://www.w3.org/2001/XMLSchema#double"
-            && let Ok(f) = lex.parse::<f64>()
-        {
-            return Term::Literal(LiteralValue::Decimal(f));
-        }
-        return Term::Literal(LiteralValue::String(lex.to_owned()));
+        return Term::Literal(LiteralValue::String(rest.to_owned()));
     }
     Term::Iri(Iri::new(key))
 }
@@ -2186,5 +2311,237 @@ mod tests {
             report.results[0].component,
             "http://www.w3.org/ns/shacl#PatternConstraintComponent"
         );
+    }
+
+    #[test]
+    fn language_in_accepts_allowed_tags() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:LabelShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:label ; sh:languageIn (\"en\" \"fr\") ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:label \"hello\"@en .
+                ex:i2 a ex:Item ; ex:label \"bonjour\"@fr ."
+            ),
+        );
+        assert!(report.conforms, "both labels use allowed tags: {:?}", report.results);
+        assert!(report.results.is_empty());
+    }
+
+    #[test]
+    fn language_in_rejects_other_tags_and_non_literals() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:LabelShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:label ; sh:languageIn (\"en\" \"fr\") ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:label \"hallo\"@de .
+                ex:i2 a ex:Item ; ex:label \"plain\" .
+                ex:i3 a ex:Item ; ex:label ex:iriValue ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 3);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| r.component == "http://www.w3.org/ns/shacl#LanguageInConstraintComponent")
+        );
+    }
+
+    #[test]
+    fn language_in_compares_tags_case_insensitively() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:LabelShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:label ; sh:languageIn (\"en\") ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:label \"hello\"@EN ."
+            ),
+        );
+        assert!(report.conforms, "EN should match en (case-insensitive): {:?}", report.results);
+    }
+
+    #[test]
+    fn unique_lang_rejects_duplicate_tags() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TitleShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:title ; sh:uniqueLang true ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:title \"hello\"@en, \"hi\"@EN .
+                ex:i2 a ex:Item ; ex:title \"hello\"@en, \"salut\"@fr ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/i1");
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#UniqueLangConstraintComponent"
+        );
+    }
+
+    #[test]
+    fn unique_lang_ignores_non_lang_values() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TitleShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:title ; sh:uniqueLang true ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:title \"plain\" ; ex:title \"hello\"@en .
+                ex:i2 a ex:Item ; ex:title \"hello\"@en, \"salut\"@fr ."
+            ),
+        );
+        assert!(report.conforms, "non-tagged literals do not compete: {:?}", report.results);
+    }
+
+    #[test]
+    fn lang_literal_equality_distinguishes_tags() {
+        let dict = InMemoryDictionary::new();
+        // sh:in/hasValue with language-tagged literals: tags participate in equality.
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:GreetingShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:greeting ; sh:in (\"hello\"@en) ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:greeting \"hello\"@en .
+                ex:i2 a ex:Item ; ex:greeting \"hello\"@fr ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/i2");
+    }
+
+    #[test]
+    fn string_constraints_apply_to_lang_literals() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:LabelShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:label ; sh:minLength 5 ; sh:pattern \"^[a-z]+$\" ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:label \"hello\"@en .
+                ex:i2 a ex:Item ; ex:label \"hi\"@en .
+                ex:i3 a ex:Item ; ex:label \"Hello!\"@en ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|r| r.focus_node == "http://ex.org/i2"
+                    && r.component == "http://www.w3.org/ns/shacl#MinLengthConstraintComponent")
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|r| r.focus_node == "http://ex.org/i3"
+                    && r.component == "http://www.w3.org/ns/shacl#PatternConstraintComponent")
+        );
+    }
+
+    #[test]
+    fn xone_requires_exactly_one_matching_shape() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:AFamily a sh:NodeShape ; sh:class ex:A .
+                ex:BFamily a sh:NodeShape ; sh:class ex:B .
+                ex:CategoryShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:xone ( ex:AFamily ex:BFamily ) ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item, ex:A .
+                ex:i2 a ex:Item, ex:A, ex:B .
+                ex:i3 a ex:Item ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| r.component == "http://www.w3.org/ns/shacl#XoneConstraintComponent")
+        );
+        let foci: Vec<_> = report
+            .results
+            .iter()
+            .map(|r| r.focus_node.as_str())
+            .collect();
+        assert!(foci.contains(&"http://ex.org/i2"));
+        assert!(foci.contains(&"http://ex.org/i3"));
+    }
+
+    #[test]
+    fn xone_applies_to_property_values() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:IntShape a sh:NodeShape ; sh:datatype xsd:integer .
+                ex:SmallShape a sh:NodeShape ; sh:maxInclusive 10 .
+                ex:AmountShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:amount ; sh:xone ( ex:IntShape ex:SmallShape ) ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:amount 5 .
+                ex:i2 a ex:Item ; ex:amount 50 .
+                ex:i3 a ex:Item ; ex:amount \"abc\" ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        let foci: Vec<_> = report
+            .results
+            .iter()
+            .map(|r| r.focus_node.as_str())
+            .collect();
+        assert!(foci.contains(&"http://ex.org/i1"));
+        assert!(foci.contains(&"http://ex.org/i3"));
     }
 }

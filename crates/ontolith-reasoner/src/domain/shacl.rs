@@ -71,12 +71,19 @@ pub enum ConstraintComponent {
     In(Vec<Term>),
     /// `sh:hasValue v` — at least one value node equals v.
     HasValue(Term),
+    /// `sh:languageIn (t1 … tn)` — every value node is a language-tagged
+    /// literal whose tag (case-insensitive) is one of the allowed tags.
+    LanguageIn(Vec<String>),
+    /// `sh:uniqueLang true` — no two value nodes share the same language tag.
+    UniqueLang,
     /// `sh:node S` — every value node conforms to the referenced shape.
     Node(String),
     /// `sh:and (S1 … Sn)` — every value node conforms to all listed shapes.
     And(Vec<String>),
     /// `sh:or (S1 … Sn)` — every value node conforms to at least one listed shape.
     Or(Vec<String>),
+    /// `sh:xone (S1 … Sn)` — every value node conforms to exactly one listed shape.
+    Xone(Vec<String>),
     /// `sh:not S` — no value node conforms to the referenced shape.
     Not(String),
     /// `sh:minInclusive v` — every value node is >= v (numeric or string literal).
@@ -122,9 +129,12 @@ impl ConstraintComponent {
             Self::Pattern(_) => shacl("PatternConstraintComponent"),
             Self::In(_) => shacl("InConstraintComponent"),
             Self::HasValue(_) => shacl("HasValueConstraintComponent"),
+            Self::LanguageIn(_) => shacl("LanguageInConstraintComponent"),
+            Self::UniqueLang => shacl("UniqueLangConstraintComponent"),
             Self::Node(_) => shacl("NodeConstraintComponent"),
             Self::And(_) => shacl("AndConstraintComponent"),
             Self::Or(_) => shacl("OrConstraintComponent"),
+            Self::Xone(_) => shacl("XoneConstraintComponent"),
             Self::Not(_) => shacl("NotConstraintComponent"),
             Self::MinInclusive(_) => shacl("MinInclusiveConstraintComponent"),
             Self::MaxInclusive(_) => shacl("MaxInclusiveConstraintComponent"),
