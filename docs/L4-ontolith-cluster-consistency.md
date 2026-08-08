@@ -20,7 +20,7 @@
 | 在线 rebalance（slot 重划） | — | ✅ |
 | ClusterStatus 汇总 | — | ✅ |
 | L5 HTTP `/cluster/*` | — | ✅ |
-| 多进程 openraft | ADR-0004 | 设计已定（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)）；M1 单节点适配 → M2 多进程 HTTP RPC + RocksDB raft CF → M3 默认运行时切换 |
+| 多进程 openraft | ADR-0004 | **M1 已落地**（2026-08-08：openraft 0.9.25 单节点引导 + `RaftClusterRuntime` trait 适配 + 内存传输，cluster 17→21 测）；M2 多进程 HTTP RPC + RocksDB raft CF → M3 默认运行时切换 |
 
 ---
 
@@ -99,7 +99,7 @@ let plans = rt.rebalance()?;
 
 | Crate | 数量 |
 |-------|------|
-| ontolith-cluster | **17**（+session/partition/commit/rebalance + data-plane sync） |
+| ontolith-cluster | **21**（+session/partition/commit/rebalance + data-plane sync + raft M1：单节点引导/append-commit/trait 适配/双节点内存传输） |
 | ontolith-server | **9**（+`/cluster` API） |
 
 ---
@@ -121,3 +121,4 @@ let plans = rt.rebalance()?;
 | 2026-07-17 | 2.0.0 | session 粘性、quorum commit、partition、rebalance、L5 `/cluster` |
 | 2026-08-06 | 2.1.0 | 数据面同步（`DataPlaneSync`）：快照式 slot 迁移入队/`drain_syncs` 完成/`SyncReceipt` 回执，含源目标节点校验；`rebalance` 计划可经数据面搬迁，+3 测 |
 | 2026-08-06 | 2.2.0 | 多进程 Raft 设计定稿（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)）：openraft 共识引擎 + 树内 axum/reqwest HTTP RPC（`/internal/raft/*`，共享 secret 认证）+ RocksDB `raft` CF 日志/快照 + 写入路径经 raft 多数派提交后落 L2；保留 `InMemoryClusterRuntime` 作为确定性测试 harness |
+| 2026-08-08 | 2.3.0 | **M1 落地**：openraft 0.9.25 单节点引导 + 内存存储（v1 `RaftStorage` + `Adaptor`）+ 内存 `RaftNetworkFactory` 传输（`RaftRegistry`）+ `RaftClusterRuntime` 集群 trait 适配器（选主/epoch/复制日志/commit 由 raft 背书）；cluster 17→21 测 |

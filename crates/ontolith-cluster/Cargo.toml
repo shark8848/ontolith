@@ -3,7 +3,13 @@ name = "ontolith-cluster"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["raft-backend"]
+raft-backend = ["dep:openraft", "dep:tokio"]
+
 [dependencies]
+openraft = { version = "=0.9.25", optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "sync"], optional = true }
 ontolith-core = { path = "../ontolith-core" }
 ontolith-transaction = { path = "../ontolith-transaction" }
 ontolith-storage = { path = "../ontolith-storage" }

@@ -5,6 +5,9 @@
 //! failover — single process for tests/demos. Multi-process Raft deferred
 //! (ADR-0002).
 
+#[cfg(feature = "raft-backend")]
+pub mod raft;
+
 use crate::application::{
     ClusterRuntime, DataPlaneSync, ElectionService, FailoverController, FaultInjector,
     MetadataService, RebalanceService, Replicator, ShardRouter,

@@ -3203,7 +3203,7 @@ fn unescape(s: &str) -> String {
                 if hex_start + ndigits <= bytes.len() {
                     let hex = &s[hex_start..hex_start + ndigits];
                     if let Some(ch) =
-                        u32::from_str_radix(hex, 16).ok().and_then(|cp| char::from_u32(cp))
+                        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
                     {
                         out.push(ch);
                         i = hex_start + ndigits;

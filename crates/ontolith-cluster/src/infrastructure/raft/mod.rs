@@ -1,0 +1,959 @@
+//! Raft data plane backend (L4, ADR-0004).
+//!
+//! M1: openraft single-node bootstrap + cluster trait adapter + in-memory
+//! transport. The consensus-relevant contracts (leadership, metadata epoch,
+//! replication log) are backed by an [`openraft::Raft`] node; the
+//! control-plane utilities (shard routing, rebalance, data-plane sync,
+//! fault injection) delegate to the in-process [`InMemoryClusterRuntime`]
+//! simulator until M2 replaces the transport.
+//!
+//! [`InMemoryClusterRuntime`]: super::InMemoryClusterRuntime
+
+use crate::application::{
+    ClusterRuntime, DataPlaneSync, ElectionService, FailoverController, FaultInjector,
+    MetadataService, RebalanceService, Replicator, ShardRouter,
+};
+use crate::domain::{
+    ClusterEpoch, ClusterNode, ClusterNodeId, ClusterStatus, FailoverEvent, LogEntry, LogPayload,
+    Membership, NetworkPartition, RebalancePlan, SessionId, ShardId, ShardMap, SlotRange,
+    SyncReceipt,
+};
+use crate::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
+use ontolith_core::domain::ConsistencyLevel;
+use ontolith_core::error::OntolithError;
+use ontolith_storage::domain::SnapshotRef;
+use openraft::storage::Adaptor;
+use std::collections::{BTreeMap, HashMap};
+use std::io::Cursor;
+use std::ops::RangeBounds;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+
+/// Openraft type configuration for the cluster data plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct TypeConfig;
+
+impl openraft::RaftTypeConfig for TypeConfig {
+    type D = LogPayload;
+    type R = LogEntry;
+    type NodeId = u64;
+    type Node = openraft::BasicNode;
+    type Entry = openraft::Entry<TypeConfig>;
+    type SnapshotData = Cursor<Vec<u8>>;
+    type AsyncRuntime = openraft::TokioRuntime;
+    type Responder = openraft::raft::responder::OneshotResponder<TypeConfig>;
+}
+
+type NodeId = u64;
+type Entry = openraft::Entry<TypeConfig>;
+type StorageError = openraft::StorageError<NodeId>;
+
+/// Configuration for the raft-backed cluster runtime.
+#[derive(Debug, Clone)]
+pub struct RaftClusterConfig {
+    /// Stable openraft node id (M1 uses a single node, id `0`).
+    pub node_id: u64,
+    pub region: String,
+    pub slot_count: u32,
+    pub shard_count: u32,
+    pub max_eventual_lag: u64,
+    /// Raft heartbeat interval in milliseconds (tuned down in tests).
+    pub heartbeat_interval_ms: u64,
+}
+
+impl Default for RaftClusterConfig {
+    fn default() -> Self {
+        Self {
+            node_id: 0,
+            region: "default".into(),
+            slot_count: 1024,
+            shard_count: 2,
+            max_eventual_lag: 100,
+            heartbeat_interval_ms: 200,
+        }
+    }
+}
+
+/// Process-wide registry mapping raft node ids to live [`openraft::Raft`]
+/// handles. M1 uses it as the in-memory transport; M2 will point
+/// [`MemNetworkFactory`] at HTTP peers instead.
+#[derive(Clone, Default)]
+pub struct RaftRegistry {
+    inner: Arc<Mutex<HashMap<NodeId, Arc<openraft::Raft<TypeConfig>>>>>,
+}
+
+impl RaftRegistry {
+    pub fn register(&self, id: NodeId, raft: Arc<openraft::Raft<TypeConfig>>) {
+        self.inner.lock().unwrap().insert(id, raft);
+    }
+
+    pub fn get(&self, id: NodeId) -> Option<Arc<openraft::Raft<TypeConfig>>> {
+        self.inner.lock().unwrap().get(&id).cloned()
+    }
+
+    pub fn ids(&self) -> Vec<NodeId> {
+        self.inner.lock().unwrap().keys().copied().collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-memory storage (log + state machine; M2 replaces with RocksDB `raft` CF).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct MemInner {
+    entries: BTreeMap<u64, Entry>,
+    vote: Option<openraft::Vote<NodeId>>,
+    committed: Option<openraft::LogId<NodeId>>,
+    last_purged: Option<openraft::LogId<NodeId>>,
+    last_applied: Option<openraft::LogId<NodeId>>,
+    membership: openraft::StoredMembership<NodeId, openraft::BasicNode>,
+    applied: BTreeMap<u64, LogEntry>,
+}
+
+#[derive(Clone, Default)]
+pub struct MemStorage {
+    inner: Arc<RwLock<MemInner>>,
+}
+
+impl MemStorage {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Applied entries `[index, last_applied]` (feeds `Replicator::entries_from`).
+    pub fn applied_entries_from(&self, index: u64) -> Vec<LogEntry> {
+        let inner = self.inner.read().unwrap();
+        inner
+            .applied
+            .range(index..)
+            .map(|(_, e)| e.clone())
+            .collect()
+    }
+
+}
+
+/// Clone-on-read log reader sharing the store's backing map.
+#[derive(Clone, Default)]
+pub struct MemLogReader {
+    inner: Arc<RwLock<MemInner>>,
+}
+
+impl openraft::RaftLogReader<TypeConfig> for MemStorage {
+    async fn try_get_log_entries<RB>(
+        &mut self,
+        range: RB,
+    ) -> Result<Vec<Entry>, StorageError>
+    where
+        RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
+    {
+        let inner = self.inner.read().unwrap();
+        Ok(inner.entries.range(range).map(|(_, e)| e.clone()).collect())
+    }
+}
+
+impl openraft::RaftLogReader<TypeConfig> for MemLogReader {
+    async fn try_get_log_entries<RB>(
+        &mut self,
+        range: RB,
+    ) -> Result<Vec<Entry>, StorageError>
+    where
+        RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
+    {
+        let inner = self.inner.read().unwrap();
+        Ok(inner.entries.range(range).map(|(_, e)| e.clone()).collect())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MemSnapshotBuilder {
+    inner: Arc<RwLock<MemInner>>,
+}
+
+impl openraft::RaftSnapshotBuilder<TypeConfig> for MemSnapshotBuilder {
+    async fn build_snapshot(&mut self) -> Result<openraft::Snapshot<TypeConfig>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        let last_log_id = inner.last_applied;
+        let last_membership = inner.membership.clone();
+        let snapshot_id = match &last_log_id {
+            Some(l) => format!("mem-{}-{}", l.leader_id.term, l.index),
+            None => "mem-empty".to_string(),
+        };
+        Ok(openraft::Snapshot {
+            meta: openraft::SnapshotMeta {
+                last_log_id,
+                last_membership,
+                snapshot_id,
+            },
+            snapshot: Box::new(Cursor::new(Vec::new())),
+        })
+    }
+}
+
+impl openraft::RaftStorage<TypeConfig> for MemStorage {
+    type LogReader = MemLogReader;
+    type SnapshotBuilder = MemSnapshotBuilder;
+
+    async fn save_vote(&mut self, vote: &openraft::Vote<NodeId>) -> Result<(), StorageError> {
+        self.inner.write().unwrap().vote = Some(*vote);
+        Ok(())
+    }
+
+    async fn read_vote(&mut self) -> Result<Option<openraft::Vote<NodeId>>, StorageError> {
+        Ok(self.inner.read().unwrap().vote)
+    }
+
+    async fn save_committed(
+        &mut self,
+        committed: Option<openraft::LogId<NodeId>>,
+    ) -> Result<(), StorageError> {
+        self.inner.write().unwrap().committed = committed;
+        Ok(())
+    }
+
+    async fn read_committed(&mut self) -> Result<Option<openraft::LogId<NodeId>>, StorageError> {
+        Ok(self.inner.read().unwrap().committed)
+    }
+
+    async fn get_log_state(&mut self) -> Result<openraft::LogState<TypeConfig>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        let last_log_id = inner
+            .entries
+            .iter()
+            .next_back()
+            .map(|(_, e)| e.log_id)
+            .or_else(|| inner.last_purged);
+        Ok(openraft::LogState {
+            last_purged_log_id: inner.last_purged,
+            last_log_id,
+        })
+    }
+
+    async fn get_log_reader(&mut self) -> Self::LogReader {
+        MemLogReader {
+            inner: self.inner.clone(),
+        }
+    }
+
+    async fn append_to_log<I>(&mut self, entries: I) -> Result<(), StorageError>
+    where
+        I: IntoIterator<Item = Entry> + openraft::OptionalSend,
+    {
+        let mut inner = self.inner.write().unwrap();
+        for entry in entries {
+            inner.entries.insert(entry.log_id.index, entry);
+        }
+        Ok(())
+    }
+
+    async fn delete_conflict_logs_since(&mut self, log_id: openraft::LogId<NodeId>) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        inner.entries.retain(|index, _| *index < log_id.index);
+        Ok(())
+    }
+
+    async fn purge_logs_upto(&mut self, log_id: openraft::LogId<NodeId>) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        inner.entries.retain(|index, _| *index > log_id.index);
+        let cur = inner.last_purged.unwrap_or_default();
+        if log_id.index > cur.index {
+            inner.last_purged = Some(log_id);
+        }
+        Ok(())
+    }
+
+    async fn last_applied_state(
+        &mut self,
+    ) -> Result<
+        (
+            Option<openraft::LogId<NodeId>>,
+            openraft::StoredMembership<NodeId, openraft::BasicNode>,
+        ),
+        StorageError,
+    > {
+        let inner = self.inner.read().unwrap();
+        Ok((inner.last_applied, inner.membership.clone()))
+    }
+
+    async fn apply_to_state_machine(&mut self, entries: &[Entry]) -> Result<Vec<LogEntry>, StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        let mut out = Vec::new();
+        for entry in entries {
+            let index = entry.log_id.index;
+            let term = ClusterEpoch::new(entry.log_id.leader_id.term);
+            let payload = match &entry.payload {
+                openraft::EntryPayload::Normal(d) => d.clone(),
+                openraft::EntryPayload::Blank => LogPayload::Noop,
+                openraft::EntryPayload::Membership(m) => {
+                    inner.membership =
+                        openraft::StoredMembership::new(Some(entry.log_id), m.clone());
+                    LogPayload::Metadata(format!("membership:{m:?}"))
+                }
+            };
+            let applied = LogEntry {
+                index,
+                term,
+                payload,
+            };
+            inner.applied.insert(index, applied.clone());
+            inner.last_applied = Some(entry.log_id);
+            out.push(applied);
+        }
+        Ok(out)
+    }
+
+    async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
+        MemSnapshotBuilder {
+            inner: self.inner.clone(),
+        }
+    }
+
+    async fn begin_receiving_snapshot(&mut self) -> Result<Box<Cursor<Vec<u8>>>, StorageError> {
+        Ok(Box::new(Cursor::new(Vec::new())))
+    }
+
+    async fn install_snapshot(
+        &mut self,
+        meta: &openraft::SnapshotMeta<NodeId, openraft::BasicNode>,
+        snapshot: Box<Cursor<Vec<u8>>>,
+    ) -> Result<(), StorageError> {
+        let mut inner = self.inner.write().unwrap();
+        inner.last_applied = meta.last_log_id;
+        inner.membership = meta.last_membership.clone();
+        drop(snapshot);
+        Ok(())
+    }
+
+    async fn get_current_snapshot(&mut self) -> Result<Option<openraft::Snapshot<TypeConfig>>, StorageError> {
+        let inner = self.inner.read().unwrap();
+        Ok(match &inner.last_applied {
+            Some(last_log_id) => {
+                let meta = openraft::SnapshotMeta {
+                    last_log_id: Some(*last_log_id),
+                    last_membership: inner.membership.clone(),
+                    snapshot_id: format!("mem-{}-{}", last_log_id.leader_id.term, last_log_id.index),
+                };
+                Some(openraft::Snapshot {
+                    meta,
+                    snapshot: Box::new(Cursor::new(Vec::new())),
+                })
+            }
+            None => None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-memory transport (M1; M2 replaces the client with HTTP RPC).
+// ---------------------------------------------------------------------------
+
+/// In-memory [`openraft::RaftNetworkFactory`]: routes RPCs to live raft
+/// handles in [`RaftRegistry`].
+#[derive(Clone)]
+pub struct MemNetworkFactory {
+    registry: Arc<RaftRegistry>,
+}
+
+impl MemNetworkFactory {
+    pub fn new(registry: Arc<RaftRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+impl openraft::RaftNetworkFactory<TypeConfig> for MemNetworkFactory {
+    type Network = MemNetwork;
+
+    async fn new_client(&mut self, target: NodeId, _node: &openraft::BasicNode) -> Self::Network {
+        MemNetwork {
+            registry: self.registry.clone(),
+            target,
+        }
+    }
+}
+
+/// In-memory network connection to one raft node.
+#[derive(Clone)]
+pub struct MemNetwork {
+    registry: Arc<RaftRegistry>,
+    target: NodeId,
+}
+
+type NetError = openraft::error::RPCError<NodeId, openraft::BasicNode, openraft::error::RaftError<NodeId>>;
+
+impl MemNetwork {
+    #[allow(clippy::result_large_err)] // error type is mandated by openraft::RaftNetwork
+    fn target_raft(&self) -> Result<Arc<openraft::Raft<TypeConfig>>, NetError> {
+        self.registry.get(self.target).ok_or_else(|| {
+            openraft::error::RPCError::Unreachable(openraft::error::Unreachable::new(
+                &std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no raft node registered for id {}", self.target),
+                ),
+            ))
+        })
+    }
+}
+
+impl openraft::RaftNetwork<TypeConfig> for MemNetwork {
+    async fn append_entries(
+        &mut self,
+        rpc: openraft::raft::AppendEntriesRequest<TypeConfig>,
+        _option: openraft::network::RPCOption,
+    ) -> Result<openraft::raft::AppendEntriesResponse<NodeId>, NetError> {
+        let raft = self.target_raft()?;
+        raft.append_entries(rpc)
+            .await
+            .map_err(|e| openraft::error::RPCError::RemoteError(openraft::error::RemoteError::new(self.target, e)))
+    }
+
+    async fn install_snapshot(
+        &mut self,
+        rpc: openraft::raft::InstallSnapshotRequest<TypeConfig>,
+        _option: openraft::network::RPCOption,
+    ) -> Result<
+        openraft::raft::InstallSnapshotResponse<NodeId>,
+        openraft::error::RPCError<
+            NodeId,
+            openraft::BasicNode,
+            openraft::error::RaftError<NodeId, openraft::error::InstallSnapshotError>,
+        >,
+    > {
+        let raft = self.target_raft().map_err(|e| match e {
+            openraft::error::RPCError::Unreachable(u) => openraft::error::RPCError::Unreachable(u),
+            _ => openraft::error::RPCError::Network(openraft::error::NetworkError::new(
+                &std::io::Error::other("snapshot rpc failed"),
+            )),
+        })?;
+        raft.install_snapshot(rpc)
+            .await
+            .map_err(|e| openraft::error::RPCError::RemoteError(openraft::error::RemoteError::new(self.target, e)))
+    }
+
+    async fn vote(
+        &mut self,
+        rpc: openraft::raft::VoteRequest<NodeId>,
+        _option: openraft::network::RPCOption,
+    ) -> Result<openraft::raft::VoteResponse<NodeId>, NetError> {
+        let raft = self.target_raft()?;
+        raft.vote(rpc)
+            .await
+            .map_err(|e| openraft::error::RPCError::RemoteError(openraft::error::RemoteError::new(self.target, e)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raft-backed cluster runtime (trait adapter).
+// ---------------------------------------------------------------------------
+
+/// L4 cluster runtime backed by an [`openraft::Raft`] node.
+///
+/// Consensus contracts (leadership, epoch, replication log, committed
+/// index) come from openraft; shard routing and the remaining control-plane
+/// utilities delegate to the in-process simulator until M2.
+pub struct RaftClusterRuntime {
+    config: RaftClusterConfig,
+    rt: Arc<tokio::runtime::Runtime>,
+    raft: Arc<openraft::Raft<TypeConfig>>,
+    storage: MemStorage,
+    /// cluster node id string -> raft node id
+    raft_ids: RwLock<HashMap<String, u64>>,
+    /// raft node id -> cluster node id string
+    cluster_ids: RwLock<HashMap<u64, String>>,
+    bootstrapped: AtomicBool,
+    inner: InMemoryClusterRuntime,
+}
+
+impl RaftClusterRuntime {
+    /// Build a runtime with a fresh process-wide registry and the given
+    /// raft node id.
+    pub fn new(config: RaftClusterConfig) -> Self {
+        Self::new_with_registry(config, Arc::new(RaftRegistry::default()))
+    }
+
+    pub fn with_defaults() -> Self {
+        Self::new(RaftClusterConfig::default())
+    }
+
+    /// Build a runtime sharing a [`RaftRegistry`] (in-process multi-node
+    /// test harness for the M1 in-memory transport).
+    #[allow(clippy::field_reassign_with_default)] // openraft::Config has no struct-update constructor
+    pub fn new_with_registry(config: RaftClusterConfig, registry: Arc<RaftRegistry>) -> Self {
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build tokio runtime"),
+        );
+        let mut raft_config = openraft::Config::default();
+        raft_config.cluster_name = format!("ontolith-{}", config.region);
+        raft_config.heartbeat_interval = config.heartbeat_interval_ms;
+        raft_config.election_timeout_min = config.heartbeat_interval_ms * 3;
+        raft_config.election_timeout_max = config.heartbeat_interval_ms * 6;
+        raft_config.enable_tick = true;
+        let raft_config = Arc::new(raft_config);
+
+        let storage = MemStorage::new();
+        let (log_store, state_machine) = Adaptor::new(storage.clone());
+        let network = MemNetworkFactory::new(registry.clone());
+
+        let node_id = config.node_id;
+        let raft = rt
+            .block_on(openraft::Raft::new(
+                node_id,
+                raft_config,
+                network,
+                log_store,
+                state_machine,
+            ))
+            .expect("start raft node");
+        let raft = Arc::new(raft);
+        registry.register(node_id, raft.clone());
+
+        let inner = InMemoryClusterRuntime::new(ClusterConfig {
+            region: config.region.clone(),
+            slot_count: config.slot_count,
+            shard_count: config.shard_count,
+            ..ClusterConfig::default()
+        });
+
+        Self {
+            config,
+            rt,
+            raft,
+            storage,
+            raft_ids: RwLock::new(HashMap::new()),
+            cluster_ids: RwLock::new(HashMap::new()),
+            bootstrapped: AtomicBool::new(false),
+            inner,
+        }
+    }
+
+    pub fn node_id(&self) -> u64 {
+        self.config.node_id
+    }
+
+    /// Map a cluster node id string to its raft id; assigns the next free
+    /// raft id on first sight.
+    fn raft_id_for(&self, cluster_id: &ClusterNodeId) -> u64 {
+        let mut raft_ids = self.raft_ids.write().unwrap();
+        if let Some(id) = raft_ids.get(cluster_id.as_str()) {
+            return *id;
+        }
+        let next = raft_ids.len() as u64;
+        raft_ids.insert(cluster_id.as_str().to_owned(), next);
+        self.cluster_ids
+            .write()
+            .unwrap()
+            .insert(next, cluster_id.as_str().to_owned());
+        next
+    }
+
+    fn cluster_id_for(&self, raft_id: u64) -> ClusterNodeId {
+        self.cluster_ids
+            .read()
+            .unwrap()
+            .get(&raft_id)
+            .cloned()
+            .map(ClusterNodeId::new)
+            .unwrap_or_else(|| ClusterNodeId::new(format!("n{raft_id}")))
+    }
+
+    fn metrics(&self) -> openraft::RaftMetrics<u64, openraft::BasicNode> {
+        self.raft.metrics().borrow().clone()
+    }
+
+    /// Single-node bootstrap: initialize raft membership with just this
+    /// node, wait for self-election, and mirror the control-plane registry.
+    pub fn bootstrap(&self, nodes: Vec<(String, String)>) -> Result<ClusterNodeId, OntolithError> {
+        if nodes.is_empty() {
+            return Err(OntolithError::InvalidArgument("bootstrap requires nodes"));
+        }
+        let members: BTreeMap<u64, openraft::BasicNode> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, (id, addr))| {
+                self.raft_id_for(&ClusterNodeId::new(id.clone()));
+                (i as u64, openraft::BasicNode::new(addr.clone()))
+            })
+            .collect();
+        self.initialize_members(members)?;
+        self.inner.bootstrap(nodes)?;
+        self.leader_id()
+            .ok_or(OntolithError::InvalidState("raft bootstrap did not elect a leader"))
+    }
+
+    /// Initialize the raft cluster with the given membership (used by the
+    /// in-process multi-node harness) and wait for this node to learn the
+    /// leader.
+    pub fn initialize_members(
+        &self,
+        members: BTreeMap<u64, openraft::BasicNode>,
+    ) -> Result<(), OntolithError> {
+        for id in members.keys() {
+            self.cluster_ids
+                .write()
+                .unwrap()
+                .entry(*id)
+                .or_insert_with(|| format!("n{id}"));
+        }
+        self.rt
+            .block_on(self.raft.initialize(members))
+            .map_err(|e| OntolithError::Failed(format!("raft initialize: {e}")))?;
+        self.bootstrapped.store(true, Ordering::SeqCst);
+        let wait = self.raft.wait(Some(std::time::Duration::from_secs(10)));
+        self.rt
+            .block_on(wait.metrics(
+                |m| m.current_leader.is_some() || m.state == openraft::ServerState::Leader,
+                "raft cluster leader elected",
+            ))
+            .map_err(|e| OntolithError::Failed(format!("raft leader wait: {e}")))?;
+        Ok(())
+    }
+
+    /// Return `Ok(())` when this node is the raft leader.
+    fn require_leader(&self) -> Result<(), OntolithError> {
+        if self.metrics().current_leader == Some(self.config.node_id) {
+            Ok(())
+        } else {
+            Err(OntolithError::Failed(format!(
+                "not the raft leader (leader={:?})",
+                self.metrics().current_leader
+            )))
+        }
+    }
+}
+
+impl MetadataService for RaftClusterRuntime {
+    fn membership(&self) -> Membership {
+        let m = self.metrics();
+        Membership {
+            epoch: ClusterEpoch::new(m.current_term),
+            leader_id: m.current_leader.map(|id| self.cluster_id_for(id)),
+            nodes: self.inner.membership().nodes,
+        }
+    }
+
+    fn shard_map(&self) -> ShardMap {
+        self.inner.shard_map()
+    }
+
+    fn current_epoch(&self) -> ClusterEpoch {
+        ClusterEpoch::new(self.metrics().current_term)
+    }
+
+    fn leader_id(&self) -> Option<ClusterNodeId> {
+        self.metrics().current_leader.map(|id| self.cluster_id_for(id))
+    }
+
+    fn status(&self) -> ClusterStatus {
+        let m = self.metrics();
+        let nodes = self.inner.membership().nodes;
+        ClusterStatus {
+            epoch: ClusterEpoch::new(m.current_term),
+            leader_id: m.current_leader.map(|id| self.cluster_id_for(id)),
+            node_count: nodes.len(),
+            healthy_count: nodes.iter().filter(|n| n.status.is_votable()).count(),
+            shard_count: self.inner.shard_map().assignments.len(),
+            leader_log_index: m.last_log_index.unwrap_or(0),
+            commit_index: m.last_applied.map(|l| l.index).unwrap_or(0),
+            failover_count: self.inner.failover_history().len(),
+            partition_active: !self.inner.current_partition().is_empty(),
+        }
+    }
+
+    fn register_node(&self, node: ClusterNode) -> Result<(), OntolithError> {
+        let _raft_id = self.raft_id_for(&node.node_id);
+        self.inner.register_node(node)
+    }
+
+    fn heartbeat(&self, node_id: &ClusterNodeId, tick: u64) -> Result<(), OntolithError> {
+        self.inner.heartbeat(node_id, tick)
+    }
+
+    fn set_node_status(
+        &self,
+        node_id: &ClusterNodeId,
+        status: crate::domain::NodeStatus,
+    ) -> Result<(), OntolithError> {
+        self.inner.set_node_status(node_id, status)
+    }
+}
+
+impl ElectionService for RaftClusterRuntime {
+    fn campaign(&self, _candidate: &ClusterNodeId) -> Result<Option<ClusterNodeId>, OntolithError> {
+        if self.bootstrapped.load(Ordering::SeqCst) {
+            Ok(self.leader_id())
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn step_down(&self, _leader: &ClusterNodeId) -> Result<(), OntolithError> {
+        // M1: openraft owns leadership transitions; nothing to force here.
+        Ok(())
+    }
+
+    fn is_leader(&self, node_id: &ClusterNodeId) -> bool {
+        let raft_id = self.raft_id_for(node_id);
+        self.metrics().current_leader == Some(raft_id)
+    }
+}
+
+impl ShardRouter for RaftClusterRuntime {
+    fn route_write(&self, key: &str) -> Result<crate::domain::WriteRoute, OntolithError> {
+        self.inner.route_write(key)
+    }
+
+    fn route_read(
+        &self,
+        key: &str,
+        consistency: ConsistencyLevel,
+    ) -> Result<crate::domain::ReadRoute, OntolithError> {
+        self.inner.route_read(key, consistency)
+    }
+
+    fn route_read_session(
+        &self,
+        key: &str,
+        session: &SessionId,
+        consistency: ConsistencyLevel,
+    ) -> Result<crate::domain::ReadRoute, OntolithError> {
+        self.inner.route_read_session(key, session, consistency)
+    }
+
+    fn replica_set(&self, shard_id: ShardId) -> Result<crate::domain::ReplicaSet, OntolithError> {
+        self.inner.replica_set(shard_id)
+    }
+}
+
+impl Replicator for RaftClusterRuntime {
+    fn append(&self, payload: LogPayload) -> Result<LogEntry, OntolithError> {
+        self.require_leader()?;
+        let resp = self
+            .rt
+            .block_on(
+                self.raft
+                    .client_write::<tokio::sync::oneshot::error::RecvError>(payload.clone()),
+            )
+            .map_err(|e| OntolithError::Failed(format!("raft client_write: {e}")))?;
+        Ok(LogEntry {
+            index: resp.log_id.index,
+            term: ClusterEpoch::new(resp.log_id.leader_id.term),
+            payload,
+        })
+    }
+
+    fn leader_index(&self) -> u64 {
+        self.metrics().last_log_index.unwrap_or(0)
+    }
+
+    fn commit_index(&self) -> u64 {
+        self.metrics().last_applied.map(|l| l.index).unwrap_or(0)
+    }
+
+    fn applied_index(&self, node_id: &ClusterNodeId) -> u64 {
+        let raft_id = self.raft_id_for(node_id);
+        if raft_id == self.config.node_id {
+            self.commit_index()
+        } else {
+            // M1: followers' applied indexes arrive with M2 replication.
+            0
+        }
+    }
+
+    fn replicate_to_followers(&self) -> Result<usize, OntolithError> {
+        Ok(0)
+    }
+
+    fn replicate_to_followers_respecting_partition(&self) -> Result<usize, OntolithError> {
+        Ok(0)
+    }
+
+    fn entries_from(&self, index: u64) -> Vec<LogEntry> {
+        self.storage.applied_entries_from(index)
+    }
+}
+
+impl FailoverController for RaftClusterRuntime {
+    fn check_and_failover(&self, now_tick: u64) -> Result<Vec<FailoverEvent>, OntolithError> {
+        self.inner.check_and_failover(now_tick)
+    }
+
+    fn failover_history(&self) -> Vec<FailoverEvent> {
+        self.inner.failover_history()
+    }
+}
+
+impl RebalanceService for RaftClusterRuntime {
+    fn rebalance(&self) -> Result<Vec<RebalancePlan>, OntolithError> {
+        self.inner.rebalance()
+    }
+
+    fn rebalance_history(&self) -> Vec<RebalancePlan> {
+        self.inner.rebalance_history()
+    }
+}
+
+impl DataPlaneSync for RaftClusterRuntime {
+    fn transfer_snapshot(
+        &self,
+        source: &ClusterNodeId,
+        target: &ClusterNodeId,
+        shard_id: ShardId,
+        slots: SlotRange,
+        snapshot: SnapshotRef,
+    ) -> Result<(), OntolithError> {
+        self.inner
+            .transfer_snapshot(source, target, shard_id, slots, snapshot)
+    }
+
+    fn pending_syncs(&self) -> usize {
+        self.inner.pending_syncs()
+    }
+
+    fn drain_syncs(&self) -> Result<Vec<SyncReceipt>, OntolithError> {
+        self.inner.drain_syncs()
+    }
+
+    fn sync_history(&self) -> Vec<SyncReceipt> {
+        self.inner.sync_history()
+    }
+}
+
+impl FaultInjector for RaftClusterRuntime {
+    fn inject_partition(&self, isolated: Vec<ClusterNodeId>) -> Result<(), OntolithError> {
+        self.inner.inject_partition(isolated)
+    }
+
+    fn heal_partition(&self) -> Result<(), OntolithError> {
+        self.inner.heal_partition()
+    }
+
+    fn current_partition(&self) -> NetworkPartition {
+        self.inner.current_partition()
+    }
+}
+
+impl ClusterRuntime for RaftClusterRuntime {}
+
+pub fn status() -> &'static str {
+    "raft"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn wait_until(cond: impl Fn() -> bool, timeout_ms: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        while std::time::Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        cond()
+    }
+
+    #[test]
+    fn single_node_bootstrap_elects_leader() {
+        let rt = RaftClusterRuntime::with_defaults();
+        let leader = rt.bootstrap(vec![("n0".into(), "mem://n0".into())]).unwrap();
+        assert_eq!(leader.as_str(), "n0");
+        assert!(rt.is_leader(&ClusterNodeId::new("n0")));
+        assert_eq!(rt.leader_id(), Some(ClusterNodeId::new("n0")));
+        assert!(rt.current_epoch().get() >= 1);
+    }
+
+    #[test]
+    fn append_commits_through_raft() {
+        let rt = RaftClusterRuntime::with_defaults();
+        rt.bootstrap(vec![("n0".into(), "mem://n0".into())]).unwrap();
+
+        // index 1 is the membership entry written by initialize().
+        let e1 = rt.append(LogPayload::Metadata("alpha".into())).unwrap();
+        assert_eq!(e1.index, 2);
+        assert_eq!(e1.payload, LogPayload::Metadata("alpha".into()));
+
+        let e2 = rt
+            .append(LogPayload::Data {
+                shard_id: ShardId::new(0),
+                op: "write".into(),
+            })
+            .unwrap();
+        assert_eq!(e2.index, 3);
+
+        assert!(wait_until(|| rt.commit_index() == 3, 5000));
+        assert_eq!(rt.leader_index(), 3);
+        assert_eq!(rt.commit_index(), 3);
+
+        let entries = rt.entries_from(1);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1].payload, LogPayload::Metadata("alpha".into()));
+    }
+
+    #[test]
+    fn trait_adapter_roundtrip() {
+        let rt = RaftClusterRuntime::with_defaults();
+        rt.bootstrap(vec![("n0".into(), "mem://n0".into())]).unwrap();
+
+        let status = rt.status();
+        assert_eq!(status.node_count, 1);
+        assert_eq!(status.leader_id, Some(ClusterNodeId::new("n0")));
+
+        let write = rt.route_write("tenant:acme").unwrap();
+        assert_eq!(write.leader_node.as_str(), "n0");
+
+        let read = rt
+            .route_read("tenant:acme", ConsistencyLevel::Strong)
+            .unwrap();
+        assert!(read.served_by_leader);
+
+        let membership = rt.membership();
+        assert_eq!(membership.leader_id, Some(ClusterNodeId::new("n0")));
+    }
+
+    #[test]
+    fn in_memory_transport_two_node_cluster() {
+        let registry = Arc::new(RaftRegistry::default());
+        let rt0 = RaftClusterRuntime::new_with_registry(
+            RaftClusterConfig {
+                node_id: 0,
+                heartbeat_interval_ms: 50,
+                ..RaftClusterConfig::default()
+            },
+            registry.clone(),
+        );
+        let rt1 = RaftClusterRuntime::new_with_registry(
+            RaftClusterConfig {
+                node_id: 1,
+                heartbeat_interval_ms: 50,
+                ..RaftClusterConfig::default()
+            },
+            registry,
+        );
+
+        // Only one node initializes the membership; the other joins via
+        // replication over the in-memory transport.
+        rt0.initialize_members(BTreeMap::from([
+            (0, openraft::BasicNode::new("mem://n0")),
+            (1, openraft::BasicNode::new("mem://n1")),
+        ]))
+        .unwrap();
+
+        // A leader must emerge among the two nodes over the in-memory transport.
+        assert!(wait_until(
+            || rt0.leader_id().is_some() || rt1.leader_id().is_some(),
+            15000
+        ));
+
+        let leader = if rt0.leader_id().is_some() { &rt0 } else { &rt1 };
+        let follower = if rt0.leader_id().is_some() { &rt1 } else { &rt0 };
+        // index 2: index 1 is the membership entry written by initialize().
+        let entry = leader
+            .append(LogPayload::Metadata("replicated".into()))
+            .unwrap();
+        assert_eq!(entry.index, 2);
+        assert!(wait_until(|| follower.commit_index() >= 2, 15000));
+        assert_eq!(follower.commit_index(), leader.commit_index());
+    }
+}

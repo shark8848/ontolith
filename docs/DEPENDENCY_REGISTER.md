@@ -26,3 +26,4 @@ Tier definitions: PLAN-0001 §8 / SAS-0001 §12.
 | Crate | Feature | Default | Effect |
 |-------|---------|---------|--------|
 | `ontolith-storage` | `rocksdb-backend` | **enabled** | Compiles RocksDB adapter + integration tests |
+| `ontolith-cluster` | `raft-backend` | **enabled** | Compiles openraft raft data plane (M1 landed 2026-08-08); disable → in-memory simulator only |
