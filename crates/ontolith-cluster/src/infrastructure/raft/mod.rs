@@ -25,7 +25,7 @@ use ontolith_core::error::OntolithError;
 use ontolith_storage::domain::SnapshotRef;
 use ontolith_storage::infrastructure::RocksDbStorageEngine;
 use openraft::storage::Adaptor;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
 use std::ops::RangeBounds;
 use std::path::PathBuf;
@@ -36,7 +36,18 @@ mod rocks_store;
 pub use rocks_store::RocksRaftStorage;
 
 mod http;
-pub use http::{HttpRaftClient, HttpRaftFactory, HttpRaftServer};
+pub use http::{
+    DataPlaneSnapshotIo, HttpRaftClient, HttpRaftFactory, HttpRaftServer, TransferSnapshotRequest,
+};
+
+/// Pending cross-node snapshot transfer (P4-03 data plane).
+struct RaftPendingTransfer {
+    source: ClusterNodeId,
+    target: ClusterNodeId,
+    shard_id: ShardId,
+    slots: SlotRange,
+    snapshot: SnapshotRef,
+}
 
 /// Openraft type configuration for the cluster data plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -548,6 +559,14 @@ pub struct RaftClusterRuntime {
     applied_watermark: Mutex<u64>,
     /// Shared cluster secret, retained for follower→leader apply forwarding.
     secret: String,
+    /// Per-node real network partition (P4-04): raft ids this node refuses
+    /// to exchange raft RPC with (symmetric drop on the HTTP client).
+    partition: Arc<Mutex<HashSet<u64>>>,
+    /// Data-plane snapshot IO hook slot (P4-03), shared with the HTTP server
+    /// so `/internal/raft/transfer-snapshot` can import into local storage.
+    data_plane_io: Arc<Mutex<Option<Arc<dyn DataPlaneSnapshotIo>>>>,
+    data_plane_pending: Mutex<Vec<RaftPendingTransfer>>,
+    data_plane_history: Mutex<Vec<SyncReceipt>>,
 }
 
 impl RaftClusterRuntime {
@@ -589,12 +608,18 @@ impl RaftClusterRuntime {
             }
             None => RaftStoreKind::Mem(MemStorage::new()),
         };
+        let node_id = config.node_id;
+        let partition = Arc::new(Mutex::new(HashSet::new()));
         let net = match &config.http_listen_addr {
-            Some(_) => RaftNetKind::Http(HttpRaftFactory::new(config.raft_secret.clone())),
+            Some(_) => RaftNetKind::Http(HttpRaftFactory::new(
+                config.raft_secret.clone(),
+                node_id,
+                Arc::clone(&partition),
+            )),
             None => RaftNetKind::Mem(MemNetworkFactory::new(registry.clone())),
         };
+        let data_plane_io = Arc::new(Mutex::new(None::<Arc<dyn DataPlaneSnapshotIo>>));
 
-        let node_id = config.node_id;
         let raft = match (&store, &net) {
             (RaftStoreKind::Mem(store), RaftNetKind::Mem(net)) => {
                 build_node(&rt, node_id, raft_config.clone(), store.clone(), net.clone())
@@ -627,6 +652,7 @@ impl RaftClusterRuntime {
                         config.raft_secret.clone(),
                         Arc::clone(&rt),
                         Arc::clone(&raft),
+                        Arc::clone(&data_plane_io),
                     )
                     .expect("bind raft http server"),
                 )
@@ -656,6 +682,10 @@ impl RaftClusterRuntime {
             nodes: RwLock::new(HashMap::new()),
             applied_watermark: Mutex::new(0),
             secret,
+            partition,
+            data_plane_io,
+            data_plane_pending: Mutex::new(Vec::new()),
+            data_plane_history: Mutex::new(Vec::new()),
         }
     }
 
@@ -667,6 +697,12 @@ impl RaftClusterRuntime {
     /// enabled.
     pub fn http_addr(&self) -> Option<std::net::SocketAddr> {
         self.http_server.as_ref().map(|server| server.addr)
+    }
+
+    /// Plug the process-local L2 snapshot IO hook so data-plane transfers can
+    /// move real bytes between nodes (P4-03).
+    pub fn set_data_plane_io(&self, io: Arc<dyn DataPlaneSnapshotIo>) {
+        *self.data_plane_io.lock().unwrap() = Some(io);
     }
 
     /// Map a cluster node id string to its raft id; assigns the next free
@@ -782,10 +818,89 @@ impl RaftClusterRuntime {
         nodes
     }
 
+    /// True when `raft_id` is currently isolated by the real network
+    /// partition (P4-04): this node drops raft RPC to/from it.
+    fn is_partitioned(&self, raft_id: u64) -> bool {
+        self.partition.lock().unwrap().contains(&raft_id)
+    }
+
+    /// Perform one queued cross-node snapshot transfer (P4-03): export bytes
+    /// through the local IO hook and push them to the target over HTTP; the
+    /// target imports them through its own hook. Without an IO hook (pure
+    /// cluster harness) the transfer completes with simulator semantics.
+    fn complete_transfer(
+        &self,
+        transfer: RaftPendingTransfer,
+    ) -> Result<SyncReceipt, OntolithError> {
+        let io = self.data_plane_io.lock().unwrap().clone();
+        let Some(io) = io else {
+            return Ok(SyncReceipt {
+                source: transfer.source,
+                target: transfer.target,
+                shard_id: transfer.shard_id,
+                slots: transfer.slots,
+                transferred_entries: transfer.snapshot.snapshot_id,
+                completed_at_epoch: self.current_epoch(),
+            });
+        };
+        let bytes = io
+            .export_snapshot(&transfer.snapshot)
+            .map_err(|e| OntolithError::Failed(format!("export snapshot: {e}")))?;
+        let target_raft_id = self.raft_id_for(&transfer.target);
+        if self.is_partitioned(target_raft_id) {
+            return Err(OntolithError::Failed(format!(
+                "target {} is isolated by a network partition",
+                transfer.target.as_str()
+            )));
+        }
+        let target_addr = self
+            .metrics()
+            .membership_config
+            .membership()
+            .get_node(&target_raft_id)
+            .map(|node| node.addr.clone())
+            .ok_or_else(|| {
+                OntolithError::Failed(format!(
+                    "target {} is not in the raft membership",
+                    transfer.target.as_str()
+                ))
+            })?;
+        let request = TransferSnapshotRequest {
+            shard_id: transfer.shard_id.get(),
+            slots_start: transfer.slots.start,
+            slots_end: transfer.slots.end,
+            snapshot_id: transfer.snapshot.snapshot_id,
+            bytes,
+        };
+        let (status, body) =
+            http::transfer_snapshot_on_peer(&target_addr, &self.secret, &request)
+                .map_err(|e| OntolithError::Failed(format!("transfer snapshot: {e}")))?;
+        if status != 200 {
+            return Err(OntolithError::Failed(format!(
+                "transfer snapshot to {} failed: http {status}: {}",
+                transfer.target.as_str(),
+                String::from_utf8_lossy(&body)
+            )));
+        }
+        Ok(SyncReceipt {
+            source: transfer.source,
+            target: transfer.target,
+            shard_id: transfer.shard_id,
+            slots: transfer.slots,
+            transferred_entries: transfer.snapshot.snapshot_id,
+            completed_at_epoch: self.current_epoch(),
+        })
+    }
+
     /// Commit a metadata mutation through raft. As leader this appends
     /// locally; as follower the payload is forwarded to the leader over the
     /// multi-process apply RPC (P4-01) and retried once on leader change.
     fn metadata_mutation(&self, payload: LogPayload) -> Result<LogEntry, OntolithError> {
+        if self.is_partitioned(self.config.node_id) {
+            return Err(OntolithError::Failed(
+                "node is isolated by a network partition".into(),
+            ));
+        }
         if self.metrics().current_leader == Some(self.config.node_id) {
             let entry = self.append(payload)?;
             self.sync_applied();
@@ -801,7 +916,7 @@ impl RaftClusterRuntime {
         // Forward to the leader's apply endpoint; retry once if the leader
         // changed between resolution and delivery.
         for _ in 0..3 {
-            let (_, leader_addr) = {
+            let (leader_id, leader_addr) = {
                 let metrics = self.metrics();
                 let Some(leader_id) = metrics.current_leader else {
                     return Err(OntolithError::InvalidState(
@@ -820,6 +935,11 @@ impl RaftClusterRuntime {
                     })?;
                 (leader_id, addr)
             };
+            if self.is_partitioned(leader_id) {
+                return Err(OntolithError::Failed(
+                    "leader is isolated by a network partition".into(),
+                ));
+            }
             let (status, body) = http::apply_on_peer(&leader_addr, &self.secret, &payload)
                 .map_err(|e| OntolithError::Failed(format!("forward metadata op: {e}")))?;
             if status == 200 {
@@ -1129,29 +1249,61 @@ impl DataPlaneSync for RaftClusterRuntime {
         slots: SlotRange,
         snapshot: SnapshotRef,
     ) -> Result<(), OntolithError> {
-        self.inner
-            .transfer_snapshot(source, target, shard_id, slots, snapshot)
+        if source == target {
+            return Err(OntolithError::InvalidArgument(
+                "data plane transfer requires distinct source and target",
+            ));
+        }
+        self.sync_applied();
+        let known = self.nodes.read().unwrap();
+        if !known.contains_key(source.as_str()) || !known.contains_key(target.as_str()) {
+            return Err(OntolithError::NotFound(
+                "data plane transfer requires registered source and target nodes",
+            ));
+        }
+        drop(known);
+        self.data_plane_pending.lock().unwrap().push(RaftPendingTransfer {
+            source: source.clone(),
+            target: target.clone(),
+            shard_id,
+            slots,
+            snapshot,
+        });
+        Ok(())
     }
 
     fn pending_syncs(&self) -> usize {
-        self.inner.pending_syncs()
+        self.data_plane_pending.lock().unwrap().len()
     }
 
     fn drain_syncs(&self) -> Result<Vec<SyncReceipt>, OntolithError> {
-        self.inner.drain_syncs()
+        let pending = std::mem::take(&mut *self.data_plane_pending.lock().unwrap());
+        let mut receipts = Vec::with_capacity(pending.len());
+        for transfer in pending {
+            let receipt = self.complete_transfer(transfer)?;
+            self.data_plane_history.lock().unwrap().push(receipt.clone());
+            receipts.push(receipt);
+        }
+        Ok(receipts)
     }
 
     fn sync_history(&self) -> Vec<SyncReceipt> {
-        self.inner.sync_history()
+        self.data_plane_history.lock().unwrap().clone()
     }
 }
 
 impl FaultInjector for RaftClusterRuntime {
     fn inject_partition(&self, isolated: Vec<ClusterNodeId>) -> Result<(), OntolithError> {
+        let raft_ids = isolated
+            .iter()
+            .map(|id| self.raft_id_for(id))
+            .collect::<HashSet<_>>();
+        *self.partition.lock().unwrap() = raft_ids;
         self.inner.inject_partition(isolated)
     }
 
     fn heal_partition(&self) -> Result<(), OntolithError> {
+        self.partition.lock().unwrap().clear();
         self.inner.heal_partition()
     }
 
@@ -1181,6 +1333,23 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         cond()
+    }
+
+    /// Append through the current leader, re-resolving the leader and
+    /// retrying while a freshly elected leader settles. Parallel test load
+    /// can depose a leader between discovery and `client_write`, so the
+    /// append is retried instead of failing the whole cluster test.
+    fn leader_append(rts: &[RaftClusterRuntime], payload: LogPayload) -> LogEntry {
+        loop {
+            let Some(leader) = rts.iter().find(|rt| rt.leader_id().is_some()) else {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            };
+            match leader.append(payload.clone()) {
+                Ok(entry) => return entry,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     }
 
     fn http_node_config(
@@ -1364,9 +1533,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Index 2: index 1 is the membership entry written by initialize().
-        let entry = leader
-            .append(LogPayload::Metadata("majority-commit".into()))
-            .expect("append over http");
+        let entry = leader_append(&rts, LogPayload::Metadata("majority-commit".into()));
         assert_eq!(entry.index, 2);
         assert!(
             wait_until(
@@ -1395,13 +1562,7 @@ mod tests {
             ),
             "no leader after follower loss"
         );
-        let leader = rts
-            .iter()
-            .find(|rt| rt.leader_id().is_some())
-            .expect("leader after follower loss");
-        let entry = leader
-            .append(LogPayload::Metadata("survives-loss".into()))
-            .expect("append with 2 of 3 alive");
+        let entry = leader_append(&rts, LogPayload::Metadata("survives-loss".into()));
         assert_eq!(entry.index, 3);
         assert!(
             wait_until(
@@ -1529,6 +1690,216 @@ mod tests {
             "leader-registered node did not appear on all nodes"
         );
         assert_eq!(rts[leader_idx].status().node_count, 5);
+    }
+
+    #[test]
+    fn data_plane_transfer_moves_snapshot_over_http() {
+        type ImportedSnapshot = (ShardId, SlotRange, Vec<u8>);
+        struct TestDataPlaneIo {
+            imports: Arc<Mutex<Vec<ImportedSnapshot>>>,
+        }
+        impl DataPlaneSnapshotIo for TestDataPlaneIo {
+            fn export_snapshot(&self, snapshot: &SnapshotRef) -> Result<Vec<u8>, String> {
+                Ok(format!("snap:{}", snapshot.snapshot_id).into_bytes())
+            }
+            fn import_snapshot(
+                &self,
+                shard_id: ShardId,
+                slots: SlotRange,
+                bytes: &[u8],
+            ) -> Result<(), String> {
+                self.imports
+                    .lock()
+                    .unwrap()
+                    .push((shard_id, slots, bytes.to_vec()));
+                Ok(())
+            }
+        }
+
+        let dirs = [
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        ];
+        let rts = vec![
+            RaftClusterRuntime::new(http_node_config(0, "cluster-secret", Some(dirs[0].path()))),
+            RaftClusterRuntime::new(http_node_config(1, "cluster-secret", Some(dirs[1].path()))),
+            RaftClusterRuntime::new(http_node_config(2, "cluster-secret", Some(dirs[2].path()))),
+        ];
+        let addrs = rts
+            .iter()
+            .map(|rt| rt.http_addr().expect("http addr"))
+            .collect::<Vec<_>>();
+        let members = (0..3)
+            .map(|j| (format!("n{j}"), format!("http://{}", addrs[j])))
+            .collect::<Vec<_>>();
+        for rt in &rts {
+            rt.bootstrap(members.clone()).expect("bootstrap 3-node membership");
+        }
+        assert!(
+            wait_until(
+                || rts.iter().any(|rt| rt.leader_id().is_some()),
+                30000
+            ),
+            "no leader elected"
+        );
+        let leader_idx = (0..3)
+            .find(|i| rts[*i].leader_id() == Some(ClusterNodeId::new(format!("n{i}"))))
+            .expect("leader node");
+        let target_idx = (0..3).find(|i| *i != leader_idx).expect("target node");
+        let sim_idx = (0..3)
+            .find(|i| *i != leader_idx && *i != target_idx)
+            .expect("third node");
+        let source_id = ClusterNodeId::new(format!("n{leader_idx}"));
+        let target_id = ClusterNodeId::new(format!("n{target_idx}"));
+
+        // Leader exports through its local hook; the target imports through
+        // its HTTP data-plane endpoint.
+        let imports = Arc::new(Mutex::new(Vec::new()));
+        rts[leader_idx].set_data_plane_io(Arc::new(TestDataPlaneIo {
+            imports: Arc::clone(&imports),
+        }));
+        rts[target_idx].set_data_plane_io(Arc::new(TestDataPlaneIo {
+            imports: Arc::clone(&imports),
+        }));
+
+        let shard = ShardId::new(7);
+        let slots = SlotRange { start: 100, end: 199 };
+        let snapshot = SnapshotRef::new(42, None, ConsistencyLevel::Eventual, 3);
+        rts[leader_idx]
+            .transfer_snapshot(&source_id, &target_id, shard, slots, snapshot)
+            .expect("queue real transfer");
+        assert_eq!(rts[leader_idx].pending_syncs(), 1);
+        let receipts = rts[leader_idx].drain_syncs().expect("drain real transfer");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].source, source_id);
+        assert_eq!(receipts[0].target, target_id);
+        assert_eq!(receipts[0].shard_id, shard);
+        assert_eq!(receipts[0].slots, slots);
+        assert_eq!(receipts[0].transferred_entries, 42);
+        assert_eq!(rts[leader_idx].pending_syncs(), 0);
+        assert_eq!(rts[leader_idx].sync_history().len(), 1);
+
+        // The target imported the exact exported bytes for the right range.
+        let imported = imports.lock().unwrap();
+        assert_eq!(imported.len(), 1, "target must import exactly one snapshot");
+        assert_eq!(imported[0].0, shard);
+        assert_eq!(imported[0].1, slots);
+        assert_eq!(imported[0].2, b"snap:42");
+        drop(imported);
+
+        // A node without an IO hook keeps the simulator fallback: the queued
+        // transfer completes with a local receipt and no HTTP round-trip.
+        let fallback = SnapshotRef::new(43, None, ConsistencyLevel::Eventual, 4);
+        rts[sim_idx]
+            .transfer_snapshot(&source_id, &target_id, shard, slots, fallback)
+            .expect("queue fallback transfer");
+        let receipts = rts[sim_idx].drain_syncs().expect("drain fallback transfer");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].transferred_entries, 43);
+        assert_eq!(rts[sim_idx].sync_history().len(), 1);
+        assert_eq!(imports.lock().unwrap().len(), 1, "fallback must not hit HTTP");
+    }
+
+    #[test]
+    fn raft_http_partition_blocks_forwarding_and_heals() {
+        let dirs = [
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        ];
+        let rts = vec![
+            RaftClusterRuntime::new(http_node_config(0, "cluster-secret", Some(dirs[0].path()))),
+            RaftClusterRuntime::new(http_node_config(1, "cluster-secret", Some(dirs[1].path()))),
+            RaftClusterRuntime::new(http_node_config(2, "cluster-secret", Some(dirs[2].path()))),
+        ];
+        let addrs = rts
+            .iter()
+            .map(|rt| rt.http_addr().expect("http addr"))
+            .collect::<Vec<_>>();
+        let members = (0..3)
+            .map(|j| (format!("n{j}"), format!("http://{}", addrs[j])))
+            .collect::<Vec<_>>();
+        for rt in &rts {
+            rt.bootstrap(members.clone()).expect("bootstrap 3-node membership");
+        }
+        assert!(
+            wait_until(
+                || rts.iter().any(|rt| rt.leader_id().is_some()),
+                30000
+            ),
+            "no leader elected"
+        );
+        let leader_idx = (0..3)
+            .find(|i| rts[*i].leader_id() == Some(ClusterNodeId::new(format!("n{i}"))))
+            .expect("leader node");
+        let leader_id = ClusterNodeId::new(format!("n{leader_idx}"));
+
+        // Isolate the leader plus one follower on every node: no majority can
+        // form while the partition holds, so no new leader can emerge and
+        // metadata forwarding must fail deterministically.
+        let minority = vec![
+            leader_id.clone(),
+            ClusterNodeId::new(format!("n{}", (leader_idx + 1) % 3)),
+        ];
+        let follower_idx = (leader_idx + 2) % 3;
+        for rt in &rts {
+            rt.inject_partition(minority.clone())
+                .expect("inject partition");
+        }
+
+        // The leader refuses its own metadata ops while isolated (deterministic).
+        let err = rts[leader_idx]
+            .heartbeat(&ClusterNodeId::new(format!("n{leader_idx}")), 1)
+            .expect_err("isolated leader must reject metadata ops");
+        assert!(
+            err.to_string().contains("partition"),
+            "unexpected leader error: {err}"
+        );
+
+        // A follower cannot forward to the isolated leader (either the stale
+        // leader hint is partitioned or the cluster has no leader at all).
+        assert!(
+            rts[follower_idx]
+                .register_node(ClusterNode::new("n9", "10.0.0.9:7009"))
+                .is_err(),
+            "forwarding must fail while the leader is partitioned"
+        );
+
+        // Heal: the cluster re-elects a leader and forwarding recovers.
+        for rt in &rts {
+            rt.heal_partition().expect("heal partition");
+        }
+        assert!(
+            wait_until(|| rts[follower_idx].leader_id().is_some(), 30000),
+            "no leader after heal"
+        );
+        let mut recovered = false;
+        for _ in 0..100 {
+            if rts[follower_idx]
+                .register_node(ClusterNode::new("n9", "10.0.0.9:7009"))
+                .is_ok()
+            {
+                recovered = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(recovered, "metadata forwarding did not recover after heal");
+        assert!(
+            wait_until(
+                || {
+                    rts.iter().all(|rt| {
+                        rt.membership()
+                            .nodes
+                            .iter()
+                            .any(|n| n.node_id.as_str() == "n9")
+                    })
+                },
+                30000
+            ),
+            "registered node did not replicate after heal"
+        );
     }
 
     #[test]

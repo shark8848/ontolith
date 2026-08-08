@@ -7,7 +7,7 @@
 //! (`Authorization: Bearer <secret>`).
 
 use super::{NodeId, TypeConfig};
-use crate::domain::{LogEntry, LogPayload};
+use crate::domain::{LogEntry, LogPayload, ShardId, SlotRange};
 use openraft::error::{NetworkError, RPCError, RaftError, RemoteError};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
@@ -15,17 +15,42 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use openraft::BasicNode;
-use std::collections::HashMap;
+use ontolith_storage::domain::SnapshotRef;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 type RaftHandle = Arc<openraft::Raft<TypeConfig>>;
 type NetError = RPCError<NodeId, BasicNode, RaftError<NodeId>>;
 type SnapshotNetError = RPCError<NodeId, BasicNode, RaftError<NodeId, openraft::error::InstallSnapshotError>>;
+
+/// Data-plane snapshot IO hook (P4-03): the owning process plugs its L2
+/// storage so `transfer_snapshot` can move real snapshot bytes between nodes.
+pub trait DataPlaneSnapshotIo: Send + Sync {
+    /// Serialize the snapshot referenced by `snapshot` into transfer bytes.
+    fn export_snapshot(&self, snapshot: &SnapshotRef) -> Result<Vec<u8>, String>;
+    /// Apply transferred snapshot bytes for a slot range into local storage.
+    fn import_snapshot(
+        &self,
+        shard_id: ShardId,
+        slots: SlotRange,
+        bytes: &[u8],
+    ) -> Result<(), String>;
+}
+
+/// Wire request for `/internal/raft/transfer-snapshot` (P4-03).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TransferSnapshotRequest {
+    pub shard_id: u32,
+    pub slots_start: u32,
+    pub slots_end: u32,
+    pub snapshot_id: u64,
+    pub bytes: Vec<u8>,
+}
 
 // ---------------------------------------------------------------------------
 // HTTP message primitives (mirrors `ontolith-server::http`).
@@ -208,13 +233,15 @@ impl HttpRaftServer {
         secret: String,
         runtime: Arc<tokio::runtime::Runtime>,
         raft: RaftHandle,
+        data_plane: Arc<Mutex<Option<Arc<dyn DataPlaneSnapshotIo>>>>,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(listen)?;
         let addr = listener.local_addr()?;
         let running = Arc::new(AtomicBool::new(true));
         let join = {
             let running = Arc::clone(&running);
-            thread::spawn(move || serve(listener, secret, runtime, raft, running))
+            let data_plane = Arc::clone(&data_plane);
+            thread::spawn(move || serve(listener, secret, runtime, raft, running, data_plane))
         };
         Ok(Self {
             addr,
@@ -246,6 +273,7 @@ fn serve(
     runtime: Arc<tokio::runtime::Runtime>,
     raft: RaftHandle,
     running: Arc<AtomicBool>,
+    data_plane: Arc<Mutex<Option<Arc<dyn DataPlaneSnapshotIo>>>>,
 ) {
     while running.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -253,8 +281,9 @@ fn serve(
                 let secret = secret.clone();
                 let runtime = Arc::clone(&runtime);
                 let raft = Arc::clone(&raft);
+                let data_plane = Arc::clone(&data_plane);
                 thread::spawn(move || {
-                    let _ = handle_connection(stream, &secret, &runtime, &raft);
+                    let _ = handle_connection(stream, &secret, &runtime, &raft, &data_plane);
                 });
             }
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -273,6 +302,7 @@ fn handle_connection(
     secret: &str,
     runtime: &tokio::runtime::Runtime,
     raft: &openraft::Raft<TypeConfig>,
+    data_plane: &Arc<Mutex<Option<Arc<dyn DataPlaneSnapshotIo>>>>,
 ) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
@@ -284,7 +314,7 @@ fn handle_connection(
             return Ok(());
         }
     };
-    let response = route(&request, secret, runtime, raft);
+    let response = route(&request, secret, runtime, raft, data_plane);
     response.write_to(&mut stream)
 }
 
@@ -293,6 +323,7 @@ fn route(
     secret: &str,
     runtime: &tokio::runtime::Runtime,
     raft: &openraft::Raft<TypeConfig>,
+    data_plane: &Arc<Mutex<Option<Arc<dyn DataPlaneSnapshotIo>>>>,
 ) -> HttpResponse {
     match request.header("authorization") {
         Some(value) if value == format!("Bearer {secret}") => {}
@@ -312,6 +343,9 @@ fn route(
         "/internal/raft/append-entries" => handle_append_entries(runtime, raft, &request.body),
         "/internal/raft/install-snapshot" => handle_install_snapshot(runtime, raft, &request.body),
         "/internal/raft/apply" => handle_apply(runtime, raft, &request.body),
+        "/internal/raft/transfer-snapshot" => {
+            handle_transfer_snapshot(data_plane, &request.body)
+        }
         _ => HttpResponse::text(404, "Not Found", "unknown raft RPC endpoint"),
     }
 }
@@ -415,6 +449,44 @@ fn handle_apply(
     }
 }
 
+/// Data-plane transfer RPC (P4-03): the target imports a snapshot byte blob
+/// for a slot range through its [`DataPlaneSnapshotIo`] hook.
+fn handle_transfer_snapshot(
+    data_plane: &Arc<Mutex<Option<Arc<dyn DataPlaneSnapshotIo>>>>,
+    body: &[u8],
+) -> HttpResponse {
+    let request: TransferSnapshotRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(e) => {
+            return HttpResponse::text(
+                400,
+                "Bad Request",
+                format!("invalid transfer-snapshot payload: {e}"),
+            );
+        }
+    };
+    let io = data_plane.lock().unwrap().clone();
+    let Some(io) = io else {
+        return HttpResponse::text(
+            503,
+            "Service Unavailable",
+            "target node has no data-plane snapshot IO hook installed",
+        );
+    };
+    let slots = SlotRange {
+        start: request.slots_start,
+        end: request.slots_end,
+    };
+    match io.import_snapshot(ShardId::new(request.shard_id), slots, &request.bytes) {
+        Ok(()) => HttpResponse::text(200, "OK", r#"{"imported":true}"#),
+        Err(e) => HttpResponse::text(
+            500,
+            "Internal Server Error",
+            format!("import snapshot failed: {e}"),
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Client side.
 // ---------------------------------------------------------------------------
@@ -425,6 +497,8 @@ pub struct HttpRaftClient {
     target: NodeId,
     addr: String,
     secret: String,
+    self_node_id: NodeId,
+    partition: Arc<Mutex<HashSet<NodeId>>>,
 }
 
 impl HttpRaftClient {
@@ -438,6 +512,15 @@ impl HttpRaftClient {
         Resp: serde::de::DeserializeOwned,
         E: serde::de::DeserializeOwned + std::error::Error,
     {
+        let partitioned = {
+            let partition = self.partition.lock().unwrap();
+            partition.contains(&self.target) || partition.contains(&self.self_node_id)
+        };
+        if partitioned {
+            return Err(RPCError::Network(NetworkError::new(
+                &std::io::Error::other("peer isolated by network partition"),
+            )));
+        }
         let body = serde_json::to_vec(rpc)
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let target = self.target;
@@ -518,6 +601,32 @@ pub(crate) fn apply_on_peer(
     Ok((resp.status, resp.body))
 }
 
+/// Blocking HTTP POST of a snapshot transfer to a peer (P4-03).
+pub(crate) fn transfer_snapshot_on_peer(
+    addr: &str,
+    secret: &str,
+    request: &TransferSnapshotRequest,
+) -> Result<(u16, Vec<u8>), String> {
+    let host_port = parse_host_port(addr)?;
+    let body = serde_json::to_vec(request).map_err(|e| format!("serialize transfer request: {e}"))?;
+    let mut stream = TcpStream::connect_timeout(&host_port, Duration::from_secs(5))
+        .map_err(|e| format!("connect raft peer {addr}: {e}"))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+    let head = format!(
+        "POST /internal/raft/transfer-snapshot HTTP/1.1\r\nHost: {host_port}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        secret,
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(&body))
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("write transfer request: {e}"))?;
+    let resp = read_response(&mut stream).map_err(|e| format!("read transfer response: {e}"))?;
+    Ok((resp.status, resp.body))
+}
+
 impl RaftNetwork<TypeConfig> for HttpRaftClient {
     async fn append_entries(
         &mut self,
@@ -549,12 +658,20 @@ impl RaftNetwork<TypeConfig> for HttpRaftClient {
 #[derive(Clone)]
 pub struct HttpRaftFactory {
     secret: String,
+    self_node_id: NodeId,
+    partition: Arc<Mutex<HashSet<NodeId>>>,
 }
 
 impl HttpRaftFactory {
-    pub fn new(secret: impl Into<String>) -> Self {
+    pub fn new(
+        secret: impl Into<String>,
+        self_node_id: NodeId,
+        partition: Arc<Mutex<HashSet<NodeId>>>,
+    ) -> Self {
         Self {
             secret: secret.into(),
+            self_node_id,
+            partition,
         }
     }
 }
@@ -567,6 +684,8 @@ impl RaftNetworkFactory<TypeConfig> for HttpRaftFactory {
             target,
             addr: node.addr.clone(),
             secret: self.secret.clone(),
+            self_node_id: self.self_node_id,
+            partition: Arc::clone(&self.partition),
         }
     }
 }

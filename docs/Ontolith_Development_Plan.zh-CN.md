@@ -411,7 +411,7 @@ sudo -v# Ontolith 开发计划
 **R1 退出标准剩余项**
 
 - [x] 多节点数据面设计定稿（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)：openraft behind traits，2026-08-06）
-- [x] 多节点数据面实施（**M1–M3 完成**，2026-08-08：M1 openraft 适配 + 单节点引导 + trait 适配 + 内存传输；M2 多进程 HTTP RPC（树内 HTTP/1.1 + 共享 secret）+ RocksDB raft CF + snapshot install，cluster 21→26 测，双节点 HTTP+RocksDB 选举/复制/落盘；M3 默认运行时切换 + 真实复制语义 + CI 三进程 smoke，cluster 26→27 测，三节点 HTTP+RocksDB 多数派提交/失一 follower 后仍可提交；P4-01 多进程元数据 RPC：`/internal/raft/apply` + 复制式节点注册表，register/heartbeat/set_node_status 经 raft 提交全节点收敛，cluster 27→28 测）
+- [x] 多节点数据面实施（**M1–M3 + P4-01–P4-04 完成**，2026-08-08：M1 openraft 适配 + 单节点引导 + trait 适配 + 内存传输；M2 多进程 HTTP RPC（树内 HTTP/1.1 + 共享 secret）+ RocksDB raft CF + snapshot install，cluster 21→26 测，双节点 HTTP+RocksDB 选举/复制/落盘；M3 默认运行时切换 + 真实复制语义 + CI 三进程 smoke，cluster 26→27 测，三节点 HTTP+RocksDB 多数派提交/失一 follower 后仍可提交；P4-01 多进程元数据 RPC：`/internal/raft/apply` + 复制式节点注册表，register/heartbeat/set_node_status 经 raft 提交全节点收敛，cluster 27→28 测；P4-03 跨节点数据搬迁：`DataPlaneSnapshotIo` + `/internal/raft/transfer-snapshot` 真实字节迁移（目标节点导入 + 无 hook 回退模拟回执），cluster 28→29 测；P4-04 真实网络分区：`HttpRaftClient` 对称丢弃分区 RPC + `metadata_mutation` 隔离拒绝/愈合恢复，cluster 29→30 测）
 - [x] 完整 W3C 套件接入（vendored 官方 `w3c/rdf-tests` sparql11 + manifest 驱动 runner + `w3c11_profile.tsv` 492 条基线：127 PASS / 365 FAIL 欠账 profile 化防回归；2026-08-06）
 - [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
 - [ ] 发布流水线与回滚演练通过
