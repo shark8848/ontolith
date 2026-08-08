@@ -11,21 +11,26 @@ pub fn shacl(name: &str) -> String {
     format!("{SHACL_NS}{name}")
 }
 
-/// Result severity of a validation result (`sh:severity`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Result severity of a validation result (`sh:severity`). Custom severity
+/// IRIs (anything other than `sh:Violation`/`sh:Warning`/`sh:Info`) are
+/// preserved verbatim so validation reports round-trip them (P6-02).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Severity {
     Violation,
     Warning,
     Info,
+    /// Custom severity IRI (`sh:severity <custom-iri>`).
+    Custom(String),
 }
 
 impl Severity {
     pub fn iri(self) -> String {
-        shacl(match self {
-            Self::Violation => "Violation",
-            Self::Warning => "Warning",
-            Self::Info => "Info",
-        })
+        match self {
+            Self::Violation => shacl("Violation"),
+            Self::Warning => shacl("Warning"),
+            Self::Info => shacl("Info"),
+            Self::Custom(iri) => iri,
+        }
     }
 
     pub fn as_str(self) -> &'static str {
@@ -33,6 +38,7 @@ impl Severity {
             Self::Violation => "Violation",
             Self::Warning => "Warning",
             Self::Info => "Info",
+            Self::Custom(_) => "Custom",
         }
     }
 }
@@ -170,9 +176,15 @@ pub enum Target {
 /// One `sh:property` nested property shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyShape {
+    /// Shape subject key (IRI or blank-node label) — reported as
+    /// `sh:sourceShape` for property-shape constraint results.
+    pub id: String,
     /// `sh:path` predicate.
     pub path: String,
     pub constraints: Vec<ConstraintComponent>,
+    /// Nested `sh:property` shapes: applied to the values of `path` as focus
+    /// nodes (property shape nesting, e.g. `validation-reports/shared`).
+    pub property_shapes: Vec<PropertyShape>,
     pub severity: Severity,
     pub message: Option<String>,
 }
@@ -183,10 +195,15 @@ pub struct Shape {
     /// Shape subject key: IRI string or blank-node label.
     pub id: String,
     pub targets: Vec<Target>,
+    /// `Some(path)` when the shape itself carries `sh:path` (a standalone
+    /// property shape): its constraints apply to the values of the path.
+    pub path: Option<String>,
     pub constraints: Vec<ConstraintComponent>,
     pub property_shapes: Vec<PropertyShape>,
     /// `sh:ignoredProperties` — extra predicates allowed by `sh:closed`.
     pub ignored_properties: Vec<String>,
+    /// `sh:deactivated true` — the shape is skipped during validation.
+    pub deactivated: bool,
     pub severity: Severity,
     pub message: Option<String>,
 }

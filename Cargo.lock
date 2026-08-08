@@ -1064,6 +1064,7 @@ dependencies = [
  "ontolith-parser",
  "ontolith-query",
  "ontolith-rdf",
+ "ontolith-reasoner",
  "ontolith-storage",
  "ontolith-transaction",
  "quick-xml",

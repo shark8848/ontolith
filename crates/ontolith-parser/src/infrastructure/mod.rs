@@ -217,6 +217,19 @@ ex:alice ex:address [ ex:city "NYC" ; ex:zip "10001" ] .
     }
 
     #[test]
+    fn parses_standalone_blank_node_property_list_statement() {
+        // Turtle permits `[ ... ] .` as a complete statement (the blank node
+        // property list carries its own predicate-object list).
+        let dict = InMemoryDictionary::new();
+        let input = r#"
+@prefix ex: <http://ex.org/> .
+[ ex:p ex:o ; ex:q "v" ] .
+"#;
+        let out = parse_turtle_doc(input, &dict).expect("turtle");
+        assert_eq!(out.dataset.triple_count(), 2);
+    }
+
+    #[test]
     fn parses_turtle_collection() {
         let dict = InMemoryDictionary::new();
         let input = r#"

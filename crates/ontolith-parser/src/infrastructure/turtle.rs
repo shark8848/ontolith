@@ -197,8 +197,18 @@ impl<'a> TurtleParser<'a> {
             self.bump()?;
             return Ok(());
         }
+        let is_bnode_list = self.peek()? == Tok::OpenBracket;
         let subject = self.parse_node(sink)?;
-        self.parse_predicate_object_list(sink, &subject)?;
+        // A blank-node property list may stand alone as a statement
+        // (`[ ... ] .`), carrying its own predicate-object list.
+        if !is_bnode_list
+            || !matches!(
+                self.peek()?,
+                Tok::Dot | Tok::CloseBrace | Tok::CloseBracket | Tok::Eof
+            )
+        {
+            self.parse_predicate_object_list(sink, &subject)?;
+        }
         if self.peek()? == Tok::Dot {
             self.bump()?;
         }

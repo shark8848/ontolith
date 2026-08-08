@@ -32,6 +32,16 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+const RDFS_CLASS: &str = "http://www.w3.org/2000/01/rdf-schema#Class";
+const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+const OWL_CLASS: &str = "http://www.w3.org/2002/07/owl#Class";
+const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
+const XSD_DATE: &str = "http://www.w3.org/2001/XMLSchema#date";
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
 /// SHACL baseline validator.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ShaclEngine;
@@ -94,6 +104,16 @@ fn literal_bool(term: &Term) -> Option<bool> {
     }
 }
 
+/// Length of the SPARQL `str()` representation of a term: full IRI for IRIs,
+/// lexical form for literals. Blank nodes have no string representation.
+fn term_str_len(v: &Term) -> Option<usize> {
+    match v {
+        Term::Iri(iri) => Some(iri.as_str().chars().count()),
+        Term::Literal(lv) => Some(lv.lexical_form().chars().count()),
+        Term::BlankNode(_) => None,
+    }
+}
+
 /// Comparable value extracted from a literal: numbers compare numerically,
 /// strings compare by code point order. Other terms are not comparable.
 fn compare_terms(a: &Term, b: &Term) -> Option<Ordering> {
@@ -101,18 +121,216 @@ fn compare_terms(a: &Term, b: &Term) -> Option<Ordering> {
         (Term::Literal(LiteralValue::Integer(x)), Term::Literal(LiteralValue::Integer(y))) => {
             Some(x.cmp(y))
         }
-        (Term::Literal(LiteralValue::Decimal(x)), Term::Literal(LiteralValue::Decimal(y))) => {
-            x.partial_cmp(y)
-        }
-        (Term::Literal(LiteralValue::Integer(x)), Term::Literal(LiteralValue::Decimal(y))) => {
-            (*x as f64).partial_cmp(y)
-        }
-        (Term::Literal(LiteralValue::Decimal(x)), Term::Literal(LiteralValue::Integer(y))) => {
-            x.partial_cmp(&(*y as f64))
-        }
         (Term::Literal(LiteralValue::String(x)), Term::Literal(LiteralValue::String(y))) => {
             Some(x.cmp(y))
         }
+        (Term::Literal(x), Term::Literal(y)) => {
+            if x.xsd_datatype_iri().as_str() == XSD_DATE_TIME
+                && y.xsd_datatype_iri().as_str() == XSD_DATE_TIME
+            {
+                return compare_date_times(&x.lexical_form(), &y.lexical_form());
+            }
+            numeric_value(x).zip(numeric_value(y)).and_then(|(u, v)| u.partial_cmp(&v))
+        }
+        _ => None,
+    }
+}
+
+/// Parsed `xsd:dateTime` value with an optional timezone offset (minutes).
+struct DateTimeValue {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    tz: Option<i32>,
+}
+
+impl DateTimeValue {
+    /// Local fields as a sortable tuple (used when both sides lack a timezone).
+    fn local(&self) -> (i32, u32, u32, u32, u32, u32) {
+        (self.year, self.month, self.day, self.hour, self.minute, self.second)
+    }
+
+    /// Instant as seconds since the Unix epoch (used when both sides carry a
+    /// timezone).
+    fn instant(&self) -> i64 {
+        days_from_civil(self.year, self.month, self.day) * 86_400
+            + i64::from(self.hour) * 3_600
+            + i64::from(self.minute) * 60
+            + i64::from(self.second)
+            - i64::from(self.tz.unwrap_or(0)) * 60
+    }
+}
+
+/// Days since 1970-01-01 (Howard Hinnant's civil-from-days inverse).
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let yy = if m <= 2 { y - 1 } else { y } as i64;
+    let era = if yy >= 0 { yy } else { yy - 399 } / 400;
+    let yoe = yy - era * 400;
+    let mp = i64::from((m + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn parse_timezone(s: &str) -> Option<i32> {
+    if s == "Z" {
+        return Some(0);
+    }
+    let (sign, body) = match s.strip_prefix('-') {
+        Some(body) => (-1, body),
+        None => (1, s.strip_prefix('+')?),
+    };
+    let (h, m) = body.split_once(':')?;
+    Some(sign * (h.parse::<i32>().ok()? * 60 + m.parse::<i32>().ok()?))
+}
+
+fn parse_date_time(lex: &str) -> Option<DateTimeValue> {
+    let (date, rest) = lex.split_once('T')?;
+    let mut dp = date.split('-');
+    let year: i32 = dp.next()?.parse().ok()?;
+    let month: u32 = dp.next()?.parse().ok()?;
+    let day: u32 = dp.next()?.parse().ok()?;
+    if dp.next().is_some() {
+        return None;
+    }
+    // Timezone lives at the tail: `Z` or `[+-]HH:MM`.
+    let mut tz = None;
+    let mut time = rest;
+    for marker in ['Z', '+', '-'] {
+        if let Some(idx) = rest.rfind(marker)
+            && idx > 0
+            && parse_timezone(&rest[idx..]).is_some()
+        {
+            tz = parse_timezone(&rest[idx..]);
+            time = &rest[..idx];
+            break;
+        }
+    }
+    let mut tp = time.split(':');
+    let hour: u32 = tp.next()?.parse().ok()?;
+    let minute: u32 = tp.next()?.parse().ok()?;
+    let sec_part = tp.next()?;
+    if tp.next().is_some() {
+        return None;
+    }
+    let second: u32 = sec_part.split('.').next()?.parse().ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    Some(DateTimeValue { year, month, day, hour, minute, second, tz })
+}
+
+/// XSD dateTime ordering per SHACL/SPARQL: two values with explicit timezones
+/// compare as instants; two without compare by local fields; a mix of the two
+/// is not comparable (the value does not satisfy an order constraint).
+fn compare_date_times(a_lex: &str, b_lex: &str) -> Option<Ordering> {
+    let a = parse_date_time(a_lex)?;
+    let b = parse_date_time(b_lex)?;
+    match (a.tz, b.tz) {
+        (Some(_), Some(_)) => Some(a.instant().cmp(&b.instant())),
+        (None, None) => Some(a.local().cmp(&b.local())),
+        _ => None,
+    }
+}
+
+/// True when the lexical form of a typed literal is a valid value for its
+/// declared datatype (SHACL `sh:datatype` requires well-formed literals).
+fn lexical_valid_for_datatype(dt: &str, value: &str) -> bool {
+    match dt {
+        XSD_BOOLEAN => matches!(value, "true" | "false" | "1" | "0"),
+        x if x == XSD_INTEGER || is_integer_family(x) => {
+            let trimmed = value
+                .strip_prefix(|c| c == '+' || c == '-')
+                .unwrap_or(value);
+            let numeric = !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit());
+            numeric && integer_in_range(dt, value)
+        }
+        XSD_DECIMAL => {
+            let body = value
+                .strip_prefix(|c| c == '+' || c == '-')
+                .unwrap_or(value);
+            !body.is_empty()
+                && body.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && body.chars().filter(|c| *c == '.').count() <= 1
+                && body.chars().any(|c| c.is_ascii_digit())
+        }
+        XSD_FLOAT | XSD_DOUBLE => {
+            matches!(value, "INF" | "-INF" | "NaN")
+                || value.parse::<f64>().is_ok()
+                || value.parse::<f32>().is_ok()
+        }
+        XSD_DATE_TIME => parse_date_time(value).is_some(),
+        XSD_DATE => {
+            let mut parts = value.split('-');
+            let Ok(y) = parts.next().unwrap_or("").parse::<i32>() else {
+                return false;
+            };
+            let Ok(m) = parts.next().unwrap_or("").parse::<u32>() else {
+                return false;
+            };
+            let Ok(d) = parts.next().unwrap_or("").parse::<u32>() else {
+                return false;
+            };
+            parts.next().is_none() && (1..=12).contains(&m) && (1..=31).contains(&d) && y != 0
+        }
+        _ => true,
+    }
+}
+
+fn is_integer_family(dt: &str) -> bool {
+    matches!(
+        dt,
+        "http://www.w3.org/2001/XMLSchema#int"
+            | "http://www.w3.org/2001/XMLSchema#long"
+            | "http://www.w3.org/2001/XMLSchema#short"
+            | "http://www.w3.org/2001/XMLSchema#byte"
+            | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger"
+            | "http://www.w3.org/2001/XMLSchema#nonPositiveInteger"
+            | "http://www.w3.org/2001/XMLSchema#negativeInteger"
+            | "http://www.w3.org/2001/XMLSchema#positiveInteger"
+            | "http://www.w3.org/2001/XMLSchema#unsignedLong"
+            | "http://www.w3.org/2001/XMLSchema#unsignedInt"
+            | "http://www.w3.org/2001/XMLSchema#unsignedShort"
+            | "http://www.w3.org/2001/XMLSchema#unsignedByte"
+    )
+}
+
+fn integer_in_range(dt: &str, value: &str) -> bool {
+    let Ok(n) = value.parse::<i64>() else {
+        return false;
+    };
+    match dt {
+        "http://www.w3.org/2001/XMLSchema#byte" => (-128..=127).contains(&n),
+        "http://www.w3.org/2001/XMLSchema#short" => (-32_768..=32_767).contains(&n),
+        "http://www.w3.org/2001/XMLSchema#int" => (i32::MIN as i64..=i32::MAX as i64).contains(&n),
+        "http://www.w3.org/2001/XMLSchema#unsignedByte" => (0..=255).contains(&n),
+        "http://www.w3.org/2001/XMLSchema#unsignedShort" => (0..=65_535).contains(&n),
+        "http://www.w3.org/2001/XMLSchema#unsignedInt" => (0..=u32::MAX as i64).contains(&n),
+        "http://www.w3.org/2001/XMLSchema#unsignedLong" => n >= 0,
+        "http://www.w3.org/2001/XMLSchema#nonNegativeInteger" => n >= 0,
+        "http://www.w3.org/2001/XMLSchema#positiveInteger" => n > 0,
+        "http://www.w3.org/2001/XMLSchema#nonPositiveInteger" => n <= 0,
+        "http://www.w3.org/2001/XMLSchema#negativeInteger" => n < 0,
+        _ => true,
+    }
+}
+
+
+/// Numeric value of a literal for cross-datatype ordering (integer/decimal/
+/// float/double compare by their numeric value, per XSD value-space ordering).
+fn numeric_value(lv: &LiteralValue) -> Option<f64> {
+    match lv {
+        LiteralValue::Integer(i) => Some(*i as f64),
+        LiteralValue::Decimal(f) | LiteralValue::Double(f) => Some(*f),
+        LiteralValue::Float(f) => Some(*f as f64),
         _ => None,
     }
 }
@@ -157,14 +375,23 @@ fn is_shacl_body(triples: &[(String, Term)]) -> bool {
     triples.iter().any(|(p, _)| p.starts_with(SHACL_NS))
 }
 
-fn parse_severity(dict: &dyn DictionaryCodec, term: &Term) -> Option<Severity> {
-    let key = term_key(dict, term);
-    if key == shacl("Warning") {
-        Some(Severity::Warning)
-    } else if key == shacl("Info") {
-        Some(Severity::Info)
-    } else {
-        Some(Severity::Violation)
+fn parse_severity(term: &Term) -> Option<Severity> {
+    // SHACL allows any IRI as a severity; the three well-known ones map to
+    // the enum variants, everything else is preserved as a custom severity.
+    match term {
+        Term::Iri(iri) => {
+            let key = iri.as_str();
+            if key == shacl("Violation") {
+                Some(Severity::Violation)
+            } else if key == shacl("Warning") {
+                Some(Severity::Warning)
+            } else if key == shacl("Info") {
+                Some(Severity::Info)
+            } else {
+                Some(Severity::Custom(key.to_owned()))
+            }
+        }
+        _ => None,
     }
 }
 
@@ -226,8 +453,10 @@ fn parse_property_shape(
 ) -> PropertyShape {
     let Some(triples) = map.get(key) else {
         return PropertyShape {
+            id: key.to_owned(),
             path: String::new(),
             constraints: Vec::new(),
+            property_shapes: Vec::new(),
             severity: Severity::Violation,
             message: None,
         };
@@ -238,6 +467,7 @@ fn parse_property_shape(
         .and_then(|(_, o)| term_iri(o))
         .unwrap_or_default();
     let (mut constraints, severity, message) = parse_shape_body(dict, map, triples);
+    let mut property_shapes = Vec::new();
     // Property-shape only parameters (must not appear on node shapes).
     for (p, o) in triples {
         match p.as_str() {
@@ -259,32 +489,18 @@ fn parse_property_shape(
             x if x == shacl("qualifiedValueShapesDisjoint") && literal_bool(o) == Some(true) => {
                 constraints.push(ConstraintComponent::QualifiedValueShapesDisjoint);
             }
-            x if x == shacl("equals") => {
-                if let Some(iri) = term_iri(o) {
-                    constraints.push(ConstraintComponent::Equals(iri));
-                }
-            }
-            x if x == shacl("disjoint") => {
-                if let Some(iri) = term_iri(o) {
-                    constraints.push(ConstraintComponent::Disjoint(iri));
-                }
-            }
-            x if x == shacl("lessThan") => {
-                if let Some(iri) = term_iri(o) {
-                    constraints.push(ConstraintComponent::LessThan(iri));
-                }
-            }
-            x if x == shacl("lessThanOrEquals") => {
-                if let Some(iri) = term_iri(o) {
-                    constraints.push(ConstraintComponent::LessThanOrEquals(iri));
-                }
+            x if x == shacl("property") => {
+                let nested = term_key(dict, o);
+                property_shapes.push(parse_property_shape(dict, map, &nested));
             }
             _ => {}
         }
     }
     PropertyShape {
+        id: key.to_owned(),
         path,
         constraints,
+        property_shapes,
         severity,
         message,
     }
@@ -410,6 +626,28 @@ fn parse_shape_body(
             x if x == shacl("not") => {
                 constraints.push(ConstraintComponent::Not(term_key(dict, o)));
             }
+            // Property-pair constraints are valid on node shapes too: on a node
+            // shape the focus node itself is the value set being compared.
+            x if x == shacl("equals") => {
+                if let Some(iri) = term_iri(o) {
+                    constraints.push(ConstraintComponent::Equals(iri));
+                }
+            }
+            x if x == shacl("disjoint") => {
+                if let Some(iri) = term_iri(o) {
+                    constraints.push(ConstraintComponent::Disjoint(iri));
+                }
+            }
+            x if x == shacl("lessThan") => {
+                if let Some(iri) = term_iri(o) {
+                    constraints.push(ConstraintComponent::LessThan(iri));
+                }
+            }
+            x if x == shacl("lessThanOrEquals") => {
+                if let Some(iri) = term_iri(o) {
+                    constraints.push(ConstraintComponent::LessThanOrEquals(iri));
+                }
+            }
             x if x == shacl("flags") => {
                 if let Some(s) = literal_string(o) {
                     constraints.push(ConstraintComponent::PatternFlags(s));
@@ -421,7 +659,7 @@ fn parse_shape_body(
                 }
             }
             x if x == shacl("severity") => {
-                if let Some(s) = parse_severity(dict, o) {
+                if let Some(s) = parse_severity(o) {
                     severity = s;
                 }
             }
@@ -446,13 +684,30 @@ fn parse_shapes(dict: &dyn DictionaryCodec, shapes: &[Triple]) -> Vec<Shape> {
         let mut targets = Vec::new();
         let mut property_shapes = Vec::new();
         let mut ignored_properties = Vec::new();
+        let mut deactivated = false;
         let (constraints, severity, message) = parse_shape_body(dict, &map, triples);
+        // A shape that declares `sh:path` is a standalone property shape: its
+        // own constraints apply to the values of the path.
+        let path = triples
+            .iter()
+            .find(|(p, _)| p == &shacl("path"))
+            .and_then(|(_, o)| term_iri(o));
         for (p, o) in triples {
             match p.as_str() {
                 x if x == shacl("targetClass") => {
                     if let Some(iri) = term_iri(o) {
                         targets.push(Target::Class(iri));
                     }
+                }
+                // Implicit class target: a shape that is itself a class
+                // (`rdfs:Class` / `owl:Class`) targets all its instances.
+                x if x == RDF_TYPE
+                    && matches!(
+                        term_iri(o).as_deref(),
+                        Some(RDFS_CLASS) | Some(OWL_CLASS)
+                    ) =>
+                {
+                    targets.push(Target::Class(id.clone()));
                 }
                 x if x == shacl("targetNode") => targets.push(Target::Node(o.clone())),
                 x if x == shacl("targetSubjectsOf") => {
@@ -475,15 +730,20 @@ fn parse_shapes(dict: &dyn DictionaryCodec, shapes: &[Triple]) -> Vec<Shape> {
                         .filter_map(|t| term_iri(&t))
                         .collect();
                 }
+                x if x == shacl("deactivated") && literal_bool(o) == Some(true) => {
+                    deactivated = true;
+                }
                 _ => {}
             }
         }
         out.push(Shape {
             id: id.clone(),
             targets,
+            path,
             constraints,
             property_shapes,
             ignored_properties,
+            deactivated,
             severity,
             message,
         });
@@ -500,8 +760,9 @@ fn select_targets(dict: &dyn DictionaryCodec, data: &[Triple], shape: &Shape) ->
             }
             Target::Class(class) => {
                 for t in data {
-                    if t.predicate.as_str() == RDF_TYPE && term_key(dict, &t.object) == *class {
-                        targets.insert(subject_key(dict, t.subject));
+                    let node = subject_key(dict, t.subject);
+                    if is_instance_of(dict, data, &node, class) {
+                        targets.insert(node);
                     }
                 }
             }
@@ -521,26 +782,41 @@ fn select_targets(dict: &dyn DictionaryCodec, data: &[Triple], shape: &Shape) ->
             }
         }
     }
-    // Implicit class target: sh:class also targets instances of that class.
-    for class in shape.constraints.iter().filter_map(|c| match c {
-        ConstraintComponent::Class(cl) => Some(cl),
-        _ => None,
-    }) {
-        for t in data {
-            if t.predicate.as_str() == RDF_TYPE && term_key(dict, &t.object) == *class {
-                targets.insert(subject_key(dict, t.subject));
-            }
-        }
-    }
     targets.into_iter().collect()
 }
 
 fn is_instance_of(dict: &dyn DictionaryCodec, data: &[Triple], node: &str, class: &str) -> bool {
-    data.iter().any(|t| {
-        subject_key(dict, t.subject) == node
-            && t.predicate.as_str() == RDF_TYPE
-            && term_key(dict, &t.object) == class
-    })
+    // SHACL "instance of" follows `rdfs:subClassOf` chains: walk from the
+    // required class down through its (transitive) subclasses and check the
+    // node's direct `rdf:type` against each.
+    let direct = |c: &str| {
+        data.iter().any(|t| {
+            subject_key(dict, t.subject) == node
+                && t.predicate.as_str() == RDF_TYPE
+                && term_key(dict, &t.object) == c
+        })
+    };
+    if direct(class) {
+        return true;
+    }
+    let mut frontier = vec![class.to_owned()];
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    while let Some(c) = frontier.pop() {
+        if !seen.insert(c.clone()) {
+            continue;
+        }
+        for t in data {
+            if t.predicate.as_str() != RDFS_SUBCLASS_OF || term_key(dict, &t.object) != c {
+                continue;
+            }
+            let subclass = subject_key(dict, t.subject);
+            if direct(&subclass) {
+                return true;
+            }
+            frontier.push(subclass);
+        }
+    }
+    false
 }
 
 /// All `(key, term)` value nodes of `path` for the focus node.
@@ -649,7 +925,7 @@ fn push_result(
     source_shape: Option<&str>,
     component: &str,
     detail: &str,
-    severity: Severity,
+    severity: &Severity,
     message: Option<&str>,
 ) {
     results.push(ValidationResult {
@@ -658,7 +934,7 @@ fn push_result(
         value,
         source_shape: source_shape.map(str::to_owned),
         component: component.to_owned(),
-        severity,
+        severity: severity.clone(),
         message: Some(
             message
                 .map(str::to_owned)
@@ -678,7 +954,7 @@ fn check_values(
     constraint: &ConstraintComponent,
     source_shape: Option<&str>,
     ps: Option<&PropertyShape>,
-    severity: Severity,
+    severity: &Severity,
     message: Option<&str>,
     results: &mut Vec<ValidationResult>,
     depth: usize,
@@ -703,7 +979,8 @@ fn check_values(
         }
         ConstraintComponent::Datatype(dt) => {
             for (vkey, v) in values {
-                let ok = matches!(v, Term::Literal(lv) if lv.xsd_datatype_iri().as_str() == dt);
+                let ok = matches!(v, Term::Literal(lv) if lv.xsd_datatype_iri().as_str() == dt
+                    && lexical_valid_for_datatype(dt, &lv.lexical_form()));
                 if !ok {
                     push_result(
                         results,
@@ -750,10 +1027,9 @@ fn check_values(
         }
         ConstraintComponent::MinLength(n) => {
             for (vkey, v) in values {
-                let len = match v {
-                    Term::Literal(lv) => Some(lv.lexical_form().chars().count()),
-                    _ => None,
-                };
+                // Per SHACL, `str(v)` of IRIs and literals participates; blank
+                // nodes always fail.
+                let len = term_str_len(v);
                 if !len.is_some_and(|l| l >= *n) {
                     push_result(
                         results,
@@ -771,10 +1047,7 @@ fn check_values(
         }
         ConstraintComponent::MaxLength(n) => {
             for (vkey, v) in values {
-                let len = match v {
-                    Term::Literal(lv) => Some(lv.lexical_form().chars().count()),
-                    _ => None,
-                };
+                let len = term_str_len(v);
                 if !len.is_some_and(|l| l <= *n) {
                     push_result(
                         results,
@@ -794,12 +1067,13 @@ fn check_values(
             let flags = sibling_pattern_flags(shapes, source_shape, ps);
             for (vkey, v) in values {
                 let ok = match v {
-                    Term::Literal(lv) => {
-                        Some(pattern_matches_flags(pat, &lv.lexical_form(), &flags))
-                    }
-                    _ => None,
+                    // `str(v)` participates for IRIs and literals; blank nodes
+                    // have no string representation and always fail.
+                    Term::BlankNode(_) => false,
+                    Term::Iri(iri) => pattern_matches_flags(pat, iri.as_str(), &flags),
+                    Term::Literal(lv) => pattern_matches_flags(pat, &lv.lexical_form(), &flags),
                 };
-                if ok != Some(true) {
+                if !ok {
                     push_result(
                         results,
                         focus,
@@ -1000,11 +1274,13 @@ fn check_values(
             let wanted = term_key(dict, required);
             let found = values.iter().any(|(k, _)| *k == wanted);
             if !found {
+                // W3C suite convention (data-shapes#111): sh:hasValue results
+                // carry no sh:value.
                 push_result(
                     results,
                     focus,
                     path.map(str::to_owned),
-                    Some(wanted),
+                    None,
                     source_shape,
                     &shacl("HasValueConstraintComponent"),
                     "",
@@ -1016,7 +1292,14 @@ fn check_values(
         ConstraintComponent::LanguageIn(allowed) => {
             for (vkey, v) in values {
                 let ok = matches!(v, Term::Literal(lv) if lv.language_tag().is_some_and(|tag| {
-                    allowed.iter().any(|a| a.eq_ignore_ascii_case(tag.as_str()))
+                    // Basic language range matching (RFC 4647): a tag matches
+                    // the range when it equals the range or extends it with a
+                    // subtag, e.g. "en-NZ" matches "en".
+                    let tag = tag.as_str().to_ascii_lowercase();
+                    allowed.iter().any(|a| {
+                        let a = a.to_ascii_lowercase();
+                        tag == a || tag.strip_prefix(&a).is_some_and(|rest| rest.starts_with('-'))
+                    })
                 }));
                 if !ok {
                     push_result(
@@ -1034,33 +1317,52 @@ fn check_values(
             }
         }
         ConstraintComponent::UniqueLang => {
-            let mut seen: Vec<&str> = Vec::new();
-            for (vkey, v) in values {
+            // One result per focus node when any pair of value nodes shares a
+            // language tag; the result carries no sh:value (W3C suite).
+            let mut seen: Vec<String> = Vec::new();
+            let mut duplicate = false;
+            for (_, v) in values {
                 if let Term::Literal(lv) = v
                     && let Some(tag) = lv.language_tag()
-                    && seen.iter().any(|s| s.eq_ignore_ascii_case(tag.as_str()))
                 {
+                    if seen.iter().any(|s| s.eq_ignore_ascii_case(tag.as_str())) {
+                        duplicate = true;
+                        break;
+                    }
+                    seen.push(tag.as_str().to_owned());
+                }
+            }
+            if duplicate {
+                push_result(
+                    results,
+                    focus,
+                    path.map(str::to_owned),
+                    None,
+                    source_shape,
+                    &shacl("UniqueLangConstraintComponent"),
+                    "",
+                    severity,
+                    message,
+                );
+            }
+        }
+        ConstraintComponent::Node(shape_key) => {
+            for (vkey, _) in values {
+                // A single NodeConstraintComponent result per non-conforming
+                // value node (W3C suite), rather than the inner results.
+                if !conforms_to(dict, data, shapes, shape_key, vkey, depth) {
                     push_result(
                         results,
                         focus,
                         path.map(str::to_owned),
                         Some(vkey.clone()),
                         source_shape,
-                        &shacl("UniqueLangConstraintComponent"),
+                        &shacl("NodeConstraintComponent"),
                         "",
                         severity,
                         message,
                     );
-                } else if let Term::Literal(lv) = v
-                    && let Some(tag) = lv.language_tag()
-                {
-                    seen.push(tag.as_str());
                 }
-            }
-        }
-        ConstraintComponent::Node(shape_key) => {
-            for (vkey, _) in values {
-                evaluate_shape(dict, data, shapes, shape_key, vkey, results, depth + 1);
             }
         }
         ConstraintComponent::And(shape_keys) => {
@@ -1146,7 +1448,7 @@ fn check_values(
         | ConstraintComponent::PatternFlags(_) => {}
         ConstraintComponent::QualifiedMinCount(n) => {
             if let Some((shape_key, disjoint, siblings)) =
-                qualified_value_context(shapes, source_shape, ps)
+                qualified_value_context(shapes, ps)
             {
                 let count = values
                     .iter()
@@ -1177,7 +1479,7 @@ fn check_values(
         }
         ConstraintComponent::QualifiedMaxCount(n) => {
             if let Some((shape_key, disjoint, siblings)) =
-                qualified_value_context(shapes, source_shape, ps)
+                qualified_value_context(shapes, ps)
             {
                 let count = values
                     .iter()
@@ -1250,7 +1552,6 @@ fn check_values(
             for t in data {
                 if subject_key(dict, t.subject) == focus
                     && !allowed.iter().any(|p| p == t.predicate.as_str())
-                    && t.predicate.as_str() != RDF_TYPE
                 {
                     push_result(
                         results,
@@ -1284,11 +1585,16 @@ fn kind_name(kind: &NodeKind) -> &'static str {
 /// Returns `(shape_key, sh:qualifiedValueShapesDisjoint, sibling_qualified_shapes)`.
 fn qualified_value_context<'a>(
     shapes: &'a [Shape],
-    source_shape: Option<&str>,
     ps: Option<&'a PropertyShape>,
 ) -> Option<(String, bool, Vec<&'a str>)> {
-    let shape = shapes.iter().find(|s| s.id == source_shape.unwrap_or(""))?;
     let ps = ps?;
+    // Sibling qualified shapes live on the node shape that owns this property
+    // shape (its `sh:property` list), not on the property shape itself.
+    let shape = shapes.iter().find(|s| {
+        s.property_shapes
+            .iter()
+            .any(|other| std::ptr::eq(other, ps))
+    })?;
     let shape_key = ps.constraints.iter().find_map(|c| match c {
         ConstraintComponent::QualifiedValueShape { shape } => Some(shape.clone()),
         _ => None,
@@ -1368,44 +1674,97 @@ fn evaluate_shape(
     let Some(shape) = shapes.iter().find(|s| s.id == shape_key) else {
         return;
     };
-    // Node-shape constraints apply to the focus node itself.
-    let focus_values = vec![(focus.to_owned(), focus_as_term(focus))];
-    for c in &shape.constraints {
-        check_values(
-            dict,
-            data,
-            shapes,
-            focus,
-            None,
-            &focus_values,
-            c,
-            Some(&shape.id),
-            None,
-            shape.severity,
-            shape.message.as_deref(),
-            results,
-            depth,
-        );
+    if shape.deactivated {
+        return;
     }
-    // Property shapes apply to values of the path.
-    for ps in &shape.property_shapes {
-        let values = path_values(dict, data, focus, &ps.path);
-        for c in &ps.constraints {
+    if let Some(path) = &shape.path {
+        // Standalone property shape: constraints apply to values of the path.
+        let values = path_values(dict, data, focus, path);
+        for c in &shape.constraints {
             check_values(
                 dict,
                 data,
                 shapes,
                 focus,
-                Some(&ps.path),
+                Some(path),
                 &values,
                 c,
                 Some(&shape.id),
-                Some(ps),
-                ps.severity,
-                ps.message.as_deref(),
+                None,
+                &shape.severity,
+                shape.message.as_deref(),
                 results,
                 depth,
             );
+        }
+        for ps in &shape.property_shapes {
+            for (vkey, _) in &values {
+                evaluate_property_shape(dict, data, shapes, ps, vkey, results, depth);
+            }
+        }
+    } else {
+        // Node-shape constraints apply to the focus node itself.
+        let focus_values = vec![(focus.to_owned(), focus_as_term(focus))];
+        for c in &shape.constraints {
+            check_values(
+                dict,
+                data,
+                shapes,
+                focus,
+                None,
+                &focus_values,
+                c,
+                Some(&shape.id),
+                None,
+                &shape.severity,
+                shape.message.as_deref(),
+                results,
+                depth,
+            );
+        }
+        // Property shapes apply to values of the path.
+        for ps in &shape.property_shapes {
+            evaluate_property_shape(dict, data, shapes, ps, focus, results, depth);
+        }
+    }
+}
+
+/// Evaluate one property shape with the given focus node: its constraints
+/// apply to the values of its path, and nested `sh:property` shapes apply to
+/// each value node as a new focus.
+fn evaluate_property_shape(
+    dict: &dyn DictionaryCodec,
+    data: &[Triple],
+    shapes: &[Shape],
+    ps: &PropertyShape,
+    focus: &str,
+    results: &mut Vec<ValidationResult>,
+    depth: usize,
+) {
+    if depth > 32 {
+        return;
+    }
+    let values = path_values(dict, data, focus, &ps.path);
+    for c in &ps.constraints {
+        check_values(
+            dict,
+            data,
+            shapes,
+            focus,
+            Some(&ps.path),
+            &values,
+            c,
+            Some(&ps.id),
+            Some(ps),
+            &ps.severity,
+            ps.message.as_deref(),
+            results,
+            depth,
+        );
+    }
+    for nested in &ps.property_shapes {
+        for (vkey, _) in &values {
+            evaluate_property_shape(dict, data, shapes, nested, vkey, results, depth);
         }
     }
 }
@@ -1431,19 +1790,41 @@ fn focus_as_term(key: &str) -> Term {
             {
                 return Term::Literal(LiteralValue::Integer(n));
             }
+            if dt == "http://www.w3.org/2001/XMLSchema#decimal"
+                && let Ok(f) = lex.parse::<f64>()
+            {
+                return Term::Literal(LiteralValue::Decimal(f));
+            }
+            if dt == "http://www.w3.org/2001/XMLSchema#float"
+                && let Ok(f) = lex.parse::<f32>()
+            {
+                return Term::Literal(LiteralValue::Float(f));
+            }
+            if dt == "http://www.w3.org/2001/XMLSchema#double"
+                && let Ok(f) = lex.parse::<f64>()
+            {
+                return Term::Literal(LiteralValue::Double(f));
+            }
             if dt == "http://www.w3.org/2001/XMLSchema#boolean"
                 && let Ok(b) = lex.parse::<bool>()
             {
                 return Term::Literal(LiteralValue::Boolean(b));
             }
-            if dt == "http://www.w3.org/2001/XMLSchema#double"
-                && let Ok(f) = lex.parse::<f64>()
-            {
-                return Term::Literal(LiteralValue::Decimal(f));
+            if dt == "http://www.w3.org/2001/XMLSchema#string" {
+                return Term::Literal(LiteralValue::String(lex.to_owned()));
             }
-            return Term::Literal(LiteralValue::String(lex.to_owned()));
+            // Other typed literals round-trip lexically.
+            return Term::Literal(LiteralValue::Typed {
+                value: lex.to_owned(),
+                datatype: Iri::new(dt),
+            });
         }
         return Term::Literal(LiteralValue::String(rest.to_owned()));
+    }
+    // Blank-node labels (`_:...`) materialize as blank nodes; the exact id is
+    // irrelevant for constraint evaluation (only node kind/str-ness matter).
+    if key.starts_with("_:") {
+        return Term::BlankNode(NodeId::new(0));
     }
     Term::Iri(Iri::new(key))
 }
@@ -1468,13 +1849,17 @@ impl ShaclValidator for ShaclEngine {
                 .then_with(|| a.path.cmp(&b.path))
                 .then_with(|| a.value.cmp(&b.value))
         });
-        let conforms = results.iter().all(|r| r.severity != Severity::Violation);
+        // W3C SHACL: a data graph conforms to a shapes graph only when no
+        // validation results at all are produced (warnings and infos included).
+        let conforms = results.is_empty();
         Ok(ValidationReport { conforms, results })
     }
 }
 
 // ---------------------------------------------------------------------------
-// Minimal regex subset (full-string match; no groups/alternation)
+// Minimal regex subset (SPARQL `regex()` search semantics; no groups/
+// alternation). `^`/`$` anchor the match; `*+?` and `{n,m}` quantifiers are
+// supported.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1498,6 +1883,9 @@ enum Quant {
     Star,
     Plus,
     Question,
+    Exactly(usize),
+    AtLeast(usize),
+    Range(usize, usize),
 }
 
 fn parse_atom(chars: &[char], i: &mut usize) -> Option<Atom> {
@@ -1561,10 +1949,12 @@ fn parse_atom(chars: &[char], i: &mut usize) -> Option<Atom> {
     }
 }
 
-fn parse_pattern(pattern: &str) -> Vec<(Atom, Option<Quant>)> {
+fn parse_pattern(pattern: &str) -> (Vec<(Atom, Option<Quant>)>, bool, bool) {
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
     let mut tokens = Vec::new();
+    let anchored_start = chars.first() == Some(&'^');
+    let anchored_end = chars.last() == Some(&'$');
     while i < chars.len() {
         if chars[i] == '^' {
             i += 1;
@@ -1588,11 +1978,37 @@ fn parse_pattern(pattern: &str) -> Vec<(Atom, Option<Quant>)> {
                 i += 1;
                 Some(Quant::Question)
             }
+            Some('{') if i + 1 < chars.len() => parse_brace_quant(&chars, &mut i),
             _ => None,
         };
         tokens.push((atom, quant));
     }
-    tokens
+    (tokens, anchored_start, anchored_end)
+}
+
+/// Parse a `{n}` / `{n,}` / `{n,m}` quantifier after an atom. On success the
+/// cursor is advanced past the closing brace; on failure the `{` stays literal.
+fn parse_brace_quant(chars: &[char], i: &mut usize) -> Option<Quant> {
+    let start = *i;
+    let rest = &chars[*i + 1..];
+    let close = rest.iter().position(|c| *c == '}')?;
+    let body: String = rest[..close].iter().collect();
+    let q = match body.split_once(',') {
+        None => Quant::Exactly(body.trim().parse::<usize>().ok()?),
+        Some((lo, hi)) if hi.trim().is_empty() => {
+            Quant::AtLeast(lo.trim().parse::<usize>().ok()?)
+        }
+        Some((lo, hi)) => {
+            let l = lo.trim().parse::<usize>().ok()?;
+            let h = hi.trim().parse::<usize>().ok()?;
+            if l > h {
+                return None;
+            }
+            Quant::Range(l, h)
+        }
+    };
+    *i = start + close + 2;
+    Some(q)
 }
 
 fn atom_matches(atom: &Atom, c: char) -> bool {
@@ -1612,43 +2028,128 @@ fn atom_matches(atom: &Atom, c: char) -> bool {
     }
 }
 
-fn match_at(tokens: &[(Atom, Option<Quant>)], ti: usize, text: &[char], ci: usize) -> bool {
+fn match_at(
+    tokens: &[(Atom, Option<Quant>)],
+    ti: usize,
+    text: &[char],
+    ci: usize,
+    anchored_end: bool,
+) -> bool {
     if ti == tokens.len() {
-        return ci == text.len();
+        return !anchored_end || ci == text.len();
     }
     let (atom, quant) = &tokens[ti];
     match quant {
         None => {
             if ci < text.len() && atom_matches(atom, text[ci]) {
-                match_at(tokens, ti + 1, text, ci + 1)
+                match_at(tokens, ti + 1, text, ci + 1, anchored_end)
             } else {
                 false
             }
         }
         Some(Quant::Question) => {
-            match_at(tokens, ti + 1, text, ci)
+            match_at(tokens, ti + 1, text, ci, anchored_end)
                 || (ci < text.len()
                     && atom_matches(atom, text[ci])
-                    && match_at(tokens, ti + 1, text, ci + 1))
+                    && match_at(tokens, ti + 1, text, ci + 1, anchored_end))
         }
         Some(Quant::Star) => {
-            match_at(tokens, ti + 1, text, ci)
+            match_at(tokens, ti + 1, text, ci, anchored_end)
                 || (ci < text.len()
                     && atom_matches(atom, text[ci])
-                    && match_at(tokens, ti, text, ci + 1))
+                    && match_at(tokens, ti, text, ci + 1, anchored_end))
         }
         Some(Quant::Plus) => {
             ci < text.len()
                 && atom_matches(atom, text[ci])
-                && (match_at(tokens, ti + 1, text, ci + 1) || match_at(tokens, ti, text, ci + 1))
+                && (match_at(tokens, ti + 1, text, ci + 1, anchored_end)
+                    || match_at(tokens, ti, text, ci + 1, anchored_end))
+        }
+        Some(Quant::Exactly(n)) => {
+            let end = ci + *n;
+            if end <= text.len()
+                && text[ci..end].iter().all(|c| atom_matches(atom, *c))
+            {
+                match_at(tokens, ti + 1, text, end, anchored_end)
+            } else {
+                false
+            }
+        }
+        Some(Quant::AtLeast(n)) => {
+            let mut consumed = 0;
+            while consumed < *n
+                && ci + consumed < text.len()
+                && atom_matches(atom, text[ci + consumed])
+            {
+                consumed += 1;
+            }
+            if consumed < *n {
+                false
+            } else {
+                at_least_rest(tokens, ti + 1, text, ci + consumed, anchored_end, atom, None)
+            }
+        }
+        Some(Quant::Range(lo, hi)) => {
+            let mut consumed = 0;
+            while consumed < *lo
+                && ci + consumed < text.len()
+                && atom_matches(atom, text[ci + consumed])
+            {
+                consumed += 1;
+            }
+            if consumed < *lo {
+                false
+            } else {
+                at_least_rest(
+                    tokens,
+                    ti + 1,
+                    text,
+                    ci + consumed,
+                    anchored_end,
+                    atom,
+                    Some(*hi - *lo),
+                )
+            }
         }
     }
 }
 
+/// Try to continue matching after a `{n,}` / `{n,m}` atom consumed its minimum,
+/// greedily consuming up to `remaining` extra matches (None = unbounded).
+fn at_least_rest(
+    tokens: &[(Atom, Option<Quant>)],
+    ti: usize,
+    text: &[char],
+    ci: usize,
+    anchored_end: bool,
+    atom: &Atom,
+    remaining: Option<usize>,
+) -> bool {
+    if match_at(tokens, ti, text, ci, anchored_end) {
+        return true;
+    }
+    if remaining == Some(0) || ci >= text.len() || !atom_matches(atom, text[ci]) {
+        return false;
+    }
+    at_least_rest(
+        tokens,
+        ti,
+        text,
+        ci + 1,
+        anchored_end,
+        atom,
+        remaining.map(|r| r - 1),
+    )
+}
+
 fn pattern_matches(pattern: &str, text: &str) -> bool {
-    let tokens = parse_pattern(pattern);
+    let (tokens, anchored_start, anchored_end) = parse_pattern(pattern);
     let text: Vec<char> = text.chars().collect();
-    match_at(&tokens, 0, &text, 0)
+    if anchored_start {
+        match_at(&tokens, 0, &text, 0, anchored_end)
+    } else {
+        (0..=text.len()).any(|start| match_at(&tokens, 0, &text, start, anchored_end))
+    }
 }
 
 /// `sh:pattern` with optional regex flags (`i` = case-insensitive; other flags ignored).
@@ -1795,6 +2296,7 @@ mod tests {
             &format!(
                 "{SH}
                 ex:StrictShape a sh:NodeShape ; sh:targetClass ex:Strict ; sh:closed true ;
+                    sh:ignoredProperties ( rdf:type ) ;
                     sh:property [ sh:path ex:name ; sh:minCount 1 ] ."
             ),
             &format!(
@@ -1860,10 +2362,12 @@ mod tests {
         );
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 1);
-        assert_eq!(report.results[0].focus_node, "http://ex.org/a2");
+        assert_eq!(report.results[0].focus_node, "http://ex.org/p2");
+        assert_eq!(report.results[0].path.as_deref(), Some("http://ex.org/address"));
+        assert_eq!(report.results[0].value.as_deref(), Some("http://ex.org/a2"));
         assert_eq!(
-            report.results[0].path.as_deref(),
-            Some("http://ex.org/city")
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#NodeConstraintComponent"
         );
     }
 
@@ -1887,7 +2391,7 @@ mod tests {
     }
 
     #[test]
-    fn severity_warning_does_not_break_conformance() {
+    fn severity_warning_still_breaks_conformance() {
         let dict = InMemoryDictionary::new();
         let report = validate(
             &dict,
@@ -1902,8 +2406,8 @@ mod tests {
                 ex:n1 a ex:Note ."
             ),
         );
-        // SHACL conforms = no sh:Violation results.
-        assert!(report.conforms);
+        // W3C SHACL: conforms = no validation results at all (warnings count).
+        assert!(!report.conforms);
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].severity, Severity::Warning);
     }
@@ -2124,7 +2628,7 @@ mod tests {
             &format!(
                 "{SH}
                 ex:StrictShape a sh:NodeShape ; sh:targetClass ex:Strict ;
-                    sh:closed true ; sh:ignoredProperties ( ex:comment ) ;
+                    sh:closed true ; sh:ignoredProperties ( ex:comment rdf:type ) ;
                     sh:property [ sh:path ex:name ; sh:minCount 1 ] ."
             ),
             &format!(
@@ -2543,5 +3047,134 @@ mod tests {
             .collect();
         assert!(foci.contains(&"http://ex.org/i1"));
         assert!(foci.contains(&"http://ex.org/i3"));
+    }
+
+    #[test]
+    fn custom_severity_iri_round_trips() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:NodeShape ; sh:targetNode ex:bad ;
+                    sh:datatype xsd:boolean ; sh:severity ex:MySeverity ."
+            ),
+            &format!("{SH} ex:bad ex:p 1 ."),
+        );
+        assert!(!report.conforms);
+        assert_eq!(
+            report.results[0].severity,
+            Severity::Custom("http://ex.org/MySeverity".to_owned())
+        );
+        assert_eq!(
+            report.results[0].severity.clone().iri(),
+            "http://ex.org/MySeverity"
+        );
+    }
+
+    #[test]
+    fn date_time_range_constraints_compare_instants() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:NodeShape ;
+                    sh:minInclusive \"2002-10-10T12:00:00-05:00\"^^xsd:dateTime ;
+                    sh:targetNode \"2002-10-10T12:00:01-05:00\"^^xsd:dateTime ;
+                    sh:targetNode \"2002-10-10T12:00:00-05:00\"^^xsd:dateTime ;
+                    sh:targetNode \"2002-10-09T12:00:00-05:00\"^^xsd:dateTime ;
+                    sh:targetNode \"2002-10-10T12:00:00\"^^xsd:dateTime ."
+            ),
+            &format!("{SH} ex:unused ex:p 1 ."),
+        );
+        assert!(!report.conforms);
+        // Two violations: the earlier instant and the timezone-less literal
+        // (not comparable against a timezone-carrying minimum).
+        assert_eq!(report.results.len(), 2);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| r.component
+                    == "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent")
+        );
+    }
+
+    #[test]
+    fn nested_property_shapes_reach_shared_sub_shapes() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:s1 a sh:NodeShape ; sh:targetNode ex:i ;
+                    sh:property ex:s2 ; sh:property ex:s3 .
+                ex:s2 sh:path ex:p ; sh:property ex:s4 .
+                ex:s3 sh:path ex:q ; sh:property ex:s4 .
+                ex:s4 sh:path ex:r ; sh:class ex:C ."
+            ),
+            &format!(
+                "{SH}
+                ex:i ex:p ex:j . ex:i ex:q ex:j . ex:j ex:r ex:k ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| r.focus_node == "http://ex.org/j"
+                    && r.path.as_deref() == Some("http://ex.org/r")
+                    && r.component == "http://www.w3.org/ns/shacl#ClassConstraintComponent")
+        );
+    }
+
+    #[test]
+    fn datatype_constraint_rejects_ill_formed_lexicals() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:value ; sh:datatype xsd:integer ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:value 42 .
+                ex:i2 a ex:Item ; ex:value \"aldi\"^^xsd:integer .
+                ex:i3 a ex:Item ; ex:value \"55\"^^xsd:integer ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(
+            report.results[0].value.as_deref(),
+            Some("literal:aldi|http://www.w3.org/2001/XMLSchema#integer")
+        );
+    }
+
+    #[test]
+    fn language_in_matches_basic_language_ranges() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:LabelShape a sh:NodeShape ; sh:targetClass ex:Item ;
+                    sh:property [ sh:path ex:label ; sh:languageIn (\"en\" \"mi\") ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:i1 a ex:Item ; ex:label \"Hill\"@en-NZ .
+                ex:i2 a ex:Item ; ex:label \"Maunga\"@mi .
+                ex:i3 a ex:Item ; ex:label \"Berg\"@de ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/i3");
     }
 }

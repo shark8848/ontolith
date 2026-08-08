@@ -12,6 +12,7 @@ ontolith-query = { path = "../ontolith-query" }
 ontolith-storage = { path = "../ontolith-storage", default-features = false }
 ontolith-transaction = { path = "../ontolith-transaction" }
 ontolith-parser = { path = "../ontolith-parser" }
+ontolith-reasoner = { path = "../ontolith-reasoner" }
 
 [[test]]
 name = "sparql_r1_smoke"
@@ -24,6 +25,10 @@ path = "tests/sparql_w3c_subset.rs"
 [[test]]
 name = "w3c11_suite"
 path = "tests/w3c11_suite.rs"
+
+[[test]]
+name = "shacl_suite"
+path = "tests/shacl_suite.rs"
 
 [dev-dependencies]
 quick-xml = "0.37"
