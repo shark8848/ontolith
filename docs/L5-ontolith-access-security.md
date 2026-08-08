@@ -1,8 +1,8 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.7.0  
-状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC-ready JWT P5-02 + full-chain tracing P5-05)  
+版本: 2.8.0  
+状态: Implemented (HTTP + gRPC + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC-ready JWT P5-02 + full-chain tracing P5-05)  
 日期: 2026-07-23  
 对应 crate:
 
@@ -16,9 +16,10 @@
 
 ```text
 Clients
-   │  HTTP/1.1
+   │  HTTP/1.1 │ gRPC (HTTP/2)
    ▼
 ontolith-server (L5 gateway)
+   ├── grpc: tonic SparqlService{Query,Health} (P5-01)
    ├── security: auth + audit + tenant context
    ├── parser ingest (L3)
    ├── query pipeline (L3)
@@ -90,6 +91,19 @@ ontolith-management-server (L5 management plane)
 
 ASK → `{ "boolean": true/false, "meta": {...} }`  
 CONSTRUCT → `{ "results": { "triples": [...], "count": N } }`
+
+### gRPC（P5-01，tonic HTTP/2）
+
+`proto/ontolith/v1/sparql.proto` → `SparqlService{Query, Health}`（`grpc-backend` feature，默认开）。鉴权/租户/追踪与 HTTP 网关同构：
+
+| RPC | 输入 | 输出 |
+|-----|------|------|
+| `Query` | `QueryRequest{query, format, explain, timeout_ms, consistency}` | `QueryResponse{ok, http_status, body, error}`（body 为 SPARQL Results JSON 或 explain JSON） |
+| `Health` | `HealthRequest` | `HealthResponse{status, backend, tenant_mode, auth_mode, jwt, tracing}` |
+
+- 鉴权 metadata：`x-ontolith-tenant` / `x-ontolith-user` / `x-api-key` / `authorization`（enforced 缺失 → `Unauthenticated`，跨租户图 → `PermissionDenied`）
+- 追踪：请求 metadata `traceparent` 延续；响应 metadata 回带 `traceparent`；根 span `grpc.request` + 子 span `http.auth`/`sparql.execute`/`grpc.query` 进入共享 trace store
+- 监听：`ONTOLITH_GRPC_BIND`（默认 `127.0.0.1:50051`）；`ontolith-server` bin 同时服务 HTTP（`ONTOLITH_BIND`）与 gRPC 双网关，共享 `AppState`
 
 ### 写入 / 解析
 
@@ -238,13 +252,13 @@ systemctl --user status ontolith-server
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
 | ontolith-security | **18** | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权） |
-| ontolith-server | **29** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）** |
+| ontolith-server | **33** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）**、**gRPC 网关（roundtrip insert/select + `traceparent` 回带、enforced 401、跨租户 403、health）** |
 
 ---
 
 ## 7. 已知限制
 
-1. TLS 已落地（rustls 进程内终止 + R2 非 loopback 门禁）；仍无 HTTP/2 / 完整框架中间件链  
+1. TLS 已落地（rustls 进程内终止 + R2 非 loopback 门禁）；HTTP/1.1 数据面尚无 HTTP/2；gRPC 网关为 HTTP/2（tonic，P5-01），完整框架中间件链仍无  
 2. 鉴权为 HS256 共享密钥基线（OIDC-ready：`Authorization: Bearer` + `exp`/`iss`/`aud`）；远程 JWKS/OIDC 发现仍为后续轨  
 3. 审计哈希链为完整性级（FNV-1a 64，非加密级；加密升级保持同 schema）  
 4. 租户隔离已升级为强制分库/行级（`ONTOLITH_TENANT_MODE=enforced`：命名图命名空间隔离 + 执行器租户视图）；分库物理隔离（每租户独立 RocksDB 实例）仍为后续增强  
@@ -286,3 +300,4 @@ ONTOLITH_API_KEY=...
 | 2026-08-08 | 2.5.0 | **P5-03 强制租户隔离**：`TenantMode`/`TenantNamespace`（`ONTOLITH_TENANT_MODE`，`urn:tenant:<t>` 命名空间 + `require_owned` 403）；`QueryRequest.tenant_scope` 下沉执行器（`TenantScopedRead/Write`：默认图重指向 + 命名图过滤 + 更新盖章），`FROM`/`GRAPH`/`USING`/图管理目标越权 403；server 写路径强制盖章、读路径注入作用域、`/health`+`/admin/config` 暴露 `tenant_mode`；security 9→12、query 83→86、server 22→24 测 |
 | 2026-08-08 | 2.6.0 | **P5-02 OIDC/JWT 鉴权基线**：树内 HS256 JWT 验证（RFC 7519 子集 + FIPS 180-4/RFC 4231 向量背书）+ `Authorization: Bearer` 接入（`ONTOLITH_JWT_SECRET`/`ISSUER`/`AUDIENCE`，`exp`/`iss`/`aud` 校验、JWT tenant claim 优先于传输头、`scope` 权限覆盖）；`/health` 暴露 `jwt` 姿态；security 12→18、server 24→26 测 |
 | 2026-08-08 | 2.7.0 | **P5-05 Tracing 全链路**：`ontolith-observability` 追踪域模型 + `InMemoryTraceStore` + W3C `traceparent` 解析/生成 + 线程本地 `TraceScope`；server 网关 `http.request` 根 span + `http.auth`/`sparql.execute`/`data.ingest` 子 span、响应回带 `Traceparent`、`/health`+`/admin/config` 暴露 `tracing` 姿态、`GET /admin/traces`；observability 6→11、server 26→29 测 |
+| 2026-08-08 | 2.8.0 | **P5-01 gRPC 网关接入**：tonic 0.12 + prost 0.13 + `protoc-bin-vendored` 3（`grpc-backend` feature 默认开，`--no-default-features` 回退构建通过）；`proto/ontolith/v1/sparql.proto` `SparqlService{Query,Health}`；`SparqlGateway` 复用 HTTP 共享执行路径 + metadata 鉴权（enforced 401/跨租户 403）+ `traceparent` 延续/回带 + 根/子 span；`serve_grpc` 独立 tokio runtime 线程；`ONTOLITH_GRPC_BIND`（默认 `127.0.0.1:50051`），`ontolith-server` bin 升级为真实 HTTP+gRPC 双网关；server 29→33 测 |

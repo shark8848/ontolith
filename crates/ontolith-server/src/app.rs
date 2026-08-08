@@ -19,7 +19,9 @@ use ontolith_parser::domain::ParseFormat;
 use ontolith_parser::infrastructure::{
     parse_nquads, parse_ntriples, parse_trig_doc, parse_turtle_doc,
 };
-use ontolith_query::domain::{BoundValue, PatternCost, QueryKind, QueryRequest, QueryResult};
+use ontolith_query::domain::{
+    BoundValue, PatternCost, QueryExplain, QueryKind, QueryRequest, QueryResult,
+};
 use ontolith_query::infrastructure::update_pipeline;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
@@ -613,65 +615,15 @@ impl AppState {
             .or_else(|| req.header("accept"))
             .unwrap_or("json");
 
-        let mut qreq = QueryRequest::new(query_text.clone()).with_consistency(consistency);
-        qreq.tenant = Some(ctx.tenant.as_str().to_owned());
-        if self.tenant_mode == TenantMode::Enforced {
-            qreq = qreq.with_tenant_scope(ontolith_query::domain::TenantScope::new(
-                ctx.tenant.as_str().to_owned(),
-            ));
-        }
-        if let Some(t) = timeout_ms {
-            qreq = qreq.with_timeout(t);
-        }
-
-        // Update-capable pipeline: SELECT/ASK/CONSTRUCT delegate to the read
-        // executor; INSERT/DELETE apply writes through the storage engine.
-        let pipeline = update_pipeline(
-            Arc::clone(&self.triples),
-            Arc::clone(&self.storage),
-            Some(Arc::clone(&self.dictionary)),
-        );
-
         let start_ms = now_ms();
         let executed = (|| -> Result<HttpResponse, OntolithError> {
             if explain {
-                let plan = pipeline.explain(&qreq)?;
-                let body = format!(
-                    r#"{{"head":{{"plan_id":{},"kind":{}}},"algebra":{},"logical_steps":{},"physical_steps":{},"estimated_rows":{},"pattern_costs":{},"tenant":{},"consistency":{}}}"#,
-                    plan.plan_id.0,
-                    json_string(plan.kind.as_str()),
-                    json_string(&plan.algebra_summary),
-                    json_string_array(&plan.logical_steps),
-                    json_string_array(&plan.physical_steps),
-                    json_opt_number(plan.estimated_rows),
-                    json_pattern_costs(&plan.pattern_costs),
-                    json_string(ctx.tenant.as_str()),
-                    json_string(consistency.as_str()),
-                );
-                self.audit.record(
-                    now_ms(),
-                    &ctx,
-                    "explain",
-                    "sparql",
-                    AuditOutcome::Allow,
-                    format!("plan={}", plan.plan_id.0),
-                );
+                let plan = self.explain_sparql(&ctx, &query_text, timeout_ms, consistency)?;
+                let body = explain_json(&plan, ctx.tenant.as_str(), consistency);
                 return Ok(HttpResponse::json(200, "OK", body));
             }
 
-            let result = pipeline.execute(&qreq)?;
-            self.audit.record(
-                now_ms(),
-                &ctx,
-                "query",
-                "sparql",
-                AuditOutcome::Allow,
-                if result.kind == QueryKind::Update {
-                    format!("affected={}", result.affected)
-                } else {
-                    format!("rows={}", result.row_count())
-                },
-            );
+            let result = self.execute_sparql(&ctx, &query_text, timeout_ms, consistency)?;
 
             // SPARQL Query Results JSON Format (W3C-inspired) when accept/format asks for it.
             if format.contains("sparql-results") || format == "srj" || format == "json" {
@@ -710,6 +662,85 @@ impl AppState {
             });
         }
         executed
+    }
+
+    /// Build a tenant-scoped [`QueryRequest`] from transport-level inputs.
+    fn build_query_request(
+        &self,
+        ctx: &AuthContext,
+        query_text: &str,
+        timeout_ms: Option<u64>,
+        consistency: ConsistencyLevel,
+    ) -> QueryRequest {
+        let mut qreq = QueryRequest::new(query_text.to_owned()).with_consistency(consistency);
+        qreq.tenant = Some(ctx.tenant.as_str().to_owned());
+        if self.tenant_mode == TenantMode::Enforced {
+            qreq = qreq.with_tenant_scope(ontolith_query::domain::TenantScope::new(
+                ctx.tenant.as_str().to_owned(),
+            ));
+        }
+        if let Some(t) = timeout_ms {
+            qreq = qreq.with_timeout(t);
+        }
+        qreq
+    }
+
+    /// Execute a SPARQL query/update through the shared pipeline and record
+    /// the audit event. Shared by the HTTP gateway and the gRPC access
+    /// boundary (P5-01).
+    pub(crate) fn execute_sparql(
+        &self,
+        ctx: &AuthContext,
+        query_text: &str,
+        timeout_ms: Option<u64>,
+        consistency: ConsistencyLevel,
+    ) -> Result<QueryResult, OntolithError> {
+        let qreq = self.build_query_request(ctx, query_text, timeout_ms, consistency);
+        let pipeline = update_pipeline(
+            Arc::clone(&self.triples),
+            Arc::clone(&self.storage),
+            Some(Arc::clone(&self.dictionary)),
+        );
+        let result = pipeline.execute(&qreq)?;
+        self.audit.record(
+            now_ms(),
+            ctx,
+            "query",
+            "sparql",
+            AuditOutcome::Allow,
+            if result.kind == QueryKind::Update {
+                format!("affected={}", result.affected)
+            } else {
+                format!("rows={}", result.row_count())
+            },
+        );
+        Ok(result)
+    }
+
+    /// Explain a SPARQL query through the shared pipeline (P5-01).
+    pub(crate) fn explain_sparql(
+        &self,
+        ctx: &AuthContext,
+        query_text: &str,
+        timeout_ms: Option<u64>,
+        consistency: ConsistencyLevel,
+    ) -> Result<QueryExplain, OntolithError> {
+        let qreq = self.build_query_request(ctx, query_text, timeout_ms, consistency);
+        let pipeline = update_pipeline(
+            Arc::clone(&self.triples),
+            Arc::clone(&self.storage),
+            Some(Arc::clone(&self.dictionary)),
+        );
+        let plan = pipeline.explain(&qreq)?;
+        self.audit.record(
+            now_ms(),
+            ctx,
+            "explain",
+            "sparql",
+            AuditOutcome::Allow,
+            format!("plan={}", plan.plan_id.0),
+        );
+        Ok(plan)
     }
 
     fn ingest(&self, req: &HttpRequest, path: &str) -> Result<HttpResponse, OntolithError> {
@@ -1321,7 +1352,27 @@ fn parse_format_name(name: &str) -> Result<ParseFormat, OntolithError> {
     }
 }
 
-fn sparql_results_json(
+/// Render the explain JSON shared by the HTTP and gRPC access paths (P5-01).
+pub(crate) fn explain_json(
+    plan: &QueryExplain,
+    tenant: &str,
+    consistency: ConsistencyLevel,
+) -> String {
+    format!(
+        r#"{{"head":{{"plan_id":{},"kind":{}}},"algebra":{},"logical_steps":{},"physical_steps":{},"estimated_rows":{},"pattern_costs":{},"tenant":{},"consistency":{}}}"#,
+        plan.plan_id.0,
+        json_string(plan.kind.as_str()),
+        json_string(&plan.algebra_summary),
+        json_string_array(&plan.logical_steps),
+        json_string_array(&plan.physical_steps),
+        json_opt_number(plan.estimated_rows),
+        json_pattern_costs(&plan.pattern_costs),
+        json_string(tenant),
+        json_string(consistency.as_str()),
+    )
+}
+
+pub(crate) fn sparql_results_json(
     result: &QueryResult,
     ctx: &AuthContext,
     consistency: ConsistencyLevel,
@@ -1509,7 +1560,7 @@ fn url_decode_form(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn parse_consistency(raw: &str) -> ConsistencyLevel {
+pub(crate) fn parse_consistency(raw: &str) -> ConsistencyLevel {
     match raw.trim().to_ascii_lowercase().as_str() {
         "eventual" => ConsistencyLevel::Eventual,
         "session" => ConsistencyLevel::Session,

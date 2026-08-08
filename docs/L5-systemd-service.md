@@ -14,7 +14,7 @@
 | unit | `~/.config/systemd/user/ontolith-server.service` |
 | 配置 | `~/.config/ontolith/ontolith.env` |
 | 二进制 | `/home/ontolith/target/release/ontolith-server` |
-| 监听 | `http://127.0.0.1:8090`（8080/8081 已被占用） |
+| 监听 | `http://127.0.0.1:8090`（8080/8081 已被占用）+ gRPC `127.0.0.1:50051`（`ONTOLITH_GRPC_BIND`，P5-01） |
 | 开机自启 | `enabled`（用户会话内；logout 后需 linger） |
 
 验证：
@@ -23,6 +23,7 @@
 systemctl --user status ontolith-server
 curl -s http://127.0.0.1:8090/health
 curl -s http://127.0.0.1:8090/cluster/status
+grpcurl -plaintext 127.0.0.1:50051 ontolith.v1.SparqlService/Health   # 需要 grpcurl
 ```
 
 ---

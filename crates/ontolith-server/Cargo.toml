@@ -12,13 +12,17 @@ name = "ontolith-management-server"
 path = "src/bin/ontolith-management-server.rs"
 
 [features]
-default = ["rocksdb-backend", "raft-backend"]
+default = ["rocksdb-backend", "raft-backend", "grpc-backend"]
 rocksdb-backend = ["ontolith-storage/rocksdb-backend"]
 raft-backend = ["ontolith-cluster/raft-backend"]
+grpc-backend = ["dep:tonic", "dep:prost", "dep:tokio", "dep:tonic-build", "dep:protoc-bin-vendored"]
 
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.2.0"
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"], optional = true }
 ontolith-core = { path = "../ontolith-core" }
 ontolith-query = { path = "../ontolith-query" }
 ontolith-storage = { path = "../ontolith-storage" }
@@ -30,6 +34,10 @@ ontolith-reasoner = { path = "../ontolith-reasoner" }
 ontolith-sdk = { path = "../ontolith-sdk" }
 ontolith-rdf = { path = "../ontolith-rdf" }
 ontolith-parser = { path = "../ontolith-parser" }
+
+[build-dependencies]
+tonic-build = { version = "0.12", optional = true }
+protoc-bin-vendored = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3.14.0"

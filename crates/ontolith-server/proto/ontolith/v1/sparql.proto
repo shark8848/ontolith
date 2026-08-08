@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+// Ontolith L5 SPARQL gateway access boundary (P5-01).
+package ontolith.v1;
+
+service SparqlService {
+  // Execute (or explain) a SPARQL query/update; the response body mirrors
+  // the HTTP gateway's SPARQL Results JSON / explain JSON.
+  rpc Query(QueryRequest) returns (QueryResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message QueryRequest {
+  string query = 1;
+  // json (default) | srj | sparql-results
+  string format = 2;
+  bool explain = 3;
+  uint64 timeout_ms = 4;
+  // strong (default) | eventual
+  string consistency = 5;
+}
+
+message QueryResponse {
+  bool ok = 1;
+  uint32 http_status = 2;
+  string body = 3;
+  string error = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  string backend = 2;
+  string tenant_mode = 3;
+  string auth_mode = 4;
+  string jwt = 5;
+  string tracing = 6;
+}

@@ -476,16 +476,12 @@ pub fn dispatch_for_test(state: &Arc<ManagementState>, req: HttpRequest) -> Http
 
 pub fn run() -> Result<(), String> {
     let management_bind = env::var(MGMT_BIND_ENV).unwrap_or_else(|_| DEFAULT_MGMT_BIND.to_owned());
-    let api_bind = env::var(API_BIND_ENV).unwrap_or_else(|_| DEFAULT_API_BIND.to_owned());
     let acl = load_management_acl_from_env();
     let runtime_probe_timeout_ms = load_runtime_probe_timeout_ms();
     let tls = load_tls_config_from_env()?;
     enforce_tls_gate(&management_bind, tls.is_some())?;
 
-    let authenticator = load_authenticator();
-    let audit = load_audit_log_from_env().map_err(|e| e.message().to_owned())?;
-    let tenant_mode = load_tenant_mode();
-    let app = build_managed_app_state(api_bind, authenticator, audit, tenant_mode)?;
+    let app = build_gateway_app_state_from_env()?;
     let state = ManagementState::new(
         app,
         management_bind.clone(),
@@ -714,6 +710,17 @@ fn build_managed_app_state(
     Ok(AppState::new_memory_with_cluster(
         bind_address, auth, audit, tenant_mode, cluster,
     ))
+}
+
+/// Build the L5 gateway [`AppState`] from the shared environment contract
+/// (`ONTOLITH_BIND`, storage/auth/tenant/audit knobs). Used by the
+/// `ontolith-server` binary bootstrap and the management server.
+pub(crate) fn build_gateway_app_state_from_env() -> Result<Arc<AppState>, String> {
+    let api_bind = env::var(API_BIND_ENV).unwrap_or_else(|_| DEFAULT_API_BIND.to_owned());
+    let authenticator = load_authenticator();
+    let audit = load_audit_log_from_env().map_err(|e| e.message().to_owned())?;
+    let tenant_mode = load_tenant_mode();
+    build_managed_app_state(api_bind, authenticator, audit, tenant_mode)
 }
 
 /// Select the L4 cluster runtime for the management binary.

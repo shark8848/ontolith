@@ -8,6 +8,8 @@ pub mod bootstrap;
 pub mod http;
 pub mod management;
 pub mod runtime;
+#[cfg(feature = "grpc-backend")]
+pub mod grpc;
 
 pub const CRATE_ID: &str = "ontolith-server";
 pub const LAYER: &str = "L5-access-security";
