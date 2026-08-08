@@ -21,7 +21,7 @@ mod indexes;
 mod rocks;
 
 #[cfg(feature = "rocksdb-backend")]
-pub use rocks::{RocksDbStorageEngine, open_rocksdb_engine};
+pub use rocks::{RaftCfOp, RocksDbStorageEngine, open_rocksdb_engine};
 
 #[derive(Default)]
 struct DictionaryState {

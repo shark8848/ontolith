@@ -788,6 +788,9 @@ dependencies = [
  "ontolith-storage",
  "ontolith-transaction",
  "openraft",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -935,6 +938,7 @@ dependencies = [
  "maplit",
  "openraft-macros",
  "rand",
+ "serde",
  "thiserror",
  "tokio",
  "tracing",

@@ -10,7 +10,8 @@ Tier definitions: PLAN-0001 §8 / SAS-0001 §12.
 | Crate | Tier | Version policy | Owner | Purpose | Risk | Rollback / replacement |
 |-------|------|----------------|-------|---------|------|------------------------|
 | `rocksdb` | A | Pin exact in Cargo.lock; no `*` | storage | Durable LSM/WAL embedded store for L2 | Native build; FFI surface; disk corruption if misused | Feature-off → `InMemoryStorageEngine`; later alternate CF store |
-| openraft | A | Pin exact in Cargo.lock; feature `raft-backend` | cluster | Multi-node Raft for L4 data plane (see [ADR-0004](../adr/0004-multi-process-raft-data-plane.md)) | Async runtime surface; snapshot/GC ops | Keep `InMemoryClusterRuntime` simulator + traits; feature-off fallback |
+| openraft | A | Pin exact in Cargo.lock; features `raft-backend` + `serde` | cluster | Multi-node Raft for L4 data plane (see [ADR-0004](../adr/0004-multi-process-raft-data-plane.md)); `serde` enables JSON RPC/state serialization over the M2 in-tree HTTP transport | Async runtime surface; snapshot/GC ops | Keep `InMemoryClusterRuntime` simulator + traits; feature-off fallback |
+| `serde` / `serde_json` | B | Follow openraft's pin (serde 1.x in tree) | cluster | Serialize raft RPC messages, log entries, hard state, and snapshots (M2) | Ecosystem-stable | Revert to openraft-only serde if a lighter codec is adopted |
 | (workspace path crates) | A/B | path deps | platform | Internal modules | Low | N/A |
 
 ## Admission checklist (Tier A)
@@ -26,4 +27,4 @@ Tier definitions: PLAN-0001 §8 / SAS-0001 §12.
 | Crate | Feature | Default | Effect |
 |-------|---------|---------|--------|
 | `ontolith-storage` | `rocksdb-backend` | **enabled** | Compiles RocksDB adapter + integration tests |
-| `ontolith-cluster` | `raft-backend` | **enabled** | Compiles openraft raft data plane (M1 landed 2026-08-08); disable → in-memory simulator only |
+| `ontolith-cluster` | `raft-backend` | **enabled** | Compiles openraft raft data plane + in-tree HTTP RPC + RocksDB `raft` CF storage (M1+M2 landed 2026-08-08); also enables `ontolith-storage/rocksdb-backend`; disable → in-memory simulator only |

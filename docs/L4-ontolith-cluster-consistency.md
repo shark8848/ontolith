@@ -1,9 +1,9 @@
 # L4 — Cluster & Consistency
 
 文档 ID: IMPL-L4-0001  
-版本: 2.1.0  
-状态: Implemented (single-region in-process + L5 HTTP surface)  
-日期: 2026-07-17  
+版本: 2.4.0  
+状态: Implemented (in-process + multi-process raft M2 via ADR-0004)  
+日期: 2026-08-08  
 对应 crate: `crates/ontolith-cluster`（+ L5 `/cluster/*`）
 
 ---
@@ -20,7 +20,7 @@
 | 在线 rebalance（slot 重划） | — | ✅ |
 | ClusterStatus 汇总 | — | ✅ |
 | L5 HTTP `/cluster/*` | — | ✅ |
-| 多进程 openraft | ADR-0004 | **M1 已落地**（2026-08-08：openraft 0.9.25 单节点引导 + `RaftClusterRuntime` trait 适配 + 内存传输，cluster 17→21 测）；M2 多进程 HTTP RPC + RocksDB raft CF → M3 默认运行时切换 |
+| 多进程 openraft | ADR-0004 | **M1–M2 已落地**（2026-08-08：M1 openraft 0.9.25 单节点引导 + trait 适配 + 内存传输，cluster 17→21 测；M2 多进程 HTTP RPC + RocksDB `raft` CF + snapshot install，cluster 21→26 测，双节点 HTTP+RocksDB 选举/复制/落盘）；M3 默认运行时切换 + CI 三进程 smoke |
 
 ---
 
@@ -99,7 +99,7 @@ let plans = rt.rebalance()?;
 
 | Crate | 数量 |
 |-------|------|
-| ontolith-cluster | **21**（+session/partition/commit/rebalance + data-plane sync + raft M1：单节点引导/append-commit/trait 适配/双节点内存传输） |
+| ontolith-cluster | **26**（+session/partition/commit/rebalance + data-plane sync + raft M1：单节点引导/append-commit/trait 适配/双节点内存传输 + raft M2：RocksDB 日志/快照往返、HTTP 共享 secret 认证、HTTP install-snapshot RPC 往返、双节点 HTTP+RocksDB 选举/复制/落盘） |
 | ontolith-server | **9**（+`/cluster` API） |
 
 ---
@@ -107,9 +107,9 @@ let plans = rt.rebalance()?;
 ## 6. 边界
 
 1. 单进程内存控制面，非生产多机 HA  
-2. Rebalance 已配套数据面搬迁通道（`DataPlaneSync`：快照传输入队/完成/回执）；真实多进程 RPC 传输未实现  
+2. Rebalance 已配套数据面搬迁通道（`DataPlaneSync`：快照传输入队/完成/回执）；多进程 RPC 传输已实现（M2 树内 HTTP/1.1，`/internal/raft/*` + 共享 secret），真实网络分区注入仍缺（M3+）  
 3. 数据面仍由各节点本地 L2 引擎负责  
-4. 生产 Raft 决策已定：[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)（openraft behind traits，M1–M3 实施中）；实施完成前多节点数据面仍为 ADR-0002 模拟器  
+4. 生产 Raft 决策已定：[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)（openraft behind traits，M1–M2 已落地，M3 默认运行时切换进行中）；M3 完成前默认运行时仍为 ADR-0002 模拟器（`RaftClusterRuntime` 需显式启用 HTTP+RocksDB 配置）  
 
 ---
 
@@ -122,3 +122,4 @@ let plans = rt.rebalance()?;
 | 2026-08-06 | 2.1.0 | 数据面同步（`DataPlaneSync`）：快照式 slot 迁移入队/`drain_syncs` 完成/`SyncReceipt` 回执，含源目标节点校验；`rebalance` 计划可经数据面搬迁，+3 测 |
 | 2026-08-06 | 2.2.0 | 多进程 Raft 设计定稿（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)）：openraft 共识引擎 + 树内 axum/reqwest HTTP RPC（`/internal/raft/*`，共享 secret 认证）+ RocksDB `raft` CF 日志/快照 + 写入路径经 raft 多数派提交后落 L2；保留 `InMemoryClusterRuntime` 作为确定性测试 harness |
 | 2026-08-08 | 2.3.0 | **M1 落地**：openraft 0.9.25 单节点引导 + 内存存储（v1 `RaftStorage` + `Adaptor`）+ 内存 `RaftNetworkFactory` 传输（`RaftRegistry`）+ `RaftClusterRuntime` 集群 trait 适配器（选主/epoch/复制日志/commit 由 raft 背书）；cluster 17→21 测 |
+| 2026-08-08 | 2.4.0 | **M2 落地**：多进程 HTTP RPC + RocksDB `raft` CF + snapshot install（ADR-0004 决策 2/3）。openraft `serde` feature + `serde_json`；树内最小 HTTP/1.1 RPC（`HttpRaftServer`/`HttpRaftClient`/`HttpRaftFactory`，`/internal/raft/{vote,append-entries,install-snapshot}`，`Authorization: Bearer <secret>` 共享 secret 认证，raft 错误 serde 往返为 `RemoteError`；沿用 L5 同风格最小 HTTP 栈，未引入 axum/reqwest）；`RocksDbStorageEngine` 增独立 `raft` CF 字节级原语（`raft_cf_*` + `RaftCfOp` 原子 batch），`RocksRaftStorage`（v1 `RaftStorage` + `RocksLogReader`/`RocksSnapshotBuilder`：日志/vote/committed/purged/membership/应用态/快照 meta+字节，snapshot build/install 原子替换）；`RaftClusterConfig` 增 `http_listen_addr`/`raft_secret`/`raft_storage_path`，运行时配置化选择存储与传输（内存回退保留）；cluster 21→26 测 |

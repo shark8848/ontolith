@@ -42,6 +42,10 @@ const CF_GPOS_INDEX: &str = "gpos_index";
 const CF_GOSP_INDEX: &str = "gosp_index";
 const CF_VERSIONS: &str = "versions";
 const CF_VERSIONS_QUADS: &str = "versions_quads";
+/// Dedicated column family for the L4 raft data plane (ADR-0004): openraft
+/// log entries, hard state (vote/committed/last_applied), and snapshot refs.
+/// Accessed only through the `raft_cf_*` byte-level primitives below.
+const CF_RAFT: &str = "raft";
 
 const META_NEXT_NODE: &[u8] = b"next_node_id";
 const META_WAL_SEQ: &[u8] = b"wal_seq";
@@ -70,6 +74,16 @@ impl Default for RocksDbOptions {
 struct EngineState {
     pending_writes: HashMap<TxnId, Vec<WriteOperation>>,
 }
+
+/// One write operation for the `raft` CF batch API.
+pub enum RaftCfOp {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+    DeleteRange(Vec<u8>, Vec<u8>),
+}
+
+/// Owned key/value pair read back from the `raft` CF scans.
+pub type RaftCfEntry = (Vec<u8>, Vec<u8>);
 
 pub struct RocksDbStorageEngine {
     db: Arc<DB>,
@@ -133,6 +147,7 @@ impl RocksDbStorageEngine {
             CF_GOSP_INDEX,
             CF_VERSIONS,
             CF_VERSIONS_QUADS,
+            CF_RAFT,
         ]
         .into_iter()
         .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
@@ -212,6 +227,95 @@ impl RocksDbStorageEngine {
         self.db
             .cf_handle(name)
             .ok_or(OntolithError::Storage("missing column family"))
+    }
+
+    /// Put one byte blob into the dedicated `raft` CF (durable write).
+    pub fn raft_cf_put(&self, key: &[u8], value: &[u8]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_RAFT)?;
+        let mut batch = RocksBatch::default();
+        batch.put_cf(cf, key, value);
+        self.durable_write(batch)
+    }
+
+    /// Put several byte blobs into the `raft` CF in one durable batch.
+    pub fn raft_cf_put_batch(
+        &self,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), OntolithError> {
+        let ops: Vec<RaftCfOp> = entries
+            .iter()
+            .map(|(key, value)| RaftCfOp::Put(key.clone(), value.clone()))
+            .collect();
+        self.raft_cf_write_batch(&ops)
+    }
+
+    /// Apply an ordered set of writes to the `raft` CF in one durable batch
+    /// (atomic within the batch).
+    pub fn raft_cf_write_batch(&self, ops: &[RaftCfOp]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_RAFT)?;
+        let mut batch = RocksBatch::default();
+        for op in ops {
+            match op {
+                RaftCfOp::Put(key, value) => batch.put_cf(cf, key, value),
+                RaftCfOp::Delete(key) => batch.delete_cf(cf, key),
+                RaftCfOp::DeleteRange(from, to) => batch.delete_range_cf(cf, from, to),
+            }
+        }
+        self.durable_write(batch)
+    }
+
+    /// Read one byte blob from the `raft` CF.
+    pub fn raft_cf_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, OntolithError> {
+        let cf = self.cf(CF_RAFT)?;
+        self.db.get_cf(cf, key).map_err(rocks_err)
+    }
+
+    /// Delete one key from the `raft` CF (durable write).
+    pub fn raft_cf_delete(&self, key: &[u8]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_RAFT)?;
+        let mut batch = RocksBatch::default();
+        batch.delete_cf(cf, key);
+        self.durable_write(batch)
+    }
+
+    /// Delete all keys in `[from, to)` of the `raft` CF (durable write).
+    pub fn raft_cf_delete_range(&self, from: &[u8], to: &[u8]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_RAFT)?;
+        let mut batch = RocksBatch::default();
+        batch.delete_range_cf(cf, from, to);
+        self.durable_write(batch)
+    }
+
+    /// Scan the `raft` CF for keys in `[from, to)`, returning owned
+    /// key/value pairs in RocksDB byte order.
+    pub fn raft_cf_scan_range(
+        &self,
+        from: &[u8],
+        to: &[u8],
+    ) -> Result<Vec<RaftCfEntry>, OntolithError> {
+        let cf = self.cf(CF_RAFT)?;
+        let iter = self
+            .db
+            .iterator_cf(cf, IteratorMode::From(from, Direction::Forward));
+        let mut out = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(rocks_err)?;
+            if key.as_ref() >= to {
+                break;
+            }
+            out.push((key.to_vec(), value.to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// Scan the `raft` CF for all keys with the given byte prefix.
+    pub fn raft_cf_scan_prefix(
+        &self,
+        prefix: &[u8],
+    ) -> Result<Vec<RaftCfEntry>, OntolithError> {
+        let mut to = prefix.to_vec();
+        to.push(0xFF);
+        self.raft_cf_scan_range(prefix, &to)
     }
 
     /// Write a batch with the configured durability: fsync the WAL when

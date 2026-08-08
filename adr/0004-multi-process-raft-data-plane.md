@@ -1,7 +1,7 @@
 # ADR-0004: Multi-process Raft data plane (openraft behind cluster traits)
 
 - Status: Accepted
-- Date: 2026-08-06
+- Date: 2026-08-06 (M2 landed 2026-08-08)
 - Deciders: Codex (workspace) — pending PLAN-0001 signature review
 - Tags: cluster, raft, l4, tier-a
 
@@ -19,7 +19,8 @@ Current state:
   (fake quorum via tick counters, no network).
 - `DataPlaneSync` already models snapshot migration queue + receipts.
 - L2 `RocksDbStorageEngine` is a Tier A dependency with WAL + CF support
-  (ADR-0001); L5 serves HTTP through axum.
+  (ADR-0001); L5 serves HTTP through a self-written minimal HTTP/1.1 stack
+  (`ontolith-server/src/http.rs`) — no axum/reqwest in the dependency tree.
 - L4 document marks "多进程 openraft" as 延期 (deferred) pending this ADR.
 
 Forces:
@@ -28,8 +29,9 @@ Forces:
 - A hand-rolled Raft is a correctness liability; a maintained library
   (openraft) is the pragmatic Tier A choice, consistent with the Rust-only
   production path and the existing trait-isolation policy.
-- The async runtime (tokio) is already required for the HTTP stack (axum); a
-  raft RPC channel on the same stack avoids new runtime coupling.
+- The async runtime (tokio) is already required for the raft engine; a raft
+  RPC channel on the same in-tree minimal HTTP style avoids new runtime and
+  HTTP framework coupling.
 
 ## Decision
 
@@ -37,9 +39,11 @@ Forces:
    plane (replaces the simulated quorum in `InMemoryClusterRuntime`), behind
    the existing cluster application traits so L5 `/cluster` API and
    `ConsistencyLevel` routing stay stable.
-2. **Transport = in-tree HTTP RPC** on the existing axum/reqwest stack:
-   dedicated `/internal/raft/{append,append-entries,vote,install-snapshot}`
-   endpoints, peer-to-peer, authenticated by a shared cluster secret
+2. **Transport = in-tree HTTP RPC** on the existing minimal HTTP/1.1 stack
+   style (self-written server + client in `ontolith-cluster`, mirroring
+   `ontolith-server::http`; no new axum/reqwest dependency): dedicated
+   `/internal/raft/{append,append-entries,vote,install-snapshot}` endpoints,
+   peer-to-peer, authenticated by a shared cluster secret
    (`ONTOLITH_CLUSTER_SECRET`, env or file) — no new gRPC/Tonic dependency.
 3. **Log + snapshot storage = RocksDB** in a dedicated `raft` column family:
    openraft log entries, hard state, and snapshot refs; data snapshots reuse
@@ -52,7 +56,10 @@ Forces:
 5. **Rollout in milestones** behind the traits, simulator kept as the
    deterministic test harness:
    - M1: openraft single-node bootstrap + trait adapter + in-memory transport.
+     (landed 2026-08-08)
    - M2: multi-process HTTP RPC + RocksDB raft CF + snapshot install.
+     (landed 2026-08-08: serde_json JSON RPC + shared-secret auth + `raft` CF
+     byte primitives + `RocksRaftStorage` + HTTP two-node election/replication)
    - M3: default runtime switch to `RaftClusterRuntime`; `InMemoryClusterRuntime`
      demoted to test/CI harness; CI multi-node smoke (3 processes).
 6. **Scope for R1**: single-region, fixed membership bootstrap via config

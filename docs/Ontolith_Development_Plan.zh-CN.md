@@ -411,7 +411,7 @@ sudo -v# Ontolith 开发计划
 **R1 退出标准剩余项**
 
 - [x] 多节点数据面设计定稿（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)：openraft behind traits，2026-08-06）
-- [~] 多节点数据面实施（M1 完成：openraft 适配 + 单节点引导 + trait 适配 + 内存传输，2026-08-08；M2 多进程 HTTP RPC + RocksDB raft CF → M3 默认运行时切换 + CI 三进程 smoke）
+- [~] 多节点数据面实施（**M1–M2 完成**，2026-08-08：M1 openraft 适配 + 单节点引导 + trait 适配 + 内存传输；M2 多进程 HTTP RPC（树内 HTTP/1.1 + 共享 secret）+ RocksDB raft CF + snapshot install，cluster 21→26 测，双节点 HTTP+RocksDB 选举/复制/落盘；M3 默认运行时切换 + CI 三进程 smoke）
 - [x] 完整 W3C 套件接入（vendored 官方 `w3c/rdf-tests` sparql11 + manifest 驱动 runner + `w3c11_profile.tsv` 492 条基线：127 PASS / 365 FAIL 欠账 profile 化防回归；2026-08-06）
 - [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
 - [ ] 发布流水线与回滚演练通过

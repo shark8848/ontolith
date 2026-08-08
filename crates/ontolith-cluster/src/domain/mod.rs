@@ -36,6 +36,10 @@ impl ClusterNodeId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "raft-backend",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct ShardId(pub u32);
 
 impl ShardId {
@@ -50,6 +54,10 @@ impl ShardId {
 
 /// Raft-like term / epoch for metadata leadership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(
+    feature = "raft-backend",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct ClusterEpoch(pub u64);
 
 impl ClusterEpoch {
@@ -214,6 +222,10 @@ pub fn hash_slot(key: &str, slot_count: u32) -> u32 {
 
 /// Replicated log entry (metadata or data op placeholder).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "raft-backend",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct LogEntry {
     pub index: u64,
     pub term: ClusterEpoch,
@@ -221,6 +233,10 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "raft-backend",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum LogPayload {
     /// No-op heartbeat / barrier.
     Noop,

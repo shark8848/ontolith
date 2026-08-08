@@ -1,11 +1,12 @@
 //! Raft data plane backend (L4, ADR-0004).
 //!
 //! M1: openraft single-node bootstrap + cluster trait adapter + in-memory
-//! transport. The consensus-relevant contracts (leadership, metadata epoch,
-//! replication log) are backed by an [`openraft::Raft`] node; the
-//! control-plane utilities (shard routing, rebalance, data-plane sync,
-//! fault injection) delegate to the in-process [`InMemoryClusterRuntime`]
-//! simulator until M2 replaces the transport.
+//! transport; M2: multi-process HTTP RPC (in-tree HTTP/1.1 + shared secret)
+//! and RocksDB `raft` CF storage (see [`rocks_store`]). The consensus-
+//! relevant contracts (leadership, metadata epoch, replication log) are
+//! backed by an [`openraft::Raft`] node; the control-plane utilities (shard
+//! routing, rebalance, data-plane sync, fault injection) delegate to the
+//! in-process [`InMemoryClusterRuntime`] simulator until M3.
 //!
 //! [`InMemoryClusterRuntime`]: super::InMemoryClusterRuntime
 
@@ -22,12 +23,20 @@ use crate::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
 use ontolith_core::domain::ConsistencyLevel;
 use ontolith_core::error::OntolithError;
 use ontolith_storage::domain::SnapshotRef;
+use ontolith_storage::infrastructure::RocksDbStorageEngine;
 use openraft::storage::Adaptor;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
 use std::ops::RangeBounds;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+
+mod rocks_store;
+pub use rocks_store::RocksRaftStorage;
+
+mod http;
+pub use http::{HttpRaftClient, HttpRaftFactory, HttpRaftServer};
 
 /// Openraft type configuration for the cluster data plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -51,7 +60,7 @@ type StorageError = openraft::StorageError<NodeId>;
 /// Configuration for the raft-backed cluster runtime.
 #[derive(Debug, Clone)]
 pub struct RaftClusterConfig {
-    /// Stable openraft node id (M1 uses a single node, id `0`).
+    /// Stable openraft node id.
     pub node_id: u64,
     pub region: String,
     pub slot_count: u32,
@@ -59,6 +68,16 @@ pub struct RaftClusterConfig {
     pub max_eventual_lag: u64,
     /// Raft heartbeat interval in milliseconds (tuned down in tests).
     pub heartbeat_interval_ms: u64,
+    /// Optional HTTP listen address for the raft RPC server (M2, ADR-0004);
+    /// e.g. `127.0.0.1:0` binds a free port. `None` keeps the in-memory
+    /// transport (M1 test harness).
+    pub http_listen_addr: Option<String>,
+    /// Shared cluster secret for raft RPC peer auth (M2). Must be non-empty
+    /// when HTTP transport is enabled.
+    pub raft_secret: String,
+    /// Optional RocksDB storage path for the raft log/state/snapshot (M2,
+    /// ADR-0004 decision 3); `None` keeps the in-memory storage fallback.
+    pub raft_storage_path: Option<PathBuf>,
 }
 
 impl Default for RaftClusterConfig {
@@ -70,13 +89,16 @@ impl Default for RaftClusterConfig {
             shard_count: 2,
             max_eventual_lag: 100,
             heartbeat_interval_ms: 200,
+            http_listen_addr: None,
+            raft_secret: String::new(),
+            raft_storage_path: None,
         }
     }
 }
 
 /// Process-wide registry mapping raft node ids to live [`openraft::Raft`]
-/// handles. M1 uses it as the in-memory transport; M2 will point
-/// [`MemNetworkFactory`] at HTTP peers instead.
+/// handles. The in-memory transport (M1) and test harness; M2 adds the HTTP
+/// transport ([`HttpRaftFactory`]) for cross-process peers.
 #[derive(Clone, Default)]
 pub struct RaftRegistry {
     inner: Arc<Mutex<HashMap<NodeId, Arc<openraft::Raft<TypeConfig>>>>>,
@@ -97,7 +119,8 @@ impl RaftRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory storage (log + state machine; M2 replaces with RocksDB `raft` CF).
+// In-memory storage (log + state machine; test fallback alongside the M2
+// RocksDB `raft` CF storage in `rocks_store`).
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Default)]
@@ -344,7 +367,7 @@ impl openraft::RaftStorage<TypeConfig> for MemStorage {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory transport (M1; M2 replaces the client with HTTP RPC).
+// In-memory transport (M1; M2 adds the HTTP RPC client in `http`).
 // ---------------------------------------------------------------------------
 
 /// In-memory [`openraft::RaftNetworkFactory`]: routes RPCs to live raft
@@ -444,23 +467,75 @@ impl openraft::RaftNetwork<TypeConfig> for MemNetwork {
 // ---------------------------------------------------------------------------
 // Raft-backed cluster runtime (trait adapter).
 // ---------------------------------------------------------------------------
+// Storage / transport selection (M2).
+// ---------------------------------------------------------------------------
+
+/// Storage backend behind the raft node (M2: RocksDB `raft` CF or memory).
+enum RaftStoreKind {
+    Mem(MemStorage),
+    Rocks(RocksRaftStorage),
+}
+
+impl RaftStoreKind {
+    fn applied_entries_from(&self, index: u64) -> Vec<LogEntry> {
+        match self {
+            Self::Mem(store) => store.applied_entries_from(index),
+            Self::Rocks(store) => store.applied_entries_from(index),
+        }
+    }
+}
+
+/// Transport factory behind the raft node (M2: HTTP RPC or in-memory).
+enum RaftNetKind {
+    Mem(MemNetworkFactory),
+    Http(HttpRaftFactory),
+}
+
+/// Build an openraft node over the v1 [`openraft::RaftStorage`] adapter.
+fn build_node<S, N>(
+    rt: &Arc<tokio::runtime::Runtime>,
+    node_id: u64,
+    raft_config: Arc<openraft::Config>,
+    storage: S,
+    network: N,
+) -> Arc<openraft::Raft<TypeConfig>>
+where
+    S: openraft::RaftStorage<TypeConfig> + Send + Sync + 'static,
+    N: openraft::RaftNetworkFactory<TypeConfig> + Send + Sync + 'static,
+{
+    let (log_store, state_machine) = Adaptor::new(storage);
+    let raft = rt
+        .block_on(openraft::Raft::new(
+            node_id,
+            raft_config,
+            network,
+            log_store,
+            state_machine,
+        ))
+        .expect("start raft node");
+    Arc::new(raft)
+}
+
+// ---------------------------------------------------------------------------
 
 /// L4 cluster runtime backed by an [`openraft::Raft`] node.
 ///
 /// Consensus contracts (leadership, epoch, replication log, committed
 /// index) come from openraft; shard routing and the remaining control-plane
-/// utilities delegate to the in-process simulator until M2.
+/// utilities delegate to the in-process simulator until M3.
 pub struct RaftClusterRuntime {
     config: RaftClusterConfig,
     rt: Arc<tokio::runtime::Runtime>,
     raft: Arc<openraft::Raft<TypeConfig>>,
-    storage: MemStorage,
+    store: RaftStoreKind,
     /// cluster node id string -> raft node id
     raft_ids: RwLock<HashMap<String, u64>>,
     /// raft node id -> cluster node id string
     cluster_ids: RwLock<HashMap<u64, String>>,
     bootstrapped: AtomicBool,
     inner: InMemoryClusterRuntime,
+    /// M2: raft RPC server owned by this node (stopped on drop).
+    http_server: Option<HttpRaftServer>,
 }
 
 impl RaftClusterRuntime {
@@ -492,22 +567,60 @@ impl RaftClusterRuntime {
         raft_config.enable_tick = true;
         let raft_config = Arc::new(raft_config);
 
-        let storage = MemStorage::new();
-        let (log_store, state_machine) = Adaptor::new(storage.clone());
-        let network = MemNetworkFactory::new(registry.clone());
+        let store = match &config.raft_storage_path {
+            Some(path) => {
+                let engine = Arc::new(
+                    RocksDbStorageEngine::open(path)
+                        .expect("open raft rocksdb storage (raft_storage_path)"),
+                );
+                RaftStoreKind::Rocks(RocksRaftStorage::new(engine))
+            }
+            None => RaftStoreKind::Mem(MemStorage::new()),
+        };
+        let net = match &config.http_listen_addr {
+            Some(_) => RaftNetKind::Http(HttpRaftFactory::new(config.raft_secret.clone())),
+            None => RaftNetKind::Mem(MemNetworkFactory::new(registry.clone())),
+        };
 
         let node_id = config.node_id;
-        let raft = rt
-            .block_on(openraft::Raft::new(
-                node_id,
-                raft_config,
-                network,
-                log_store,
-                state_machine,
-            ))
-            .expect("start raft node");
-        let raft = Arc::new(raft);
-        registry.register(node_id, raft.clone());
+        let raft = match (&store, &net) {
+            (RaftStoreKind::Mem(store), RaftNetKind::Mem(net)) => {
+                build_node(&rt, node_id, raft_config.clone(), store.clone(), net.clone())
+            }
+            (RaftStoreKind::Mem(store), RaftNetKind::Http(net)) => {
+                build_node(&rt, node_id, raft_config.clone(), store.clone(), net.clone())
+            }
+            (RaftStoreKind::Rocks(store), RaftNetKind::Mem(net)) => {
+                build_node(&rt, node_id, raft_config.clone(), store.clone(), net.clone())
+            }
+            (RaftStoreKind::Rocks(store), RaftNetKind::Http(net)) => {
+                build_node(&rt, node_id, raft_config.clone(), store.clone(), net.clone())
+            }
+        };
+        if let RaftNetKind::Mem(_) = &net {
+            registry.register(node_id, raft.clone());
+        }
+
+        let http_server = match (&config.http_listen_addr, &net) {
+            (Some(listen), RaftNetKind::Http(_)) => {
+                if config.raft_secret.is_empty() {
+                    panic!("raft HTTP transport requires a non-empty raft_secret");
+                }
+                let listen: std::net::SocketAddr = listen
+                    .parse()
+                    .expect("invalid raft http listen address (http_listen_addr)");
+                Some(
+                    HttpRaftServer::spawn(
+                        listen,
+                        config.raft_secret.clone(),
+                        Arc::clone(&rt),
+                        Arc::clone(&raft),
+                    )
+                    .expect("bind raft http server"),
+                )
+            }
+            _ => None,
+        };
 
         let inner = InMemoryClusterRuntime::new(ClusterConfig {
             region: config.region.clone(),
@@ -520,16 +633,23 @@ impl RaftClusterRuntime {
             config,
             rt,
             raft,
-            storage,
+            store,
             raft_ids: RwLock::new(HashMap::new()),
             cluster_ids: RwLock::new(HashMap::new()),
             bootstrapped: AtomicBool::new(false),
             inner,
+            http_server,
         }
     }
 
     pub fn node_id(&self) -> u64 {
         self.config.node_id
+    }
+
+    /// The actually-bound HTTP raft RPC address (M2), when HTTP transport is
+    /// enabled.
+    pub fn http_addr(&self) -> Option<std::net::SocketAddr> {
+        self.http_server.as_ref().map(|server| server.addr)
     }
 
     /// Map a cluster node id string to its raft id; assigns the next free
@@ -770,7 +890,7 @@ impl Replicator for RaftClusterRuntime {
     }
 
     fn entries_from(&self, index: u64) -> Vec<LogEntry> {
-        self.storage.applied_entries_from(index)
+        self.store.applied_entries_from(index)
     }
 }
 
@@ -843,6 +963,9 @@ pub fn status() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+
     fn wait_until(cond: impl Fn() -> bool, timeout_ms: u64) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         while std::time::Instant::now() < deadline {
@@ -852,6 +975,142 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         cond()
+    }
+
+    fn http_node_config(
+        node_id: u64,
+        secret: &str,
+        storage_dir: Option<&std::path::Path>,
+    ) -> RaftClusterConfig {
+        RaftClusterConfig {
+            node_id,
+            heartbeat_interval_ms: 50,
+            http_listen_addr: Some("127.0.0.1:0".to_string()),
+            raft_secret: secret.to_string(),
+            raft_storage_path: storage_dir.map(|dir| dir.join("raft-db")),
+            ..RaftClusterConfig::default()
+        }
+    }
+
+    fn raw_http_request(
+        addr: SocketAddr,
+        secret: Option<&str>,
+        path: &str,
+        body: &[u8],
+    ) -> (u16, Vec<u8>) {
+        let mut stream = TcpStream::connect(addr).expect("connect raft http");
+        let auth = match secret {
+            Some(s) => format!("Authorization: Bearer {s}\r\n"),
+            None => String::new(),
+        };
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: {addr}\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).expect("write head");
+        stream.write_all(body).expect("write body");
+        stream.flush().expect("flush");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).expect("read response");
+        let head_end = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|p| p + 4)
+            .unwrap_or(buf.len());
+        let status = String::from_utf8_lossy(&buf[..head_end])
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        (status, buf[head_end..].to_vec())
+    }
+
+    #[test]
+    fn http_server_enforces_shared_secret() {
+        let rt = RaftClusterRuntime::new(http_node_config(0, "s3cret", None));
+        let addr = rt.http_addr().expect("http addr");
+
+        let (status, _) = raw_http_request(addr, None, "/internal/raft/vote", b"{}");
+        assert_eq!(status, 401, "missing secret must be rejected");
+        let (status, _) = raw_http_request(addr, Some("wrong"), "/internal/raft/vote", b"{}");
+        assert_eq!(status, 401, "wrong secret must be rejected");
+        let (status, _) = raw_http_request(addr, Some("s3cret"), "/internal/raft/nope", b"{}");
+        assert_eq!(status, 404, "unknown endpoint under valid secret");
+    }
+
+    #[test]
+    fn http_install_snapshot_rpc_roundtrips() {
+        let rt = RaftClusterRuntime::new(http_node_config(0, "snap-secret", None));
+        let addr = rt.http_addr().expect("http addr");
+        rt.bootstrap(vec![("n0".into(), format!("http://{addr}"))])
+            .expect("bootstrap");
+
+        // A stale-vote snapshot chunk is accepted (vote ignored, current vote
+        // echoed back), proving the full serde round-trip over HTTP.
+        let req = openraft::raft::InstallSnapshotRequest::<TypeConfig> {
+            vote: openraft::Vote::new(0, 0),
+            meta: openraft::SnapshotMeta {
+                last_log_id: None,
+                last_membership: openraft::StoredMembership::default(),
+                snapshot_id: "test-snap".to_string(),
+            },
+            offset: 0,
+            data: Vec::new(),
+            done: false,
+        };
+        let body = serde_json::to_vec(&req).expect("serialize install snapshot request");
+        let (status, resp_body) = raw_http_request(
+            addr,
+            Some("snap-secret"),
+            "/internal/raft/install-snapshot",
+            &body,
+        );
+        assert_eq!(status, 200, "stale-vote snapshot chunk must be answered");
+        let resp: openraft::raft::InstallSnapshotResponse<NodeId> =
+            serde_json::from_slice(&resp_body).expect("deserialize response");
+        assert!(resp.vote.leader_id.term >= 1, "current term echoed back");
+    }
+
+    #[test]
+    fn http_two_node_cluster_replicates_with_rocksdb() {
+        let dir0 = tempfile::tempdir().unwrap();
+        let dir1 = tempfile::tempdir().unwrap();
+        let rt0 = RaftClusterRuntime::new(http_node_config(0, "cluster-secret", Some(dir0.path())));
+        let rt1 = RaftClusterRuntime::new(http_node_config(1, "cluster-secret", Some(dir1.path())));
+        let addr0 = rt0.http_addr().expect("rt0 http addr");
+        let addr1 = rt1.http_addr().expect("rt1 http addr");
+
+        rt0.bootstrap(vec![
+            ("n0".into(), format!("http://{addr0}")),
+            ("n1".into(), format!("http://{addr1}")),
+        ])
+        .expect("bootstrap over http");
+
+        assert!(
+            wait_until(
+                || rt0.leader_id().is_some() || rt1.leader_id().is_some(),
+                20000
+            ),
+            "no leader elected over HTTP"
+        );
+        let leader = if rt0.leader_id().is_some() { &rt0 } else { &rt1 };
+        let follower = if rt0.leader_id().is_some() { &rt1 } else { &rt0 };
+
+        // index 2: index 1 is the membership entry written by initialize().
+        let entry = leader
+            .append(LogPayload::Metadata("over-http".into()))
+            .expect("append over http");
+        assert_eq!(entry.index, 2);
+        assert!(
+            wait_until(|| follower.commit_index() >= 2, 20000),
+            "follower did not commit replicated entry"
+        );
+        assert_eq!(follower.commit_index(), leader.commit_index());
+
+        // The follower materialized the entry in its RocksDB `raft` CF.
+        let replicated = follower.entries_from(2);
+        assert_eq!(replicated.len(), 1);
+        assert_eq!(replicated[0].payload, LogPayload::Metadata("over-http".into()));
     }
 
     #[test]
