@@ -326,6 +326,17 @@ where
         self.executor.execute(&plan, request)
     }
 
+    /// Execute an already-planned query against this pipeline's executor
+    /// (P6-03: lets a caller plan once, then route the plan to an overlay
+    /// read service when reasoning materialization is enabled).
+    pub fn execute_planned(
+        &self,
+        plan: &QueryPlan,
+        request: &QueryRequest,
+    ) -> Result<QueryResult, OntolithError> {
+        self.executor.execute(plan, request)
+    }
+
     /// Backward-compatible summary execute.
     pub fn execute_summary(
         &self,

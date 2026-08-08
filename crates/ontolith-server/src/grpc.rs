@@ -155,8 +155,21 @@ impl SparqlServiceTrait for SparqlGateway {
                 .map(|plan| explain_json(&plan, ctx.tenant.as_str(), consistency))
         } else {
             self.app
-                .execute_sparql(&ctx, &req.query, timeout_ms, consistency)
-                .map(|result| sparql_results_json(&result, &ctx, consistency))
+                .execute_sparql_with_inference(
+                    &ctx,
+                    &req.query,
+                    timeout_ms,
+                    consistency,
+                    &self.app.inference,
+                )
+                .map(|outcome| {
+                    sparql_results_json(
+                        &outcome.result,
+                        &ctx,
+                        consistency,
+                        outcome.reasoning.as_ref(),
+                    )
+                })
         };
         let executed = executed.map_err(status_err);
         record_span(
@@ -297,6 +310,34 @@ mod tests {
         )
     }
 
+    /// Memory app with the forward-chaining inference posture enabled.
+    fn inference_app() -> Arc<AppState> {
+        use crate::app::{StorageBackendKind, default_cluster};
+        use crate::reasoning::InferenceConfig;
+        use ontolith_reasoner::domain::InferenceMode;
+        use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
+        use ontolith_storage::infrastructure::{
+            EngineTripleRepository, InMemoryDictionary, InMemoryStorageEngine,
+        };
+        let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
+        let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
+        let triples: Arc<dyn TripleRepository> =
+            Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        AppState::from_parts(
+            storage,
+            dictionary,
+            triples,
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator::default(),
+            StorageBackendKind::Memory,
+            None,
+            default_cluster(),
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+            InferenceConfig::new(InferenceMode::ForwardChaining, 64, None),
+        )
+    }
+
     fn start_server(app: Arc<AppState>) -> (SocketAddr, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
         let addr = listener.local_addr().expect("local addr");
@@ -357,6 +398,35 @@ mod tests {
 
         // The response carries a traceparent for downstream propagation.
         assert!(select.metadata().get("traceparent").is_some());
+        drop(rt);
+        drop(server);
+    }
+
+    #[test]
+    fn grpc_query_runs_inference_when_enabled() {
+        let (addr, server) = start_server(inference_app());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let mut client = connect(addr, &rt);
+
+        let insert = rt
+            .block_on(client.query(query_req(
+                "INSERT DATA { <http://ex.org/A> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex.org/B> . <http://ex.org/x> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex.org/A> }",
+            )))
+            .expect("insert must succeed");
+        assert!(insert.get_ref().ok);
+
+        let select = rt
+            .block_on(client.query(query_req(
+                "SELECT ?s WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex.org/B> }",
+            )))
+            .expect("select must succeed");
+        let body = &select.get_ref().body;
+        assert!(body.contains("\"row_count\":1"), "body={body}");
+        assert!(body.contains("\"reasoning\""), "body={body}");
+        assert!(body.contains("\"mode\":\"forward\""), "body={body}");
         drop(rt);
         drop(server);
     }

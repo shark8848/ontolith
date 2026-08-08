@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.27  
+版本: 0.1.28  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -74,7 +74,7 @@
 | P0 | L0–L3 底层收尾（编码/字典契约✅、存储 MVCC 版本链✅；查询代价模型与高级 Update、W3C 欠账提 PASS） | TBD | 进行中 |
 | P1 | L4 集群多进程 Raft 实施（P4-02 **M1–M3 完成**：openraft 适配 → 多进程 HTTP RPC + RocksDB raft CF + snapshot install → 默认运行时切换 + CI 三进程 smoke） | TBD | TBD |
 | P2 | L5 应用层安全与隔离（P5-01 gRPC 网关 **完成**、P5-02 OIDC/JWT **完成**、P5-03 强制租户隔离 **完成**、P5-05 Tracing 全链路 **完成**） | 进行中 | 90% |
-| P3 | L6 推理应用化（P6-01 规则扩展 **完成** → P6-03 接入 server 查询/推理管线 → P6-02 SHACL 补全） | TBD | TBD |
+| P3 | L6 推理应用化（P6-01 规则扩展 **完成** → P6-03 接入 server 查询/推理管线 **完成** → P6-02 SHACL 补全） | TBD | TBD |
 | P4 | L7 运维演练与发布（P7-01/04 演练与运维手册、P7-02 阈值断言、P7-03 发布/回滚） | TBD | TBD |
 
 ---
@@ -171,7 +171,7 @@
 |----|--------|------|--------|------|----------|
 | P6-01 | OWL 2 RL 核心规则 | 已完成 | 100% | `ForwardChainReasoner`：rdfs5/6/7/8/9 + prp-inv1/2 + prp-symp + prp-trp + prp-fp（功能属性→值 sameAs）+ prp-ifp（逆功能属性→主词 sameAs）+ cax-sco + cls-svf1/2 + cls-avf + cls-hv1/2（owl:hasValue 双向：定型→值三元组 / 值匹配→定型，含字面量值）+ cls-int1/2 + cls-uni + cls-maxc2（maxCardinality 1 → 值 sameAs）+ eq-sym/trans + eq-rep-s/p/o（sameAs 主/谓/宾替换）+ prp-key（owl:hasKey 列表键共享值→sameAs，值→成员桶索引）+ prp-spo2（owl:propertyChainAxiom 属性链，任意长度逐跳 join）+ 一致性 ⊥ 检测（cax-dw/cls-com/cls-nothing1/2/eq-diff1/2/3（AllDifferent members/distinctMembers 同对 sameAs）+ prp-irp（IrreflexiveProperty 自反）+ cax-adc（AllDisjointClasses 双类型），`ReasoningReport.inconsistent` 标记；bnode 感知 + 同迭代 frontier 检测）（含 bnode 限定词/列表表达式）、迭代闭包、`InferenceMode` 开关、38 测 | — |
 | P6-02 | SHACL 基线验证 | 部分完成 | 75% | `ShaclEngine`（[infrastructure/shacl.rs](../crates/ontolith-reasoner/src/infrastructure/shacl.rs)）：形状解析（节点/属性形状、`sh:property` 嵌套、RDF 列表 `sh:in`/`sh:and`/`sh:or`/`sh:ignoredProperties`）、目标选择（targetClass/targetNode/targetSubjectsOf/targetObjectsOf + sh:class 隐式目标）、约束子集（class/datatype/nodeKind/minCount/maxCount/minLength/maxLength/pattern(+flags)/in/hasValue/node/and/or/not/closed + 数值范围 min-max Inclusive/Exclusive + 属性对 equals/disjoint/lessThan/lessThanOrEquals）、属性形状参数（qualifiedValueShape + qualifiedMinCount/qualifiedMaxCount/qualifiedValueShapesDisjoint、ignoredProperties 并入 closed 白名单）、severity/message、`ValidationReport`（conforms 仅 Violation 判定不合规）；`sh:pattern` 内置小正则子集（全串匹配，无分组/交替，flags 支持 i）；21 测（reasoner 共 25） | 其余约束组件（`sh:languageIn` 等，需语言标签管道重构）与 W3C SHACL 套件接入（需网络） |
-| P6-03 | 可配置推理模式与保护 | 部分完成 | 60% | `InferenceMode` + `max_iterations` 迭代上限 + `max_elapsed_ms` 墙钟超时护栏（`ReasoningReport.timed_out` 标记早停） | 接入 server 查询/推理管线 |
+| P6-03 | 可配置推理模式与保护 | 已完成 | 100% | `InferenceConfig`（`ONTOLITH_INFERENCE_MODE`=off/forward/hybrid、`ONTOLITH_INFERENCE_MAX_ITERATIONS`=64、`ONTOLITH_INFERENCE_MAX_ELAPSED_MS`）+ HTTP `?inference=` 每请求覆盖（非法 400）+ `execute_sparql_with_inference` 共享路径（HTTP/gRPC，Update/Explain 跳过）+ `ReasoningReadService` overlay（仅叠加增量闭包）+ enforced 租户隔离输入 + reasoning meta（inferred_triples/elapsed_ms/timed_out/inconsistent） | — |
 
 **阶段退出条件：** RL 核心 + SHACL 基线 + 性能护栏可配置。
 
@@ -307,6 +307,7 @@
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-08 | Codex | L6：P6-03 接入 server 查询/推理管线——`InferenceConfig` 从环境读取（`ONTOLITH_INFERENCE_MODE`/`ONTOLITH_INFERENCE_MAX_ITERATIONS`/`ONTOLITH_INFERENCE_MAX_ELAPSED_MS`，默认 off/64/不限）+ HTTP `?inference=` 每请求模式覆盖（非法 400）；`execute_sparql_with_inference` HTTP/gRPC 共享执行路径：读查询实时以 `ForwardChainReasoner` 物化闭包（Update/Explain 跳过），`ReasoningReadService` overlay 只叠加增量三元组，enforced 租户模式输入限定租户自有命名图 union（双层隔离）；SPARQL 结果 meta 增 reasoning 段（mode/inferred_triples/elapsed_ms/timed_out/inconsistent）；`InferenceMode` 增 as_str/parse；query 86→88 测（execute_planned 共享、update_pipeline_with_read overlay）、server 33→43 测（HTTP 5 + gRPC 1），clippy 零警告，workspace 全量测试通过，drift=0 |
 | 2026-08-08 | Codex | L6：P6-01 OWL 2 RL 规则扩展收尾——`cls-hv1`/`cls-hv2`（owl:hasValue 双向：定型→值三元组 / 值匹配→定型，含字面量值）、`prp-irp`（IrreflexiveProperty 自反 ⊥）、`cax-adc`（AllDisjointClasses 双类型 ⊥）、`eq-diff2`/`eq-diff3`（AllDifferent owl:members/owl:distinctMembers 同对 sameAs ⊥）、`prp-spo2`（owl:propertyChainAxiom 属性链，任意长度逐跳 join）；eq-diff 编号对齐 W3C OWL 2 Profiles 2012 原表（原 sameAs+differentFrom 冲突由 eq-diff2 改标 eq-diff1，不同From 自反折叠为其推论）；`Rule` 枚举/supported_rules/一致性检测同步，reasoner 52→59 测，clippy 零警告，workspace 全量测试通过，drift=0 |
 | 2026-08-08 | Codex | L4：P4-02 多进程 Raft M1——openraft 0.9.25 接入（Tier A 锁定，`raft-backend` feature 默认开，`--no-default-features` 回退构建通过）：`TypeConfig`（D=LogPayload/R=LogEntry/u64/BasicNode/TokioRuntime）+ v1 `RaftStorage` 内存存储（`MemStorage`：日志/vote/committed/purged/last_applied/membership/applied，`MemLogReader`/`MemSnapshotBuilder`）经 `Adaptor` 接入 + 内存 `RaftNetworkFactory` 传输（`RaftRegistry` 进程内路由 append/vote/install-snapshot）+ `RaftClusterRuntime` 集群 trait 适配器（`ElectionService`/`Replicator`/`MetadataService` 核心由 openraft 背书：`client_write`→commit、metrics 映射 leader/epoch/index；`ShardRouter`/`Rebalance`/`DataPlaneSync`/`FaultInjector` 委托模拟器）；单节点 `bootstrap` 自选主、双节点内存传输选举+复制通过；cluster 17→21 测，workspace 全量测试通过，drift=0 |
 | 2026-08-08 | Codex | L4：P4-02 多进程 Raft M2——多进程 HTTP RPC + RocksDB raft CF + snapshot install（ADR-0004 决策 2/3）：openraft 开 `serde` feature（`serde`/`serde_json` 直依赖，域类型 `LogPayload`/`LogEntry`/`ShardId`/`ClusterEpoch` 增 `Serialize`/`Deserialize`）；树内最小 HTTP/1.1 RPC（`crates/ontolith-cluster/src/infrastructure/raft/http.rs`，沿用 L5 `ontolith-server::http` 同风格，未引入 axum/reqwest）：`HttpRaftServer`（`/internal/raft/{vote,append-entries,install-snapshot}` + `Authorization: Bearer <secret>` 共享 secret 认证，raft 错误经 serde_json 往返为 `RemoteError`）+ `HttpRaftClient`/`HttpRaftFactory`（`RaftNetworkFactory::new_client` 依 `BasicNode.addr` 建 HTTP 客户端，`spawn_blocking` 承载阻塞 IO）；RocksDB 独立 `raft` CF：`RocksDbStorageEngine::raft_cf_*` 字节级原语（put/put_batch/`RaftCfOp` 原子 batch/get/delete/delete_range/scan_range/scan_prefix）+ `RocksRaftStorage` v1 `RaftStorage`（日志/vote/committed/last_purged/log_last/membership/应用态/快照 meta+字节，`RocksLogReader`/`RocksSnapshotBuilder`，snapshot `build_snapshot`→`install_snapshot` 原子替换 `applied/*` + 快照引用）；`RaftClusterConfig` 增 `http_listen_addr`/`raft_secret`/`raft_storage_path`，`RaftClusterRuntime` 配置化选择存储与传输（内存回退保留）；cluster 21→26 测（RocksDB 日志 append/read/purge/delete-conflict + snapshot build/install 往返、HTTP 共享 secret 401 拒绝、HTTP install-snapshot RPC 往返、双节点 HTTP+RocksDB 选举/复制/落盘），clippy 零警告，`--no-default-features` 回退构建通过，workspace 全量测试通过，drift=0 |
@@ -416,7 +417,7 @@
 - [~] **L3 查询引擎**：P3-01 高级 Update ✅（2026-08-07，query 46→55 测，W3C 127→151 PASS）、P3-02 代价模型/统计 ✅（2026-08-07，query 55→58 测）、P3-03 HTTP Explain API ✅（2026-08-07，query 58→59 测）、P3-04 异步抢占 token ✅（2026-08-07，query 59→63 测）、P3-05 标准符合性子集已完成 ✅ 十阶段（2026-08-08，W3C 169→229→265→284→322→339→434→444→458→492 PASS：函数/投影/算术 + EXISTS/MINUS/聚合扩展/CAST/构造语法 + 完整 datatype/lang 字面量模型 + harness 数值归一/相对 IRI/字符串函数兼容语义 + 哈希/REPLACE/BNODE/正则/UUID/属性路径全量 + 图管理 ADD/COPY/MOVE/CREATE/USING/命名图数据/请求内更新可见性 + 第八波 空白节点属性列表/RDF 集合/子查询投影 + 第九波 聚合补全/rs:ResultSet/graphData 直接 IRI + 第十波 syntax-query 收尾/数据集子句/FILTER 延后/Unicode 转义）→ 欠账清零（fail=0、drift=0）
 - [x] **L4 集群**：P4-02 多进程 Raft **M1–M3 完成**（2026-08-08）；P4-01 多进程元数据 RPC **完成**（`/internal/raft/apply`：register/heartbeat/set_node_status 经 raft 提交、全节点复制注册表收敛，cluster 27→28 测）；P4-03 跨节点数据搬迁 **完成**（`DataPlaneSnapshotIo` + `/internal/raft/transfer-snapshot` 真实字节迁移，cluster 28→29 测）；P4-04 真实网络分区 **完成**（`HttpRaftClient` 对称丢弃分区 RPC + `metadata_mutation` 隔离拒绝/愈合恢复，cluster 29→30 测）→ **L4 全绿，光标移至 L5 接入与安全**
 - [x] **L5 接入与安全**：P5-01 gRPC 网关 **完成**（tonic+prost `SparqlService{Query,Health}` 真实 HTTP/2 + metadata 鉴权 + `traceparent` 延续/回带 + 双网关 bin，server 29→33 测）；P5-02 OIDC/JWT **完成**（树内 HS256 Bearer 鉴权 + `iss`/`aud` 策略 + JWT 租户优先，security 12→18 测）；P5-03 强制租户隔离 **完成**（`ONTOLITH_TENANT_MODE=enforced`：`TenantNamespace` + 执行器租户视图 + 写盖章/越权 403，query 83→86 测）；P5-05 Tracing 全链路 **完成**（`traceparent` 延续 + 根/子 span + `Traceparent` 回带 + `/admin/traces`，observability 6→11、server 26→29 测）→ **L5 全绿，光标移至 L6 推理与验证（P6-01 规则扩展收尾 → P6-03 接入 server 查询/推理管线 → P6-02 SHACL 补全）**
-- [ ] **L6 推理与验证**：P6-01 规则扩展 **完成**（cls-hv1/2、prp-irp、cax-adc、eq-diff2/3 AllDifferent、prp-spo2 属性链，reasoner 52→59 测）→ **P6-03 接入 server 查询/推理管线（当前光标）** → P6-02 SHACL 补全 + W3C SHACL 套件
+- [ ] **L6 推理与验证**：P6-01 规则扩展 **完成**（cls-hv1/2、prp-irp、cax-adc、eq-diff2/3 AllDifferent、prp-spo2 属性链，reasoner 52→59 测）；P6-03 接入 server 查询/推理管线 **完成**（`InferenceConfig` + `ONTOLITH_INFERENCE_*` 环境 + HTTP `?inference=` 覆盖 + `ReasoningReadService` overlay + reasoning meta + 租户隔离，server 33→43 测）→ **当前光标：P6-02 SHACL 补全 + W3C SHACL 套件**
 - [ ] **L7 平台工程**：P7-01/04 在线重平衡与灾备演练、运维手册与证据包 → P7-02 阈值断言/趋势记录 → P7-03 发布/回滚手册
 - [ ] **L8 AI-Native**：R4 启动时立项（P8-01/02/03）
 

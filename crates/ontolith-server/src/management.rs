@@ -1,6 +1,7 @@
 //! Management server for unified control-plane operations.
 
 use crate::app::AppState;
+use crate::reasoning::InferenceConfig;
 use crate::http::{Handler, HttpRequest, HttpResponse, HttpServer, TlsServerConfig, now_ms};
 use ontolith_cluster::domain::LogPayload;
 use ontolith_core::error::OntolithError;
@@ -694,7 +695,13 @@ fn build_managed_app_state(
         if wants_rocks || data_dir.is_some() {
             let path = data_dir.unwrap_or_else(|| PathBuf::from("./data/ontolith"));
             return AppState::new_rocksdb_with_cluster(
-                bind_address, auth, path, audit, tenant_mode, cluster,
+                bind_address,
+                auth,
+                path,
+                audit,
+                tenant_mode,
+                cluster,
+                InferenceConfig::from_env(),
             )
                 .map_err(|e| e.message().to_owned());
         }
@@ -708,7 +715,12 @@ fn build_managed_app_state(
     }
 
     Ok(AppState::new_memory_with_cluster(
-        bind_address, auth, audit, tenant_mode, cluster,
+        bind_address,
+        auth,
+        audit,
+        tenant_mode,
+        cluster,
+        InferenceConfig::from_env(),
     ))
 }
 

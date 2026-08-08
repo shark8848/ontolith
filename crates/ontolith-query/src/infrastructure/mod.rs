@@ -291,6 +291,23 @@ pub fn update_pipeline(
     )
 }
 
+/// SPARQL Update pipeline over a caller-supplied read service (P6-03: the
+/// server injects a reasoning overlay read service after materialization).
+pub fn update_pipeline_with_read(
+    read: Arc<dyn QueryReadService>,
+    engine: Arc<dyn StorageEngine>,
+) -> crate::application::QueryPipeline<
+    SimpleQueryPlanner,
+    CostBasedOptimizer<EngineQueryStatistics>,
+    UpdateQueryExecutor<EngineUpdateWriteService>,
+> {
+    crate::application::QueryPipeline::new(
+        SimpleQueryPlanner,
+        CostBasedOptimizer::new(Arc::new(EngineQueryStatistics::new(Arc::clone(&engine)))),
+        UpdateQueryExecutor::new(read, EngineUpdateWriteService::new(engine)),
+    )
+}
+
 /// Read-only pipeline with cost-based BGP ordering over engine statistics.
 pub fn cost_pipeline(
     repo: Arc<dyn TripleRepository>,
@@ -476,6 +493,92 @@ mod tests {
         assert_eq!(r.kind, crate::domain::QueryKind::Update);
         assert_eq!(r.affected, 1);
         assert_eq!(count_names(&p), 3);
+    }
+
+    #[test]
+    fn execute_planned_matches_execute() {
+        let (engine, dict, repo) = seed_update();
+        let p = update_pipeline(engine, dict, repo);
+        let req = QueryRequest::new("SELECT ?s WHERE { ?s <http://ex.org/name> ?n }");
+        let plan = p.plan(&req).expect("plan");
+        let via_execute = p.execute(&req).expect("execute");
+        let via_planned = p.execute_planned(&plan, &req).expect("execute_planned");
+        assert_eq!(via_planned.kind, via_execute.kind);
+        assert_eq!(via_planned.solutions, via_execute.solutions);
+        assert_eq!(via_planned.solutions.len(), 2);
+    }
+
+    /// Minimal read overlay: base triples plus one extra virtual triple
+    /// (the shape the server's reasoning overlay uses after materialization).
+    struct OverlayRead {
+        base: Arc<dyn QueryReadService>,
+        extra: Triple,
+    }
+
+    impl QueryReadService for OverlayRead {
+        fn all_triples(&self, txn_id: Option<TxnId>) -> Result<Vec<Triple>, OntolithError> {
+            let mut out = self.base.all_triples(txn_id)?;
+            out.push(self.extra.clone());
+            Ok(out)
+        }
+
+        fn by_subject(
+            &self,
+            subject: NodeId,
+            txn_id: Option<TxnId>,
+        ) -> Result<Vec<Triple>, OntolithError> {
+            let mut out = self.base.by_subject(subject, txn_id)?;
+            if self.extra.subject == subject {
+                out.push(self.extra.clone());
+            }
+            Ok(out)
+        }
+
+        fn by_predicate(
+            &self,
+            predicate: &Iri,
+            txn_id: Option<TxnId>,
+        ) -> Result<Vec<Triple>, OntolithError> {
+            let mut out = self.base.by_predicate(predicate, txn_id)?;
+            if &self.extra.predicate == predicate {
+                out.push(self.extra.clone());
+            }
+            Ok(out)
+        }
+
+        fn by_object(
+            &self,
+            object: &Term,
+            txn_id: Option<TxnId>,
+        ) -> Result<Vec<Triple>, OntolithError> {
+            let mut out = self.base.by_object(object, txn_id)?;
+            if &self.extra.object == object {
+                out.push(self.extra.clone());
+            }
+            Ok(out)
+        }
+
+        fn quads_in_graph(&self, graph: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
+            let mut out = self.base.quads_in_graph(graph, txn_id);
+            out.push(self.extra.clone());
+            out
+        }
+    }
+
+    #[test]
+    fn update_pipeline_with_read_serves_overlay() {
+        let (engine, dict, repo) = seed_update();
+        let base: Arc<dyn QueryReadService> = Arc::new(InMemoryQueryReadService::new(repo));
+        let read: Arc<dyn QueryReadService> = Arc::new(OverlayRead {
+            base,
+            extra: Triple {
+                subject: dict.encode_node("http://ex.org/carol"),
+                predicate: Iri::new("http://ex.org/name"),
+                object: Term::Literal(LiteralValue::String("Carol".into())),
+            },
+        });
+        let p = crate::infrastructure::update_pipeline_with_read(read, engine);
+        assert_eq!(count_names(&p), 3, "overlay triple must be visible");
     }
 
     #[test]

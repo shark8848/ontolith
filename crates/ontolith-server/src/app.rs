@@ -1,6 +1,9 @@
 //! Application state and route handlers for L5 HTTP gateway.
 
 use crate::http::{HttpRequest, HttpResponse, now_ms};
+use crate::reasoning::{
+    InferenceConfig, ReasoningReadService, base_read_service, reasoning_input,
+};
 use ontolith_cluster::application::ClusterRuntime;
 use ontolith_cluster::domain::{ClusterNodeId, LogPayload, SessionId};
 use ontolith_cluster::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
@@ -22,7 +25,11 @@ use ontolith_parser::infrastructure::{
 use ontolith_query::domain::{
     BoundValue, PatternCost, QueryExplain, QueryKind, QueryRequest, QueryResult,
 };
-use ontolith_query::infrastructure::update_pipeline;
+use ontolith_query::infrastructure::{update_pipeline, update_pipeline_with_read};
+use ontolith_reasoner::application::Reasoner;
+use ontolith_reasoner::domain::{InferenceMode, ReasoningReport};
+use ontolith_reasoner::infrastructure::ForwardChainReasoner;
+use ontolith_rdf::domain::Triple;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
@@ -81,6 +88,9 @@ pub struct AppState {
     /// Tenant isolation posture (P5-03): `Enforced` scopes every read/write
     /// to the caller's tenant namespace.
     pub tenant_mode: TenantMode,
+    /// L6 reasoning posture (P6-03): inference mode + materialization guards
+    /// applied to the shared SPARQL execution path.
+    pub inference: InferenceConfig,
     pub cluster: Arc<dyn ClusterRuntime>,
     pub cluster_tick: AtomicU64,
 }
@@ -116,6 +126,7 @@ impl AppState {
             default_cluster(),
             audit,
             tenant_mode,
+            InferenceConfig::default(),
         )
     }
 
@@ -128,6 +139,7 @@ impl AppState {
         audit: InMemoryAuditLog,
         tenant_mode: TenantMode,
         cluster: Arc<dyn ClusterRuntime>,
+        inference: InferenceConfig,
     ) -> Arc<Self> {
         let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
         let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
@@ -144,6 +156,7 @@ impl AppState {
             cluster,
             audit,
             tenant_mode,
+            inference,
         )
     }
 
@@ -186,6 +199,7 @@ impl AppState {
             default_cluster(),
             audit,
             tenant_mode,
+            InferenceConfig::default(),
         ))
     }
 
@@ -198,6 +212,7 @@ impl AppState {
         audit: InMemoryAuditLog,
         tenant_mode: TenantMode,
         cluster: Arc<dyn ClusterRuntime>,
+        inference: InferenceConfig,
     ) -> Result<Arc<Self>, OntolithError> {
         let engine = Arc::new(ontolith_storage::open_durable_engine(&path)?);
         let dictionary: Arc<dyn DictionaryCodec> = Arc::clone(&engine) as Arc<dyn DictionaryCodec>;
@@ -215,6 +230,7 @@ impl AppState {
             cluster,
             audit,
             tenant_mode,
+            inference,
         ))
     }
 
@@ -230,6 +246,7 @@ impl AppState {
         cluster: Arc<dyn ClusterRuntime>,
         audit: InMemoryAuditLog,
         tenant_mode: TenantMode,
+        inference: InferenceConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
             storage,
@@ -251,6 +268,7 @@ impl AppState {
             backend,
             data_dir,
             tenant_mode,
+            inference,
             cluster,
             cluster_tick: AtomicU64::new(0),
         })
@@ -615,6 +633,12 @@ impl AppState {
             .or_else(|| req.header("accept"))
             .unwrap_or("json");
 
+        // Per-request inference mode override (P6-03): `?inference=off|forward|hybrid`.
+        let effective_inference = match req.query.get("inference").map(|s| s.as_str()) {
+            Some(raw) => self.inference.with_override(raw)?,
+            None => self.inference,
+        };
+
         let start_ms = now_ms();
         let executed = (|| -> Result<HttpResponse, OntolithError> {
             if explain {
@@ -623,20 +647,36 @@ impl AppState {
                 return Ok(HttpResponse::json(200, "OK", body));
             }
 
-            let result = self.execute_sparql(&ctx, &query_text, timeout_ms, consistency)?;
+            let outcome = self.execute_sparql_with_inference(
+                &ctx,
+                &query_text,
+                timeout_ms,
+                consistency,
+                &effective_inference,
+            )?;
 
             // SPARQL Query Results JSON Format (W3C-inspired) when accept/format asks for it.
             if format.contains("sparql-results") || format == "srj" || format == "json" {
                 return Ok(HttpResponse::json(
                     200,
                     "OK",
-                    sparql_results_json(&result, &ctx, consistency),
+                    sparql_results_json(
+                        &outcome.result,
+                        &ctx,
+                        consistency,
+                        outcome.reasoning.as_ref(),
+                    ),
                 ));
             }
             Ok(HttpResponse::json(
                 200,
                 "OK",
-                sparql_results_json(&result, &ctx, consistency),
+                sparql_results_json(
+                    &outcome.result,
+                    &ctx,
+                    consistency,
+                    outcome.reasoning.as_ref(),
+                ),
             ))
         })();
         if let Some(trace) = current_trace() {
@@ -685,23 +725,55 @@ impl AppState {
         qreq
     }
 
-    /// Execute a SPARQL query/update through the shared pipeline and record
-    /// the audit event. Shared by the HTTP gateway and the gRPC access
-    /// boundary (P5-01).
-    pub(crate) fn execute_sparql(
+    /// Execute a SPARQL query/update with an explicit inference posture
+    /// (P6-03). Reads materialize the OWL 2 RL closure over the tenant's
+    /// triples and run against an overlay read service; updates and explains
+    /// skip materialization. The reasoning report is surfaced in the response.
+    pub(crate) fn execute_sparql_with_inference(
         &self,
         ctx: &AuthContext,
         query_text: &str,
         timeout_ms: Option<u64>,
         consistency: ConsistencyLevel,
-    ) -> Result<QueryResult, OntolithError> {
+        inference: &InferenceConfig,
+    ) -> Result<SparqlOutcome, OntolithError> {
         let qreq = self.build_query_request(ctx, query_text, timeout_ms, consistency);
         let pipeline = update_pipeline(
             Arc::clone(&self.triples),
             Arc::clone(&self.storage),
             Some(Arc::clone(&self.dictionary)),
         );
-        let result = pipeline.execute(&qreq)?;
+        let plan = pipeline.plan(&qreq)?;
+        let (reasoning, result) = if inference.is_enabled() && plan.kind != QueryKind::Update {
+            let base = base_read_service(
+                Arc::clone(&self.triples),
+                Arc::clone(&self.dictionary),
+                Arc::clone(&self.storage),
+            );
+            let input = reasoning_input(base.as_ref(), qreq.tenant_scope.as_ref())?;
+            let task = inference.reasoning_task(Some(plan.id));
+            let outcome = ForwardChainReasoner::new()
+                .materialize(self.dictionary.as_ref(), &task, &input)?;
+            // Overlay only the increment so base triples are not duplicated.
+            let inferred_only: Vec<Triple> = outcome
+                .triples
+                .iter()
+                .filter(|t| !input.contains(t))
+                .cloned()
+                .collect();
+            let overlay = Arc::new(ReasoningReadService::new(base, inferred_only));
+            let reasoning_pipeline = update_pipeline_with_read(overlay, Arc::clone(&self.storage));
+            (
+                Some(ReasoningExecution {
+                    mode: inference.mode,
+                    report: outcome.report,
+                }),
+                reasoning_pipeline.execute_planned(&plan, &qreq),
+            )
+        } else {
+            (None, pipeline.execute_planned(&plan, &qreq))
+        };
+        let result = result?;
         self.audit.record(
             now_ms(),
             ctx,
@@ -714,7 +786,7 @@ impl AppState {
                 format!("rows={}", result.row_count())
             },
         );
-        Ok(result)
+        Ok(SparqlOutcome { result, reasoning })
     }
 
     /// Explain a SPARQL query through the shared pipeline (P5-01).
@@ -1353,6 +1425,35 @@ fn parse_format_name(name: &str) -> Result<ParseFormat, OntolithError> {
 }
 
 /// Render the explain JSON shared by the HTTP and gRPC access paths (P5-01).
+/// Result of the shared SPARQL execution path plus the reasoning execution
+/// report when inference materialization ran (P6-03).
+pub(crate) struct SparqlOutcome {
+    pub result: QueryResult,
+    pub reasoning: Option<ReasoningExecution>,
+}
+
+/// The inference mode used and the materializer's report (inferred triples,
+/// elapsed, time-out, inconsistency flag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReasoningExecution {
+    pub mode: InferenceMode,
+    pub report: ReasoningReport,
+}
+
+fn reasoning_meta(reasoning: Option<&ReasoningExecution>) -> String {
+    match reasoning {
+        None => String::new(),
+        Some(execution) => format!(
+            r#","reasoning":{{"mode":{},"inferred_triples":{},"elapsed_ms":{},"timed_out":{},"inconsistent":{}}}"#,
+            json_string(execution.mode.as_str()),
+            execution.report.inferred_triples,
+            execution.report.elapsed_ms,
+            execution.report.timed_out,
+            execution.report.inconsistent,
+        ),
+    }
+}
+
 pub(crate) fn explain_json(
     plan: &QueryExplain,
     tenant: &str,
@@ -1376,10 +1477,12 @@ pub(crate) fn sparql_results_json(
     result: &QueryResult,
     ctx: &AuthContext,
     consistency: ConsistencyLevel,
+    reasoning: Option<&ReasoningExecution>,
 ) -> String {
+    let reasoning = reasoning_meta(reasoning);
     match result.kind {
         QueryKind::Ask => format!(
-            r#"{{"head":{{}},"boolean":{},"meta":{{"elapsed_ms":{},"timed_out":{},"cancelled":{},"tenant":{},"consistency":{}}}}}"#,
+            r#"{{"head":{{}},"boolean":{},"meta":{{"elapsed_ms":{},"timed_out":{},"cancelled":{},"tenant":{},"consistency":{}{reasoning}}}}}"#,
             result.boolean.unwrap_or(false),
             result.elapsed_ms,
             result.timed_out,
@@ -1403,7 +1506,7 @@ pub(crate) fn sparql_results_json(
             }
             triples.push(']');
             format!(
-                r#"{{"head":{{"vars":[]}},"results":{{"triples":{triples},"count":{}}},"meta":{{"elapsed_ms":{},"timed_out":{},"tenant":{}}}}}"#,
+                r#"{{"head":{{"vars":[]}},"results":{{"triples":{triples},"count":{}}},"meta":{{"elapsed_ms":{},"timed_out":{},"tenant":{}{reasoning}}}}}"#,
                 result.construct_triples.len(),
                 result.elapsed_ms,
                 result.timed_out,
@@ -1411,7 +1514,7 @@ pub(crate) fn sparql_results_json(
             )
         }
         QueryKind::Update => format!(
-            r#"{{"head":{{}},"update":{{"affected":{}}},"meta":{{"elapsed_ms":{},"timed_out":{},"cancelled":{},"tenant":{},"consistency":{}}}}}"#,
+            r#"{{"head":{{}},"update":{{"affected":{}}},"meta":{{"elapsed_ms":{},"timed_out":{},"cancelled":{},"tenant":{},"consistency":{}{reasoning}}}}}"#,
             result.affected,
             result.elapsed_ms,
             result.timed_out,
@@ -1460,7 +1563,7 @@ pub(crate) fn sparql_results_json(
             }
             bindings.push(']');
             format!(
-                r#"{{"head":{{"vars":{vars}}},"results":{{"bindings":{bindings}}},"meta":{{"row_count":{},"elapsed_ms":{},"timed_out":{},"cancelled":{},"tenant":{},"consistency":{}}}}}"#,
+                r#"{{"head":{{"vars":{vars}}},"results":{{"bindings":{bindings}}},"meta":{{"row_count":{},"elapsed_ms":{},"timed_out":{},"cancelled":{},"tenant":{},"consistency":{}{reasoning}}}}}"#,
                 result.row_count(),
                 result.elapsed_ms,
                 result.timed_out,
@@ -1743,6 +1846,69 @@ mod tests {
             TenantMode::Enforced,
         )
     }
+
+    fn memory_state_with_inference(inference: InferenceConfig) -> Arc<AppState> {
+        let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
+        let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
+        let triples: Arc<dyn TripleRepository> =
+            Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        AppState::from_parts(
+            storage,
+            dictionary,
+            triples,
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator::default(),
+            StorageBackendKind::Memory,
+            None,
+            default_cluster(),
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+            inference,
+        )
+    }
+
+    fn enforced_tenant_state_with_inference(inference: InferenceConfig) -> Arc<AppState> {
+        let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
+        let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
+        let triples: Arc<dyn TripleRepository> =
+            Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        AppState::from_parts(
+            storage,
+            dictionary,
+            triples,
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator {
+                mode: AuthMode::Enforced,
+                api_key: Some("s3cret".to_owned()),
+                ..HeaderAuthenticator::default()
+            },
+            StorageBackendKind::Memory,
+            None,
+            default_cluster(),
+            InMemoryAuditLog::new(),
+            TenantMode::Enforced,
+            inference,
+        )
+    }
+
+    fn sparql_req_with(method: &str, query: &str, params: HashMap<String, String>) -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "content-type".to_owned(),
+            "application/sparql-query".to_owned(),
+        );
+        HttpRequest {
+            method: method.to_owned(),
+            path: "/sparql".to_owned(),
+            query: params,
+            headers,
+            body: query.as_bytes().to_vec(),
+        }
+    }
+
+    const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    const RDFS_SUBCLASS: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    const OWL_DISJOINT: &str = "http://www.w3.org/2002/07/owl#disjointWith";
 
     #[test]
     fn enforced_tenant_mode_isolates_reads_and_writes() {
@@ -2155,6 +2321,266 @@ mod tests {
         assert!(
             body.contains("\"pattern\":\"?s <http://ex.org/b> ?o\""),
             "body={body}"
+        );
+    }
+
+    #[test]
+    fn inference_forward_chain_materializes_query_results() {
+        let state = memory_state_with_inference(InferenceConfig::new(
+            InferenceMode::ForwardChaining,
+            64,
+            None,
+        ));
+        let insert = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!(
+                    "INSERT DATA {{ <http://ex.org/A> <{RDFS_SUBCLASS}> <http://ex.org/B> . <http://ex.org/x> <{RDF_TYPE}> <http://ex.org/A> }}"
+                ),
+            ),
+        );
+        assert_eq!(
+            insert.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&insert.body)
+        );
+
+        let query = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!("SELECT ?s WHERE {{ ?s <{RDF_TYPE}> <http://ex.org/B> }}"),
+            ),
+        );
+        assert_eq!(
+            query.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&query.body)
+        );
+        let body = String::from_utf8_lossy(&query.body);
+        assert!(
+            body.contains("\"row_count\":1"),
+            "inferred typing must be visible (row_count 1): {body}"
+        );
+        assert!(body.contains("\"s\":"), "subject binding present: {body}");
+        assert!(body.contains("\"reasoning\""), "reasoning meta: {body}");
+        assert!(body.contains("\"mode\":\"forward\""), "mode: {body}");
+        assert!(
+            body.contains("\"inferred_triples\":1"),
+            "inferred count: {body}"
+        );
+    }
+
+    #[test]
+    fn inference_default_off_and_query_param_override() {
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let insert = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!(
+                    "INSERT DATA {{ <http://ex.org/A> <{RDFS_SUBCLASS}> <http://ex.org/B> . <http://ex.org/x> <{RDF_TYPE}> <http://ex.org/A> }}"
+                ),
+            ),
+        );
+        assert_eq!(insert.status, 200);
+
+        // Default (off): the subClassOf typing is not materialized.
+        let base = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!("SELECT ?s WHERE {{ ?s <{RDF_TYPE}> <http://ex.org/B> }}"),
+            ),
+        );
+        let base_body = String::from_utf8_lossy(&base.body);
+        assert!(
+            !base_body.contains("\"row_count\":1"),
+            "off must not infer: {base_body}"
+        );
+        assert!(
+            !base_body.contains("\"reasoning\""),
+            "off must not emit reasoning meta: {base_body}"
+        );
+
+        // Per-request override turns reasoning on for one query.
+        let mut params = HashMap::new();
+        params.insert("inference".to_owned(), "forward".to_owned());
+        let overridden = dispatch_for_test(
+            &state,
+            sparql_req_with(
+                "POST",
+                &format!("SELECT ?s WHERE {{ ?s <{RDF_TYPE}> <http://ex.org/B> }}"),
+                params,
+            ),
+        );
+        let overridden_body = String::from_utf8_lossy(&overridden.body);
+        assert_eq!(overridden.status, 200, "body={overridden_body}");
+        assert!(
+            overridden_body.contains("\"row_count\":1"),
+            "override forward must infer (row_count 1): {overridden_body}"
+        );
+        assert!(
+            overridden_body.contains("\"mode\":\"forward\""),
+            "override meta: {overridden_body}"
+        );
+
+        // Invalid override is rejected.
+        let mut params = HashMap::new();
+        params.insert("inference".to_owned(), "bogus".to_owned());
+        let invalid = dispatch_for_test(
+            &state,
+            sparql_req_with(
+                "POST",
+                "SELECT ?s WHERE { ?s ?p ?o }",
+                params,
+            ),
+        );
+        assert_eq!(invalid.status, 400, "invalid override must 400");
+    }
+
+    #[test]
+    fn inference_reports_inconsistent_ontology() {
+        let state = memory_state_with_inference(InferenceConfig::new(
+            InferenceMode::ForwardChaining,
+            64,
+            None,
+        ));
+        let insert = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!(
+                    "INSERT DATA {{ <http://ex.org/A> <{OWL_DISJOINT}> <http://ex.org/B> . <http://ex.org/x> <{RDF_TYPE}> <http://ex.org/A> . <http://ex.org/x> <{RDF_TYPE}> <http://ex.org/B> }}"
+                ),
+            ),
+        );
+        assert_eq!(
+            insert.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&insert.body)
+        );
+
+        let query = dispatch_for_test(
+            &state,
+            sparql_req("POST", "SELECT ?s WHERE { ?s ?p ?o }"),
+        );
+        assert_eq!(query.status, 200);
+        let body = String::from_utf8_lossy(&query.body);
+        assert!(
+            body.contains("\"inconsistent\":true"),
+            "inconsistency must be surfaced: {body}"
+        );
+    }
+
+    #[test]
+    fn inference_elapsed_guard_marks_timed_out() {
+        let state = memory_state_with_inference(InferenceConfig::new(
+            InferenceMode::ForwardChaining,
+            64,
+            Some(0),
+        ));
+        let insert = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!(
+                    "INSERT DATA {{ <http://ex.org/A> <{RDFS_SUBCLASS}> <http://ex.org/B> . <http://ex.org/x> <{RDF_TYPE}> <http://ex.org/A> }}"
+                ),
+            ),
+        );
+        assert_eq!(insert.status, 200);
+
+        let query = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!("SELECT ?s WHERE {{ ?s <{RDF_TYPE}> <http://ex.org/B> }}"),
+            ),
+        );
+        assert_eq!(query.status, 200);
+        let body = String::from_utf8_lossy(&query.body);
+        assert!(
+            body.contains("\"reasoning\"") && body.contains("\"timed_out\":true"),
+            "elapsed guard must mark timed_out: {body}"
+        );
+    }
+
+    #[test]
+    fn inference_respects_tenant_isolation() {
+        let state = enforced_tenant_state_with_inference(InferenceConfig::new(
+            InferenceMode::ForwardChaining,
+            64,
+            None,
+        ));
+        let acme_write = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                format!(
+                    "INSERT DATA {{ <http://ex.org/A> <{RDFS_SUBCLASS}> <http://ex.org/B> . <http://ex.org/x> <{RDF_TYPE}> <http://ex.org/A> }}"
+                )
+                .as_bytes(),
+                "acme",
+                "u1",
+            ),
+        );
+        assert_eq!(acme_write.status, 200);
+        let other_write = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                format!(
+                    "INSERT DATA {{ <http://ex.org/C> <{RDFS_SUBCLASS}> <http://ex.org/D> . <http://ex.org/y> <{RDF_TYPE}> <http://ex.org/C> }}"
+                )
+                .as_bytes(),
+                "other",
+                "u2",
+            ),
+        );
+        assert_eq!(other_write.status, 200);
+
+        // acme's inference sees only its own closure: B-typing for x, never D.
+        let acme_read = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                format!("SELECT ?s WHERE {{ ?s <{RDF_TYPE}> <http://ex.org/B> }}").as_bytes(),
+                "acme",
+                "u1",
+            ),
+        );
+        let acme_body = String::from_utf8_lossy(&acme_read.body);
+        assert!(
+            acme_body.contains("\"row_count\":1"),
+            "acme must see its inferred B typing (row_count 1): {acme_body}"
+        );
+        let acme_foreign = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                format!("SELECT ?s WHERE {{ ?s <{RDF_TYPE}> <http://ex.org/D> }}").as_bytes(),
+                "acme",
+                "u1",
+            ),
+        );
+        let foreign_body = String::from_utf8_lossy(&acme_foreign.body);
+        assert!(
+            foreign_body.contains("\"row_count\":0"),
+            "acme must not see other tenant's inferred D typing: {foreign_body}"
         );
     }
 }

@@ -18,6 +18,26 @@ impl InferenceMode {
     pub const fn is_enabled(self) -> bool {
         !matches!(self, Self::Off)
     }
+
+    /// Stable transport/config spelling for the mode (P6-03).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::ForwardChaining => "forward",
+            Self::Hybrid => "hybrid",
+        }
+    }
+
+    /// Parse a config/query-parameter value. Accepts the stable spellings
+    /// (`off`/`forward`/`hybrid`) plus common aliases; case-insensitive.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" | "none" => Some(Self::Off),
+            "forward" | "forward-chaining" | "fc" => Some(Self::ForwardChaining),
+            "hybrid" => Some(Self::Hybrid),
+            _ => None,
+        }
+    }
 }
 
 /// RDFS/OWL RL rule identifiers supported by the forward-chaining engine.
