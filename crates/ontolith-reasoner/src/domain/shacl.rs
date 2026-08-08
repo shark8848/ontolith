@@ -43,6 +43,86 @@ impl Severity {
     }
 }
 
+/// SHACL property path expression (`sh:path`), per SHACL 1.0 §4.3.4. A path
+/// is either a plain predicate IRI or a blank node carrying one of the
+/// `sh:*Path` predicates (or an RDF list for sequences). Path semantics match
+/// SPARQL 1.1 property paths, with set (deduplicated) results.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PropertyPath {
+    /// Plain predicate IRI.
+    Predicate(String),
+    /// `sh:inversePath` — inverse of the inner path.
+    Inverse(Box<PropertyPath>),
+    /// RDF list of paths — sequence (`p1/p2`).
+    Sequence(Vec<PropertyPath>),
+    /// `sh:alternativePath` — union (`p1|p2`).
+    Alternative(Vec<PropertyPath>),
+    /// `sh:zeroOrMorePath` — reflexive transitive closure (`p*`).
+    ZeroOrMore(Box<PropertyPath>),
+    /// `sh:oneOrMorePath` — transitive closure (`p+`).
+    OneOrMore(Box<PropertyPath>),
+    /// `sh:zeroOrOnePath` — identity or one step (`p?`).
+    ZeroOrOne(Box<PropertyPath>),
+}
+
+impl PropertyPath {
+    /// Canonical string serialization shared by the engine and the W3C suite
+    /// harness for `sh:resultPath` comparison.
+    pub fn canonical(&self) -> String {
+        match self {
+            Self::Predicate(iri) => iri.clone(),
+            Self::Inverse(inner) => format!("^{}", parenthesize(inner)),
+            Self::Sequence(steps) => steps
+                .iter()
+                .map(parenthesize)
+                .collect::<Vec<_>>()
+                .join("/"),
+            Self::Alternative(branches) => branches
+                .iter()
+                .map(parenthesize)
+                .collect::<Vec<_>>()
+                .join("|"),
+            Self::ZeroOrMore(inner) => format!("{}*", parenthesize(inner)),
+            Self::OneOrMore(inner) => format!("{}+", parenthesize(inner)),
+            Self::ZeroOrOne(inner) => format!("{}?", parenthesize(inner)),
+        }
+    }
+
+    /// All leaf predicate IRIs of the path (used by `sh:closed`).
+    pub fn predicates(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_predicates(&mut out);
+        out
+    }
+
+    fn collect_predicates(&self, out: &mut Vec<String>) {
+        match self {
+            Self::Predicate(iri) => out.push(iri.clone()),
+            Self::Inverse(inner)
+            | Self::ZeroOrMore(inner)
+            | Self::OneOrMore(inner)
+            | Self::ZeroOrOne(inner) => inner.collect_predicates(out),
+            Self::Sequence(steps) => {
+                for p in steps {
+                    p.collect_predicates(out);
+                }
+            }
+            Self::Alternative(branches) => {
+                for p in branches {
+                    p.collect_predicates(out);
+                }
+            }
+        }
+    }
+}
+
+fn parenthesize(p: &PropertyPath) -> String {
+    match p {
+        PropertyPath::Predicate(_) => p.canonical(),
+        _ => format!("({})", p.canonical()),
+    }
+}
+
 /// RDF node kind required by `sh:nodeKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeKind {
@@ -179,8 +259,8 @@ pub struct PropertyShape {
     /// Shape subject key (IRI or blank-node label) — reported as
     /// `sh:sourceShape` for property-shape constraint results.
     pub id: String,
-    /// `sh:path` predicate.
-    pub path: String,
+    /// `sh:path` property path.
+    pub path: PropertyPath,
     pub constraints: Vec<ConstraintComponent>,
     /// Nested `sh:property` shapes: applied to the values of `path` as focus
     /// nodes (property shape nesting, e.g. `validation-reports/shared`).
@@ -197,7 +277,7 @@ pub struct Shape {
     pub targets: Vec<Target>,
     /// `Some(path)` when the shape itself carries `sh:path` (a standalone
     /// property shape): its constraints apply to the values of the path.
-    pub path: Option<String>,
+    pub path: Option<PropertyPath>,
     pub constraints: Vec<ConstraintComponent>,
     pub property_shapes: Vec<PropertyShape>,
     /// `sh:ignoredProperties` — extra predicates allowed by `sh:closed`.

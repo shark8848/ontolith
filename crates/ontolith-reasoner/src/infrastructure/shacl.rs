@@ -18,15 +18,15 @@
 
 use crate::application::ShaclValidator;
 use crate::domain::{
-    ConstraintComponent, NodeKind, PropertyShape, SHACL_NS, Severity, Shape, Target,
-    ValidationReport, ValidationResult, shacl,
+    ConstraintComponent, NodeKind, PropertyPath, PropertyShape, SHACL_NS, Severity, Shape,
+    Target, ValidationReport, ValidationResult, shacl,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Term, Triple};
 use ontolith_storage::application::DictionaryCodec;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
@@ -454,7 +454,7 @@ fn parse_property_shape(
     let Some(triples) = map.get(key) else {
         return PropertyShape {
             id: key.to_owned(),
-            path: String::new(),
+            path: PropertyPath::Predicate(String::new()),
             constraints: Vec::new(),
             property_shapes: Vec::new(),
             severity: Severity::Violation,
@@ -464,8 +464,8 @@ fn parse_property_shape(
     let path = triples
         .iter()
         .find(|(p, _)| p == &shacl("path"))
-        .and_then(|(_, o)| term_iri(o))
-        .unwrap_or_default();
+        .and_then(|(_, o)| parse_path(dict, map, o, &mut BTreeSet::new()))
+        .unwrap_or_else(|| PropertyPath::Predicate(String::new()));
     let (mut constraints, severity, message) = parse_shape_body(dict, map, triples);
     let mut property_shapes = Vec::new();
     // Property-shape only parameters (must not appear on node shapes).
@@ -691,7 +691,7 @@ fn parse_shapes(dict: &dyn DictionaryCodec, shapes: &[Triple]) -> Vec<Shape> {
         let path = triples
             .iter()
             .find(|(p, _)| p == &shacl("path"))
-            .and_then(|(_, o)| term_iri(o));
+            .and_then(|(_, o)| parse_path(dict, &map, o, &mut BTreeSet::new()));
         for (p, o) in triples {
             match p.as_str() {
                 x if x == shacl("targetClass") => {
@@ -819,17 +819,200 @@ fn is_instance_of(dict: &dyn DictionaryCodec, data: &[Triple], node: &str, class
     false
 }
 
-/// All `(key, term)` value nodes of `path` for the focus node.
+/// Parse a SHACL property path expression from a term. An RDF list head
+/// (`rdf:first`) takes precedence over the `sh:*Path` predicates per the W3C
+/// suite (path-strange-001/002); malformed or recursive path definitions
+/// return `None` and the owning shape degrades to a node shape.
+fn parse_path(
+    dict: &dyn DictionaryCodec,
+    map: &HashMap<String, Vec<(String, Term)>>,
+    term: &Term,
+    visiting: &mut BTreeSet<String>,
+) -> Option<PropertyPath> {
+    match term {
+        Term::Iri(iri) => Some(PropertyPath::Predicate(iri.as_str().to_owned())),
+        Term::BlankNode(_) => {
+            let key = term_key(dict, term);
+            if !visiting.insert(key.clone()) {
+                return None;
+            }
+            let result = parse_path_node(dict, map, term, &key, visiting);
+            visiting.remove(&key);
+            result
+        }
+        Term::Literal(_) => None,
+    }
+}
+
+fn parse_path_node(
+    dict: &dyn DictionaryCodec,
+    map: &HashMap<String, Vec<(String, Term)>>,
+    term: &Term,
+    key: &str,
+    visiting: &mut BTreeSet<String>,
+) -> Option<PropertyPath> {
+    let triples = map.get(key)?;
+    // Sequence path: the node is the head of an RDF list.
+    if triples.iter().any(|(p, _)| p == RDF_FIRST) {
+        let members = collect_list(dict, map, term);
+        let steps: Option<Vec<PropertyPath>> = members
+            .iter()
+            .map(|m| parse_path(dict, map, m, visiting))
+            .collect();
+        return steps.map(PropertyPath::Sequence);
+    }
+    let mut result = None;
+    for (p, o) in triples {
+        match p.as_str() {
+            x if x == shacl("inversePath") => {
+                result = parse_path(dict, map, o, visiting).map(Box::new).map(PropertyPath::Inverse);
+                break;
+            }
+            x if x == shacl("alternativePath") => {
+                let branches: Option<Vec<PropertyPath>> = collect_list(dict, map, o)
+                    .iter()
+                    .map(|m| parse_path(dict, map, m, visiting))
+                    .collect();
+                result = branches.map(PropertyPath::Alternative);
+                break;
+            }
+            x if x == shacl("zeroOrMorePath") => {
+                result = parse_path(dict, map, o, visiting).map(Box::new).map(PropertyPath::ZeroOrMore);
+                break;
+            }
+            x if x == shacl("oneOrMorePath") => {
+                result = parse_path(dict, map, o, visiting).map(Box::new).map(PropertyPath::OneOrMore);
+                break;
+            }
+            x if x == shacl("zeroOrOnePath") => {
+                result = parse_path(dict, map, o, visiting).map(Box::new).map(PropertyPath::ZeroOrOne);
+                break;
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+/// All distinct `(key, term)` value nodes reachable via `path` from `focus`
+/// (SPARQL property-path semantics: set results, duplicates removed).
 fn path_values(
     dict: &dyn DictionaryCodec,
     data: &[Triple],
     focus: &str,
-    path: &str,
+    path: &PropertyPath,
 ) -> Vec<(String, Term)> {
-    data.iter()
-        .filter(|t| subject_key(dict, t.subject) == focus && t.predicate.as_str() == path)
-        .map(|t| (term_key(dict, &t.object), t.object.clone()))
-        .collect()
+    let mut out: Vec<(String, Term)> = Vec::new();
+    eval_path(
+        dict,
+        data,
+        path,
+        &[(focus.to_owned(), focus_as_term(focus))],
+        &mut out,
+        false,
+    );
+    let mut dedup: BTreeMap<String, Term> = BTreeMap::new();
+    for (k, t) in out {
+        dedup.entry(k).or_insert(t);
+    }
+    dedup.into_iter().collect()
+}
+
+/// Expand `path` from every node in `frontier`, appending reachable nodes to
+/// `out`. `inverse` flips the traversal direction (used by `sh:inversePath`).
+fn eval_path(
+    dict: &dyn DictionaryCodec,
+    data: &[Triple],
+    path: &PropertyPath,
+    frontier: &[(String, Term)],
+    out: &mut Vec<(String, Term)>,
+    inverse: bool,
+) {
+    match path {
+        PropertyPath::Predicate(pred) => {
+            for (nkey, _) in frontier {
+                if inverse {
+                    for t in data {
+                        if t.predicate.as_str() == pred && term_key(dict, &t.object) == *nkey {
+                            let k = subject_key(dict, t.subject);
+                            out.push((k.clone(), focus_as_term(&k)));
+                        }
+                    }
+                } else {
+                    for t in data {
+                        if t.predicate.as_str() == pred && subject_key(dict, t.subject) == *nkey {
+                            out.push((term_key(dict, &t.object), t.object.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        PropertyPath::Inverse(inner) => eval_path(dict, data, inner, frontier, out, !inverse),
+        PropertyPath::Sequence(steps) => {
+            let mut current: Vec<(String, Term)> = frontier.to_vec();
+            if inverse {
+                for step in steps.iter().rev() {
+                    let mut next = Vec::new();
+                    eval_path(dict, data, step, &current, &mut next, true);
+                    current = next;
+                }
+            } else {
+                for step in steps {
+                    let mut next = Vec::new();
+                    eval_path(dict, data, step, &current, &mut next, false);
+                    current = next;
+                }
+            }
+            out.extend(current);
+        }
+        PropertyPath::Alternative(branches) => {
+            for branch in branches {
+                eval_path(dict, data, branch, frontier, out, inverse);
+            }
+        }
+        PropertyPath::ZeroOrMore(inner) => {
+            closure(dict, data, inner, frontier, out, inverse, true);
+        }
+        PropertyPath::OneOrMore(inner) => {
+            closure(dict, data, inner, frontier, out, inverse, false);
+        }
+        PropertyPath::ZeroOrOne(inner) => {
+            out.extend(frontier.iter().cloned());
+            eval_path(dict, data, inner, frontier, out, inverse);
+        }
+    }
+}
+
+/// Transitive closure of `inner` from `frontier` (`p*` when `include_self`,
+/// `p+` otherwise). `expanded` guards each closure locally so cyclic data
+/// graphs terminate.
+fn closure(
+    dict: &dyn DictionaryCodec,
+    data: &[Triple],
+    inner: &PropertyPath,
+    frontier: &[(String, Term)],
+    out: &mut Vec<(String, Term)>,
+    inverse: bool,
+    include_self: bool,
+) {
+    let mut queue: VecDeque<(String, Term)> = frontier.iter().cloned().collect();
+    let mut expanded: BTreeSet<String> = BTreeSet::new();
+    if include_self {
+        out.extend(frontier.iter().cloned());
+    }
+    while let Some((nkey, nterm)) = queue.pop_front() {
+        if !expanded.insert(nkey.clone()) {
+            continue;
+        }
+        let mut next = Vec::new();
+        eval_path(dict, data, inner, &[(nkey, nterm)], &mut next, inverse);
+        for (k, t) in next {
+            out.push((k.clone(), t.clone()));
+            if !expanded.contains(&k) {
+                queue.push_back((k, t));
+            }
+        }
+    }
 }
 
 fn default_message(component: &str, detail: &str) -> String {
@@ -1157,7 +1340,7 @@ fn check_values(
             }
         }
         ConstraintComponent::Equals(other_path) => {
-            let other = path_values(dict, data, focus, other_path);
+            let other = path_values(dict, data, focus, &PropertyPath::Predicate(other_path.clone()));
             for (vkey, _) in values {
                 if !other.iter().any(|(k, _)| k == vkey) {
                     push_result(
@@ -1190,7 +1373,7 @@ fn check_values(
             }
         }
         ConstraintComponent::Disjoint(other_path) => {
-            let other = path_values(dict, data, focus, other_path);
+            let other = path_values(dict, data, focus, &PropertyPath::Predicate(other_path.clone()));
             for (vkey, _) in values {
                 if other.iter().any(|(k, _)| k == vkey) {
                     push_result(
@@ -1208,7 +1391,7 @@ fn check_values(
             }
         }
         ConstraintComponent::LessThan(other_path) => {
-            let other = path_values(dict, data, focus, other_path);
+            let other = path_values(dict, data, focus, &PropertyPath::Predicate(other_path.clone()));
             for (vkey, v) in values {
                 let ok = other
                     .iter()
@@ -1229,7 +1412,7 @@ fn check_values(
             }
         }
         ConstraintComponent::LessThanOrEquals(other_path) => {
-            let other = path_values(dict, data, focus, other_path);
+            let other = path_values(dict, data, focus, &PropertyPath::Predicate(other_path.clone()));
             for (vkey, v) in values {
                 let ok = other.iter().all(|(_, u)| {
                     matches!(
@@ -1543,8 +1726,11 @@ fn check_values(
                 .iter()
                 .find(|s| s.id == *source_shape.unwrap_or(""))
                 .map(|s| {
-                    let mut paths: Vec<String> =
-                        s.property_shapes.iter().map(|ps| ps.path.clone()).collect();
+                    let mut paths: Vec<String> = s
+                        .property_shapes
+                        .iter()
+                        .flat_map(|ps| ps.path.predicates())
+                        .collect();
                     paths.extend(s.ignored_properties.iter().cloned());
                     paths
                 })
@@ -1680,13 +1866,14 @@ fn evaluate_shape(
     if let Some(path) = &shape.path {
         // Standalone property shape: constraints apply to values of the path.
         let values = path_values(dict, data, focus, path);
+        let path_str = path.canonical();
         for c in &shape.constraints {
             check_values(
                 dict,
                 data,
                 shapes,
                 focus,
-                Some(path),
+                Some(path_str.as_str()),
                 &values,
                 c,
                 Some(&shape.id),
@@ -1745,13 +1932,14 @@ fn evaluate_property_shape(
         return;
     }
     let values = path_values(dict, data, focus, &ps.path);
+    let path_str = ps.path.canonical();
     for c in &ps.constraints {
         check_values(
             dict,
             data,
             shapes,
             focus,
-            Some(&ps.path),
+            Some(path_str.as_str()),
             &values,
             c,
             Some(&ps.id),
@@ -3176,5 +3364,191 @@ mod tests {
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].focus_node, "http://ex.org/i3");
+    }
+
+    #[test]
+    fn inverse_path_evaluates_backwards() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:NodeShape ; sh:targetClass ex:Child ;
+                    sh:property [ sh:path [ sh:inversePath ex:parent ] ; sh:minCount 2 ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:c1 a ex:Child .
+                ex:c2 a ex:Child .
+                ex:parent1 ex:parent ex:c1 ; ex:parent ex:c2 .
+                ex:parent2 ex:parent ex:c2 ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].focus_node, "http://ex.org/c1");
+        assert_eq!(
+            report.results[0].path.as_deref(),
+            Some("^http://ex.org/parent")
+        );
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#MinCountConstraintComponent"
+        );
+    }
+
+    #[test]
+    fn sequence_path_deduplicates_values() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:NodeShape ; sh:targetNode ex:A ;
+                    sh:property [ sh:path ( ex:p1 ex:p2 ) ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ."
+            ),
+            &format!(
+                "{SH}
+                ex:A ex:p1 _:b1, _:b2 .
+                _:b1 ex:p2 \"value\" .
+                _:b2 ex:p2 \"value\" ."
+            ),
+        );
+        // Both routes reach the same literal, so the path value set has a
+        // single member: maxCount 1 holds and only nodeKind fails.
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#NodeKindConstraintComponent"
+        );
+        assert_eq!(
+            report.results[0].path.as_deref(),
+            Some("http://ex.org/p1/http://ex.org/p2")
+        );
+    }
+
+    #[test]
+    fn zero_or_more_path_includes_focus() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:PropertyShape ;
+                    sh:path [ sh:zeroOrMorePath ex:child ] ;
+                    sh:minCount 2 ;
+                    sh:targetNode ex:leaf .
+                "
+            ),
+            &format!("{SH} ex:leaf a ex:Item . ex:node ex:child ex:leaf ."),
+        );
+        // rdf:rest* from ex:leaf is { ex:leaf } only (reflexive) -> 1 value.
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(
+            report.results[0].path.as_deref(),
+            Some("http://ex.org/child*")
+        );
+    }
+
+    #[test]
+    fn alternative_path_unions_branches() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:PropertyShape ;
+                    sh:path [ sh:alternativePath ( ex:p ex:q ) ] ;
+                    sh:minCount 2 ;
+                    sh:targetNode ex:A ."
+            ),
+            &format!(
+                "{SH}
+                ex:A ex:p \"one\" ; ex:q \"two\" ."
+            ),
+        );
+        assert!(report.conforms);
+        assert!(report.results.is_empty());
+    }
+
+    #[test]
+    fn one_or_more_path_requires_a_step() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:PropertyShape ;
+                    sh:path [ sh:oneOrMorePath ex:child ] ;
+                    sh:minCount 1 ;
+                    sh:targetNode ex:leaf .
+                "
+            ),
+            &format!("{SH} ex:leaf a ex:Item . ex:node ex:child ex:leaf ."),
+        );
+        // ex:leaf has no child: oneOrMore yields no values.
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(
+            report.results[0].component,
+            "http://www.w3.org/ns/shacl#MinCountConstraintComponent"
+        );
+    }
+
+    #[test]
+    fn zero_or_one_path_keeps_identity() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:PropertyShape ;
+                    sh:path [ sh:zeroOrOnePath ex:parent ] ;
+                    sh:class ex:Root ;
+                    sh:targetNode ex:A ."
+            ),
+            &format!(
+                "{SH}
+                ex:A a ex:Root ; ex:parent ex:parent ."
+            ),
+        );
+        // Values are { ex:A, ex:parent }: the identity value conforms to the
+        // class, the parent does not.
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].value.as_deref(), Some("http://ex.org/parent"));
+    }
+
+    #[test]
+    fn complex_path_result_reports_canonical_path() {
+        let dict = InMemoryDictionary::new();
+        let report = validate(
+            &dict,
+            &format!(
+                "{SH}
+                ex:TestShape a sh:PropertyShape ;
+                    sh:path ( [ sh:inversePath ex:p ] [ sh:inversePath ex:p ] ) ;
+                    sh:class ex:C ;
+                    sh:targetNode ex:i ."
+            ),
+            &format!(
+                "{SH}
+                ex:j ex:p ex:i .
+                ex:k ex:p ex:j .
+                ex:l ex:p ex:j ."
+            ),
+        );
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|r| r.path.as_deref()
+                    == Some("(^http://ex.org/p)/(^http://ex.org/p)")
+                    && r.component == "http://www.w3.org/ns/shacl#ClassConstraintComponent")
+        );
     }
 }

@@ -22,7 +22,7 @@ use ontolith_parser::application::RdfParser;
 use ontolith_parser::domain::ParseRequest;
 use ontolith_parser::infrastructure::BasicRdfParser;
 use ontolith_reasoner::application::ShaclValidator;
-use ontolith_reasoner::domain::ValidationResult;
+use ontolith_reasoner::domain::{PropertyPath, ValidationResult, shacl};
 use ontolith_reasoner::infrastructure::ShaclEngine;
 use ontolith_rdf::domain::{Term, Triple};
 use ontolith_storage::application::DictionaryCodec;
@@ -31,6 +31,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 const MF_ACTION: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#action";
 const MF_RESULT: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#result";
 const SHT_VALIDATE: &str = "http://www.w3.org/ns/shacl-test#Validate";
@@ -291,12 +293,7 @@ fn expected_result_signature(
         .ok_or_else(|| FailReason::Other(format!("expected result {result_node} lacks focusNode")))?;
     let path = match get(SH_RESULT_PATH) {
         None => None,
-        Some(Term::BlankNode(_)) => {
-            return Err(FailReason::Unsupported(
-                "property-path result paths (sh:resultPath as list)".to_owned(),
-            ))
-        }
-        Some(o) => Some(term_key(dict, o)),
+        Some(o) => Some(expected_path(dict, map, o, &mut BTreeSet::new())?.canonical()),
     };
     let component = get(SH_SOURCE_CC)
         .and_then(term_iri)
@@ -314,6 +311,138 @@ fn expected_result_signature(
         value,
         source_shape,
     })
+}
+
+/// Resolve an RDF collection starting at `start` into its members.
+fn collect_expected_list(
+    dict: &dyn DictionaryCodec,
+    map: &GraphMap,
+    start: &Term,
+) -> Vec<Term> {
+    let mut out = Vec::new();
+    let mut cur = start.clone();
+    let mut seen = BTreeSet::new();
+    loop {
+        let key = term_key(dict, &cur);
+        if !seen.insert(key.clone()) {
+            break;
+        }
+        let Some(triples) = map.get(&key) else {
+            break;
+        };
+        let first = triples
+            .iter()
+            .find(|(p, _)| p == RDF_FIRST)
+            .map(|(_, o)| o.clone());
+        let rest = triples
+            .iter()
+            .find(|(p, _)| p == RDF_REST)
+            .map(|(_, o)| o.clone());
+        match (first, rest) {
+            (Some(f), Some(r)) => {
+                out.push(f);
+                cur = r;
+            }
+            (Some(f), None) => {
+                out.push(f);
+                break;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+/// Parse a SHACL property path from an expected `sh:resultPath` node (mirrors
+/// the engine's `parse_path`: `rdf:first` sequences take precedence over the
+/// `sh:*Path` predicates).
+fn expected_path(
+    dict: &dyn DictionaryCodec,
+    map: &GraphMap,
+    term: &Term,
+    visiting: &mut BTreeSet<String>,
+) -> Result<PropertyPath, FailReason> {
+    match term {
+        Term::Iri(iri) => Ok(PropertyPath::Predicate(iri.as_str().to_owned())),
+        Term::BlankNode(_) => {
+            let key = term_key(dict, term);
+            if !visiting.insert(key.clone()) {
+                return Err(FailReason::Unsupported(
+                    "recursive expected result path".to_owned(),
+                ));
+            }
+            let triples = map.get(&key).ok_or_else(|| {
+                FailReason::Other(format!("expected result path node {key} missing"))
+            })?;
+            let result = if triples.iter().any(|(p, _)| p == RDF_FIRST) {
+                let members = collect_expected_list(dict, map, term);
+                let steps: Result<Vec<PropertyPath>, _> = members
+                    .iter()
+                    .map(|m| expected_path(dict, map, m, visiting))
+                    .collect();
+                steps.map(PropertyPath::Sequence)
+            } else {
+                let mut found: Option<Result<PropertyPath, FailReason>> = None;
+                for (p, o) in triples {
+                    match p.as_str() {
+                        x if x == shacl("inversePath") => {
+                            found = Some(
+                                expected_path(dict, map, o, visiting)
+                                    .map(Box::new)
+                                    .map(PropertyPath::Inverse),
+                            );
+                            break;
+                        }
+                        x if x == shacl("alternativePath") => {
+                            let branches: Result<Vec<PropertyPath>, _> =
+                                collect_expected_list(dict, map, o)
+                                    .iter()
+                                    .map(|m| expected_path(dict, map, m, visiting))
+                                    .collect();
+                            found = Some(branches.map(PropertyPath::Alternative));
+                            break;
+                        }
+                        x if x == shacl("zeroOrMorePath") => {
+                            found = Some(
+                                expected_path(dict, map, o, visiting)
+                                    .map(Box::new)
+                                    .map(PropertyPath::ZeroOrMore),
+                            );
+                            break;
+                        }
+                        x if x == shacl("oneOrMorePath") => {
+                            found = Some(
+                                expected_path(dict, map, o, visiting)
+                                    .map(Box::new)
+                                    .map(PropertyPath::OneOrMore),
+                            );
+                            break;
+                        }
+                        x if x == shacl("zeroOrOnePath") => {
+                            found = Some(
+                                expected_path(dict, map, o, visiting)
+                                    .map(Box::new)
+                                    .map(PropertyPath::ZeroOrOne),
+                            );
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                found
+                    .unwrap_or_else(|| {
+                        Err(FailReason::Unsupported(
+                            "unparseable expected result path".to_owned(),
+                        ))
+                    })
+            };
+            visiting.remove(&key);
+            result
+        }
+        Term::Literal(_) => Err(FailReason::Unsupported(
+            "literal expected result path".to_owned(),
+        )),
+    }
 }
 
 fn expected_results(
