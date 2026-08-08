@@ -248,6 +248,12 @@ impl SparqlServiceTrait for SparqlGateway {
                 "off"
             }
             .into(),
+            oidc: if self.app.authenticator.jwt_oidc.is_some() {
+                "on"
+            } else {
+                "off"
+            }
+            .into(),
             tracing: "on".into(),
         }))
     }

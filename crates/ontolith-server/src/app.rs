@@ -414,7 +414,7 @@ impl AppState {
             200,
             "OK",
             format!(
-                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"jwt":{},"tracing":"on","data_dir":{}}}"#,
+                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"jwt":{},"oidc":{},"tracing":"on","data_dir":{}}}"#,
                 json_string(&self.bind_address),
                 json_string(self.backend.as_str()),
                 stats.triple_count,
@@ -428,6 +428,11 @@ impl AppState {
                 json_string(match &self.authenticator.jwt_secret {
                     Some(_) => "on",
                     None => "off",
+                }),
+                json_string(if self.authenticator.jwt_oidc.is_some() {
+                    "on"
+                } else {
+                    "off"
                 }),
                 match &self.data_dir {
                     Some(p) => json_string(&p.display().to_string()),
@@ -1790,6 +1795,7 @@ pub fn dispatch_for_test(state: &Arc<AppState>, req: HttpRequest) -> HttpRespons
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ontolith_security::infrastructure::{CachingJwks, Jwks, JwksFetcher, JwksVerifier};
     use std::collections::HashMap;
 
     fn sparql_req(method: &str, query: &str) -> HttpRequest {
@@ -2136,6 +2142,21 @@ mod tests {
         }
     }
 
+    fn oidc_verifier(jwks_json: &str) -> JwksVerifier {
+        struct StaticFetcher(String);
+        impl JwksFetcher for StaticFetcher {
+            fn get(&self, _url: &str) -> Result<String, String> {
+                Ok(self.0.clone())
+            }
+        }
+        let jwks = Jwks::from_json(jwks_json).expect("jwks");
+        JwksVerifier::new(
+            CachingJwks::new(jwks, std::time::Duration::from_secs(1)),
+            "test://jwks",
+            Arc::new(StaticFetcher(jwks_json.to_owned())),
+        )
+    }
+
     #[test]
     fn jwt_bearer_token_authenticates_requests() {
         use ontolith_security::infrastructure::sign_tenant_token;
@@ -2161,6 +2182,71 @@ mod tests {
         let body = String::from_utf8_lossy(&resp.body);
         assert!(body.contains("\"auth_mode\":\"enforced\""), "body={body}");
         assert!(body.contains("\"jwt\":\"on\""), "body={body}");
+        assert!(body.contains("\"oidc\":\"off\""), "body={body}");
+    }
+
+    #[test]
+    fn oidc_jwks_bearer_authenticates_requests() {
+        use ontolith_security::infrastructure::sign_tenant_token;
+
+        let secret = "0123456789abcdef";
+        let verifier = oidc_verifier(
+            r#"{"keys":[{"kty":"oct","kid":"k1","alg":"HS256","k":"MDEyMzQ1Njc4OWFiY2RlZg"}]}"#,
+        );
+        let state = AppState::new_memory_with_audit(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator {
+                mode: AuthMode::Enforced,
+                jwt_oidc: Some(verifier),
+                jwt_issuer: Some("https://idp.example".to_owned()),
+                jwt_audience: Some("ontolith-server".to_owned()),
+                ..HeaderAuthenticator::default()
+            },
+            InMemoryAuditLog::new(),
+            TenantMode::Enforced,
+        );
+        let token = sign_tenant_token(
+            "acme",
+            "alice",
+            secret,
+            "https://idp.example",
+            "ontolith-server",
+            300,
+        )
+        .unwrap();
+
+        // The JWKS-verified bearer token alone authenticates.
+        let resp = dispatch_for_test(&state, jwt_req("GET", "/health", b"", &token));
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("\"auth_mode\":\"enforced\""), "body={body}");
+        assert!(body.contains("\"oidc\":\"on\""), "body={body}");
+
+        // A key set that does not match the token must reject it.
+        let wrong =
+            oidc_verifier(r#"{"keys":[{"kty":"oct","kid":"other","alg":"HS256","k":"c2VjcmV0"}]}"#);
+        let bad_state = AppState::new_memory_with_audit(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator {
+                mode: AuthMode::Enforced,
+                jwt_oidc: Some(wrong),
+                ..HeaderAuthenticator::default()
+            },
+            InMemoryAuditLog::new(),
+            TenantMode::Enforced,
+        );
+        let resp = dispatch_for_test(&bad_state, jwt_req("GET", "/health", b"", &token));
+        assert_eq!(
+            resp.status,
+            401,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
     }
 
     #[test]

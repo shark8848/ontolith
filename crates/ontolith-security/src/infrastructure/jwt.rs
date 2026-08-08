@@ -28,6 +28,8 @@ pub struct JwtClaims {
     pub audience: Option<String>,
     /// `exp` unix seconds (absent = no expiry).
     pub expires_at: Option<i64>,
+    /// `nbf` unix seconds (absent = valid immediately).
+    pub not_before: Option<i64>,
 }
 
 /// Verification policy for [`verify_hs256`].
@@ -43,7 +45,7 @@ pub struct JwtVerifyOptions {
 // Base64url (RFC 4648 §5, no padding).
 // ---------------------------------------------------------------------------
 
-fn base64url_decode(input: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn base64url_decode(input: &str) -> Result<Vec<u8>, String> {
     let mut compact = String::with_capacity(input.len());
     for c in input.chars() {
         match c {
@@ -129,7 +131,7 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-fn sha256(message: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(message: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
@@ -206,7 +208,7 @@ fn sha256(message: &[u8]) -> [u8; 32] {
 // HMAC-SHA256 (RFC 2104).
 // ---------------------------------------------------------------------------
 
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut key = key.to_vec();
     if key.len() > 64 {
         key = sha256(&key).to_vec();
@@ -227,7 +229,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 }
 
 /// Constant-time byte comparison.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -242,14 +244,14 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // JWT.
 // ---------------------------------------------------------------------------
 
-fn now_epoch() -> i64 {
+pub(crate) fn now_epoch() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
 
-fn parse_claims(payload: &Value) -> Result<JwtClaims, OntolithError> {
+pub(crate) fn parse_claims(payload: &Value) -> Result<JwtClaims, OntolithError> {
     let sub = payload
         .get("sub")
         .and_then(Value::as_str)
@@ -284,6 +286,7 @@ fn parse_claims(payload: &Value) -> Result<JwtClaims, OntolithError> {
         .and_then(Value::as_str)
         .map(str::to_owned);
     let expires_at = payload.get("exp").and_then(Value::as_i64);
+    let not_before = payload.get("nbf").and_then(Value::as_i64);
     Ok(JwtClaims {
         sub,
         tenant,
@@ -292,6 +295,7 @@ fn parse_claims(payload: &Value) -> Result<JwtClaims, OntolithError> {
         issuer,
         audience,
         expires_at,
+        not_before,
     })
 }
 

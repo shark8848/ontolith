@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.33  
+版本: 0.1.34  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -73,7 +73,7 @@
 |--------|------|--------|----------|
 | P0 | L0–L3 底层收尾（编码/字典契约✅、存储 MVCC 版本链✅；查询代价模型与高级 Update、W3C 欠账提 PASS） | TBD | 进行中 |
 | P1 | L4 集群多进程 Raft 实施（P4-02 **M1–M3 完成**：openraft 适配 → 多进程 HTTP RPC + RocksDB raft CF + snapshot install → 默认运行时切换 + CI 三进程 smoke） | TBD | TBD |
-| P2 | L5 应用层安全与隔离（P5-01 gRPC 网关 **完成**、P5-02 OIDC/JWT **完成**、P5-03 强制租户隔离 **完成**、P5-05 Tracing 全链路 **完成**） | 进行中 | 90% |
+| P2 | L5 应用层安全与隔离（P5-01 gRPC 网关 **完成**、P5-02 OIDC/JWT **完成**、**OIDC 完整链路 R2+ 完成**、P5-03 强制租户隔离 **完成**、P5-05 Tracing 全链路 **完成**） | 进行中 | 100% |
 | P3 | L6 推理应用化（P6-01 规则扩展 **完成** → P6-03 接入 server 查询/推理管线 **完成** → P6-02 SHACL 核心组件补全 + W3C SHACL 套件接入 **完成** → 属性路径表达式与 shacl-shacl 元校验 **完成**（97/98 基线 profile 锁定）） | 进行中 | 100% |
 | P4 | L7 运维演练与发布（P7-01/04 演练与运维手册 **完成**、P7-02 阈值断言/趋势记录 **完成**、P7-03 发布/回滚手册 **完成**） | 进行中 | 70% |
 
@@ -307,6 +307,7 @@
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-08 | Codex | **OIDC 完整链路 R2+ DONE（R1 唯一剩余项勾选完成）**：`crates/ontolith-security/src/infrastructure/oidc.rs`（~760 行，无第三方 JWT 依赖）——RFC 7517 JWKS/JWK（kid+alg 选键、RSA/oct 可用、EC/OKP 解析期过滤 fail-fast）、RS256 自研无依赖大整数 RSA 验签（RFC 7515 A.2.1 官方向量背书；调试期发现样例 signing input 必须保留 JSON 换行缩进 `LA0K…`，Python cryptography 独立复核后修复）、HS256 复用树内 HMAC、`exp`/`nbf`/`iss`/`aud` 策略（`JwtClaims.not_before` + `ONTOLITH_JWT_LEEWAY_SECS`）、RFC 8414 发现文档 issuer 强制匹配、`JwksFetcher`/`CachingJwks`/`JwksVerifier` TTL 缓存刷新（坏响应保留旧钥）；server 接线 `ONTOLITH_OIDC_ISSUER`/`AUDIENCE`/`JWKS_URL`/`CACHE_TTL_SECS`（file:// 快照 + http:// 树内抓取，https 明确拒绝启动并文档化反向代理路径），`HeaderAuthenticator.jwt_oidc` 优先于共享密钥 HS256；`/health`（HTTP+管理面）与 gRPC `HealthResponse` 暴露 `oidc` 姿态；security 18→24、server 44→49 测，workspace 全量 20 套件全绿，clippy 零警告，`--no-default-features` 构建通过；[L5-ontolith-access-security.md](./L5-ontolith-access-security.md) §2 OIDC 小节 + env 契约 + 限制；PROGRESS.md 0.1.33→0.1.34 |
 | 2026-08-08 | Codex | **R1 正式验收包 DONE**：`docs/R1-acceptance-package.md`（ACC-R1-0001）+ `scripts/acceptance-r1.sh`（G1 fmt/clippy → G2 workspace 全量 → G3 w3c11 492/492 + shacl 97/98 → G4 内存 INSERT/SELECT 闭环 → G5 RocksDB reopen 持久闭环）首次执行 `=== ACCEPTANCE PASS ===`（20 个 test binary 全 ok 共 400 测、drift=0）。验收中发现并修复 HTTP 结果 JSON 缺陷：`/sparql` SELECT/CONSTRUCT 将存储的 IRI 主语渲染为 bnode（`bound_value_json`/CONSTRUCT 主语渲染未走 `DictionaryCodec::decode_node`，W3C 套件进程内比较有解码故未暴露）；`sparql_results_json`/`bound_value_json` 增字典参数按解码判定 uri/bnode（与引擎 `node_id_term` 同语义），gRPC 调用点同步，新增回归测试 `sparql_http_json_renders_stored_iri_subject_as_uri`（server 43→44 测）；另全仓对齐当前 stable rustfmt 1.9.0 规范格式（24 文件纯格式化）。R1 退出标准全表勾选完成（唯一剩余：OIDC 完整链路 R2+），R1 判定上修至 ~95%；PROGRESS.md 0.1.32→0.1.33 |
 | 2026-08-08 | Codex | **P7-03 实际发布回滚演练 DRILL PASS**：`scripts/release-rollback-drill.sh`（入库，staging 隔离，不触碰生产）——V_new=9fac343（含 L7 `shard_map_epoch` 指纹，count=2）→ 部署 + `INSERT DATA` 写入 + 备份 + 重启持久断言（`/health triples=1`）→ 代码级回滚 V_prev=ec1d539（`git archive` + touch 强制重编译，指纹 count=0；数据目录未动，triples 仍 1）→ 数据级回滚（`mv data data-sim-corrupt` 模拟损坏断言 0 → `rm -rf` + 干净 `cp -a` 恢复断言 1）→ 恢复 V_new（triples=1、指纹 2）→ 重建 HEAD 回 `target/release` 并指纹验证；踩坑固化：共享 CARGO_TARGET_DIR mtime 新鲜度陷阱（touch 强制重建）、`grep -q`+pipefail SIGPIPE 偶发误报（改 `grep -c` 计数）、数据恢复用 mv/rm/cp 避免 cp -a 嵌套；记录回填 [L7-release-rollback.md](./L7-release-rollback.md) §3.4，R1 判定上修至 ~90%（剩余：正式验收包、OIDC 完整链路 R2+）；PROGRESS.md 0.1.31→0.1.32 |
 | 2026-08-08 | Codex | R1 收尾：幂等写入验证——`InMemoryStorageEngine` 4 测（同批重复 Put 去重、提交后重放去重、重复 commit 拒绝且不重复、Delete 不存在 no-op、Quad 去重+删除幂等）+ `RocksDbStorageEngine` 1 测（重复 Put/重放去重、absent delete no-op、双 delete、索引 CF 一致、reopen 持久）；storage 46→51 测，workspace 全量测试通过，clippy 零警告。核心 SLO 基线达标：真实窗口实测（20 样本 × 1s）success 100%、p95=0ms、max=3ms（阈值 250ms），短窗与天/周窗口评估双通过，基线与结论回填 [L5-management-platform-slo.md](./L5-management-platform-slo.md) §5。R1 退出标准全表勾选：SPARQL 查询基线 / 单区域集群核心 / 标准符合性门禁（492/492 全绿）/ 核心 SLO 基线 / 恢复演练 转已完成，R1 判定上修至 ~85–88%（剩余：正式验收包、OIDC 完整链路 R2+、实际发布回滚演练待首次发布）；PROGRESS.md 0.1.30→0.1.31
@@ -483,7 +484,7 @@
 - [x] SPARQL Update 基线（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE，W3C must-pass 30/30、skip=0）
 - [x] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）：`drill-rebalance-dr.sh` 真实 3 进程 raft DRILL PASS + [L7-ops-rebalance-dr.md](./L7-ops-rebalance-dr.md)（2026-08-08）
 - [x] 发布流水线与回滚演练通过（P7-03）：[L7-release-rollback.md](./L7-release-rollback.md) 代码级/数据级回滚流程与验证判据 + **实际演练 DRILL PASS**（2026-08-08：[`scripts/release-rollback-drill.sh`](../scripts/release-rollback-drill.sh) staging 全流程，`/health triples` 1→1→0→1、二进制指纹 2→0→2）
-- [x] R1 退出标准全表勾选（2026-08-08）：SPARQL 查询基线 / 单区域集群核心 / 标准符合性门禁 / 核心 SLO 基线 / 恢复演练 / **实际发布回滚演练**（`release-rollback-drill.sh` staging DRILL PASS）/ **RDF 核心运行时可验收**（2026-08-08：[R1-acceptance-package.md](./R1-acceptance-package.md) 正式验收包，G1–G5 全 PASS）已勾选完成；剩余 [~]：OIDC 完整链路（安全基线，R2+ 轨）
+- [x] R1 退出标准全表勾选（2026-08-08）：SPARQL 查询基线 / 单区域集群核心 / 标准符合性门禁 / 核心 SLO 基线 / 恢复演练 / **实际发布回滚演练**（`release-rollback-drill.sh` staging DRILL PASS）/ **RDF 核心运行时可验收**（2026-08-08：[R1-acceptance-package.md](./R1-acceptance-package.md) 正式验收包，G1–G5 全 PASS）/ **OIDC 完整链路（安全基线，R2+ 轨）**（2026-08-08：[L5-ontolith-access-security.md](./L5-ontolith-access-security.md) §2 OIDC 小节，security 18→24、server 44→49 测）——全表勾选完成
 
 ### R1 关键路径（按依赖序）
 
@@ -493,7 +494,7 @@
 4. [x] Phase 3 真 SPARQL MVP（含完整聚合）+ Explain/超时 + R1 烟雾（W3C 492/492 全绿）
 5. [x] Phase 4 单区域集群最小闭环（**M1–M3 + P4-01–P4-04 已落地**：单节点 raft 数据面 + 双/三节点 HTTP+RocksDB 复制 + 默认运行时切换 + CI 三进程 smoke + 多进程元数据 RPC + 跨节点数据搬迁（`/internal/raft/transfer-snapshot` + `DataPlaneSnapshotIo`）+ 真实网络分区（客户端对称丢弃 + 隔离拒绝/愈合恢复）+ 在线重平衡/灾备演练）
 6. [x] Phase 5 网关 + 鉴权/租户/审计落盘（Tracing 全链路 + OIDC-ready JWT 已落地）
-7. [x] R1 退出标准全表勾选（2026-08-08；实际发布回滚演练 + 正式验收包已完成，剩余 [~]：OIDC 完整链路 R2+）
+7. [x] R1 退出标准全表勾选（2026-08-08；实际发布回滚演练 + 正式验收包 + OIDC 完整链路 R2+ 均已完成）
 
 ---
 

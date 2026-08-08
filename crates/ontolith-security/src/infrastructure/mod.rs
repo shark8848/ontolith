@@ -13,6 +13,11 @@ pub use jwt::{
     JwtClaims, JwtVerifyOptions, auth_context_from_claims, sign_hs256, sign_tenant_token,
     verify_hs256,
 };
+pub mod oidc;
+pub use oidc::{
+    CachingJwks, Jwk, Jwks, JwksFetcher, JwksVerifier, OidcConfig, OidcDiscovery, RsaPublicKey,
+    verify_oidc_token,
+};
 
 /// Append-only JSONL audit log on disk with an integrity hash chain.
 ///

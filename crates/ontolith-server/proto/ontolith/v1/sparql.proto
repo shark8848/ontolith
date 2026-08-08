@@ -36,4 +36,6 @@ message HealthResponse {
   string auth_mode = 4;
   string jwt = 5;
   string tracing = 6;
+  // OIDC JWKS verification posture (R2+ chain): "on" | "off".
+  string oidc = 7;
 }

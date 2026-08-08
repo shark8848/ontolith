@@ -10,8 +10,11 @@ use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
 use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode, TenantMode};
-use ontolith_security::infrastructure::FileAuditLog;
+use ontolith_security::infrastructure::{
+    CachingJwks, FileAuditLog, Jwks, JwksFetcher, JwksVerifier,
+};
 use std::env;
+use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,6 +31,11 @@ const API_KEY_ENV: &str = "ONTOLITH_API_KEY";
 const JWT_SECRET_ENV: &str = "ONTOLITH_JWT_SECRET";
 const JWT_ISSUER_ENV: &str = "ONTOLITH_JWT_ISSUER";
 const JWT_AUDIENCE_ENV: &str = "ONTOLITH_JWT_AUDIENCE";
+const JWT_LEEWAY_ENV: &str = "ONTOLITH_JWT_LEEWAY_SECS";
+const OIDC_ISSUER_ENV: &str = "ONTOLITH_OIDC_ISSUER";
+const OIDC_AUDIENCE_ENV: &str = "ONTOLITH_OIDC_AUDIENCE";
+const OIDC_JWKS_URL_ENV: &str = "ONTOLITH_OIDC_JWKS_URL";
+const OIDC_CACHE_TTL_SECS_ENV: &str = "ONTOLITH_OIDC_CACHE_TTL_SECS";
 const AUDIT_PATH_ENV: &str = "ONTOLITH_AUDIT_PATH";
 const CLUSTER_MODE_ENV: &str = "ONTOLITH_CLUSTER_MODE";
 const MGMT_READ_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_READ_KEY";
@@ -217,7 +225,7 @@ impl ManagementState {
             200,
             "OK",
             format!(
-                r#"{{"status":"ok","service":"ontolith-management-server","uptime_ms":{},"management_bind":{},"runtime_bind":{},"runtime_probe":{{"reachable":{},"latency_ms":{},"error":{}}}}}"#,
+                r#"{{"status":"ok","service":"ontolith-management-server","uptime_ms":{},"management_bind":{},"runtime_bind":{},"runtime_probe":{{"reachable":{},"latency_ms":{},"error":{}}},"jwt":{},"oidc":{}}}"#,
                 uptime_ms,
                 json_string(&self.management_bind),
                 json_string(&self.app.bind_address),
@@ -231,6 +239,16 @@ impl ManagementState {
                     .as_ref()
                     .map(|e| json_string(e))
                     .unwrap_or_else(|| "null".to_owned()),
+                json_string(if self.app.authenticator.jwt_enabled() {
+                    "on"
+                } else {
+                    "off"
+                }),
+                json_string(if self.app.authenticator.jwt_oidc.is_some() {
+                    "on"
+                } else {
+                    "off"
+                }),
             ),
         ))
     }
@@ -494,7 +512,7 @@ pub fn run() -> Result<(), String> {
     );
 
     println!(
-        "ontolith-management-server starting: bind={}, runtime_bind={}, backend={}, acl_read_key={}, acl_write_key={}, probe_timeout_ms={}, tls={}",
+        "ontolith-management-server starting: bind={}, runtime_bind={}, backend={}, acl_read_key={}, acl_write_key={}, probe_timeout_ms={}, tls={}, jwt={}, oidc={}",
         management_bind,
         state.app.bind_address,
         state.app.backend.as_str(),
@@ -502,6 +520,16 @@ pub fn run() -> Result<(), String> {
         acl.write_key.is_some(),
         runtime_probe_timeout_ms,
         if tls.is_some() { "on" } else { "off" },
+        if state.app.authenticator.jwt_enabled() {
+            "on"
+        } else {
+            "off"
+        },
+        if state.app.authenticator.jwt_oidc.is_some() {
+            "on"
+        } else {
+            "off"
+        },
     );
 
     let server = match tls {
@@ -558,7 +586,7 @@ fn is_loopback_bind(bind: &str) -> bool {
     }
 }
 
-fn load_authenticator() -> HeaderAuthenticator {
+fn load_authenticator() -> Result<HeaderAuthenticator, String> {
     let mode = match env::var(AUTH_MODE_ENV)
         .unwrap_or_else(|_| "disabled".to_owned())
         .trim()
@@ -569,7 +597,7 @@ fn load_authenticator() -> HeaderAuthenticator {
         _ => AuthMode::Disabled,
     };
 
-    HeaderAuthenticator {
+    let mut authenticator = HeaderAuthenticator {
         mode,
         api_key: env::var(API_KEY_ENV).ok(),
         jwt_secret: env::var(JWT_SECRET_ENV)
@@ -581,8 +609,172 @@ fn load_authenticator() -> HeaderAuthenticator {
         jwt_audience: env::var(JWT_AUDIENCE_ENV)
             .ok()
             .filter(|v| !v.trim().is_empty()),
+        jwt_leeway_secs: env::var(JWT_LEEWAY_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0),
+        jwt_oidc: load_jwks_from_env()?,
         ..HeaderAuthenticator::default()
+    };
+    // OIDC policy envs take precedence for the JWKS path only.
+    if authenticator.jwt_oidc.is_some() {
+        if let Some(issuer) = env::var(OIDC_ISSUER_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
+            authenticator.jwt_issuer = Some(issuer);
+        }
+        if let Some(audience) = env::var(OIDC_AUDIENCE_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
+            authenticator.jwt_audience = Some(audience);
+        }
     }
+    Ok(authenticator)
+}
+
+/// In-tree JWKS transport for the server: `file://` snapshots (drill /
+/// production pin) and plain-HTTP GET, mirroring the L4 raft transport.
+/// `https://` is rejected at load time until a TLS client lands — operators
+/// front the IdP with a reverse proxy or mount a `file://` set.
+struct JwksUrlFetcher;
+
+impl JwksFetcher for JwksUrlFetcher {
+    fn get(&self, url: &str) -> Result<String, String> {
+        if let Some(path) = url.strip_prefix("file://") {
+            std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))
+        } else if url.starts_with("http://") {
+            fetch_http_get(url)
+        } else {
+            Err(format!("unsupported jwks scheme in {url:?}"))
+        }
+    }
+}
+
+/// Load the OIDC JWKS verifier from `ONTOLITH_OIDC_JWKS_URL` (R2+ chain).
+///
+/// Fetches once at startup (fail fast on load/parse errors), then serves a
+/// TTL-refreshed cache (`ONTOLITH_OIDC_CACHE_TTL_SECS`, default 300s) so
+/// rotated keys are picked up without a restart; a failed refresh keeps
+/// serving the last good key set.
+fn load_jwks_from_env() -> Result<Option<JwksVerifier>, String> {
+    let Some(url) = env::var(OIDC_JWKS_URL_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let ttl = match env::var(OIDC_CACHE_TTL_SECS_ENV) {
+        Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
+            format!("{OIDC_CACHE_TTL_SECS_ENV} must be an integer number of seconds, got {raw:?}")
+        })?,
+        Err(_) => 300,
+    };
+    if url.starts_with("https://") {
+        return Err(format!(
+            "{OIDC_JWKS_URL_ENV} https:// is not supported by the in-tree client; use file:// or http:// (terminate TLS at a reverse proxy)"
+        ));
+    }
+    if !url.starts_with("file://") && !url.starts_with("http://") {
+        return Err(format!(
+            "{OIDC_JWKS_URL_ENV} must be file:// or http(s)://, got {url:?}"
+        ));
+    }
+    let fetcher = JwksUrlFetcher;
+    let text = fetcher
+        .get(&url)
+        .map_err(|e| format!("{OIDC_JWKS_URL_ENV} fetch {url}: {e}"))?;
+    let jwks = Jwks::from_json(&text)
+        .map_err(|e| format!("{OIDC_JWKS_URL_ENV} parse: {}", e.message()))?;
+    Ok(Some(JwksVerifier::new(
+        CachingJwks::new(jwks, Duration::from_secs(ttl)),
+        url,
+        Arc::new(fetcher),
+    )))
+}
+
+/// Minimal synchronous HTTP GET for JWKS (mirrors the L4 raft in-tree
+/// transport): resolves host:port, sends `GET`, and parses status +
+/// Content-Length into the response body.
+fn fetch_http_get(url: &str) -> Result<String, String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("unsupported jwks scheme in {url:?}"))?;
+    let (host_port, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    let addr = host_port
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next())
+        .ok_or_else(|| format!("cannot resolve jwks host {host_port:?}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .map_err(|e| format!("connect jwks host {host_port}: {e}"))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let head = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host_port}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("write jwks request: {e}"))?;
+
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 2048];
+    let header_end = loop {
+        if let Some(pos) = find_header_end(&buf) {
+            break pos;
+        }
+        if buf.len() > 64 * 1024 {
+            return Err("jwks response headers too large".into());
+        }
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| format!("read jwks response: {e}"))?;
+        if n == 0 {
+            return Err("unexpected EOF before jwks response headers".into());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    };
+
+    let head = String::from_utf8_lossy(&buf[..header_end]);
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap_or_default();
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.parse::<u16>().ok())
+        .ok_or_else(|| format!("malformed jwks status line: {status_line}"))?;
+    if status != 200 {
+        return Err(format!("jwks fetch {url} returned HTTP {status}"));
+    }
+    let mut content_length = 0usize;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim().eq_ignore_ascii_case("content-length")
+        {
+            content_length = v.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = buf[header_end + 4..].to_vec();
+    while body.len() < content_length {
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| format!("read jwks body: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&tmp[..n]);
+    }
+    body.truncate(content_length);
+    String::from_utf8(body).map_err(|e| format!("jwks body not utf8: {e}"))
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
 /// `ONTOLITH_TENANT_MODE` → [`TenantMode`] (P5-03). Defaults to `disabled`
@@ -735,7 +927,7 @@ fn build_managed_app_state(
 /// `ontolith-server` binary bootstrap and the management server.
 pub(crate) fn build_gateway_app_state_from_env() -> Result<Arc<AppState>, String> {
     let api_bind = env::var(API_BIND_ENV).unwrap_or_else(|_| DEFAULT_API_BIND.to_owned());
-    let authenticator = load_authenticator();
+    let authenticator = load_authenticator()?;
     let audit = load_audit_log_from_env().map_err(|e| e.message().to_owned())?;
     let tenant_mode = load_tenant_mode();
     build_managed_app_state(api_bind, authenticator, audit, tenant_mode)
@@ -841,6 +1033,10 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// Serializes env-driven tests (they mutate the same process-wide
+    /// `ONTOLITH_OIDC_*` variables).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn req(method: &str, path: &str) -> HttpRequest {
         HttpRequest {
             method: method.to_owned(),
@@ -875,6 +1071,23 @@ mod tests {
             TenantMode::Disabled,
         );
         ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl, 10, false)
+    }
+
+    struct StaticFetcher(String);
+
+    impl JwksFetcher for StaticFetcher {
+        fn get(&self, _url: &str) -> Result<String, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn jwks_verifier(jwks_json: &str) -> JwksVerifier {
+        let jwks = Jwks::from_json(jwks_json).expect("jwks");
+        JwksVerifier::new(
+            CachingJwks::new(jwks, Duration::from_secs(1)),
+            "test://jwks",
+            Arc::new(StaticFetcher(jwks_json.to_owned())),
+        )
     }
 
     #[test]
@@ -1014,5 +1227,124 @@ mod tests {
         let probe = probe_runtime_bind("127.0.0.1:9", 100);
         assert!(!probe.reachable);
         assert!(probe.error.is_some());
+    }
+
+    #[test]
+    fn jwks_file_loads_and_bearer_authenticates() {
+        use ontolith_security::infrastructure::sign_tenant_token;
+
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let secret = "0123456789abcdef";
+        let jwks_json =
+            r#"{"keys":[{"kty":"oct","kid":"k1","alg":"HS256","k":"MDEyMzQ1Njc4OWFiY2RlZg"}]}"#
+                .to_owned();
+        let file = tempfile::NamedTempFile::new().expect("temp jwks");
+        std::fs::write(file.path(), jwks_json).expect("write jwks");
+
+        unsafe {
+            std::env::set_var(
+                OIDC_JWKS_URL_ENV,
+                format!("file://{}", file.path().display()),
+            );
+            std::env::set_var(OIDC_ISSUER_ENV, "https://idp.example");
+            std::env::set_var(OIDC_AUDIENCE_ENV, "ontolith-server");
+            std::env::set_var(AUTH_MODE_ENV, "enforced");
+            std::env::set_var(JWT_LEEWAY_ENV, "0");
+        }
+        let auth = load_authenticator().expect("load authenticator");
+        unsafe {
+            std::env::remove_var(OIDC_JWKS_URL_ENV);
+            std::env::remove_var(OIDC_ISSUER_ENV);
+            std::env::remove_var(OIDC_AUDIENCE_ENV);
+            std::env::remove_var(AUTH_MODE_ENV);
+            std::env::remove_var(JWT_LEEWAY_ENV);
+        }
+        assert!(auth.jwt_oidc.is_some(), "jwks not loaded");
+        assert_eq!(auth.jwt_issuer.as_deref(), Some("https://idp.example"));
+        assert_eq!(auth.jwt_audience.as_deref(), Some("ontolith-server"));
+
+        let token = sign_tenant_token(
+            "acme",
+            "u-42",
+            secret,
+            "https://idp.example",
+            "ontolith-server",
+            3600,
+        )
+        .expect("sign token");
+        let ctx = auth
+            .authenticate_with_bearer(None, None, None, Some(&format!("Bearer {token}")))
+            .expect("bearer auth");
+        assert_eq!(ctx.tenant, ontolith_security::domain::TenantId::new("acme"));
+        assert_eq!(ctx.user, ontolith_security::domain::UserId::new("u-42"));
+    }
+
+    #[test]
+    fn jwks_http_fetch_roundtrip() {
+        let jwks_json =
+            r#"{"keys":[{"kty":"oct","kid":"k1","alg":"HS256","k":"MDEyMzQ1Njc4OWFiY2RlZg"}]}"#;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 2048];
+                    let _ = stream.read(&mut buf);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        jwks_json.len(),
+                        jwks_json
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                }
+            }
+        });
+
+        let body = fetch_http_get(&format!("http://{addr}/jwks")).expect("fetch jwks");
+        assert!(body.contains("\"keys\""), "body={body}");
+        let jwks = Jwks::from_json(&body).expect("parse jwks");
+        assert_eq!(jwks.keys.len(), 1);
+    }
+
+    #[test]
+    fn jwks_https_rejected_with_clear_message() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var(
+                OIDC_JWKS_URL_ENV,
+                "https://idp.example/.well-known/jwks.json",
+            );
+        }
+        let err = load_jwks_from_env().expect_err("must reject https");
+        unsafe {
+            std::env::remove_var(OIDC_JWKS_URL_ENV);
+        }
+        assert!(err.contains("https://"), "got: {err}");
+        assert!(err.contains(OIDC_JWKS_URL_ENV), "got: {err}");
+    }
+
+    #[test]
+    fn health_reports_jwt_oidc_posture() {
+        let state = test_state(HeaderAuthenticator::default());
+        let resp = dispatch_for_test(&state, req("GET", "/health"));
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8(resp.body).expect("valid utf8");
+        assert!(body.contains("\"jwt\":\"off\""), "body={body}");
+        assert!(body.contains("\"oidc\":\"off\""), "body={body}");
+
+        let verifier = jwks_verifier(
+            r#"{"keys":[{"kty":"oct","kid":"k1","alg":"HS256","k":"MDEyMzQ1Njc4OWFiY2RlZg"}]}"#,
+        );
+        let auth = HeaderAuthenticator {
+            jwt_oidc: Some(verifier),
+            ..HeaderAuthenticator::default()
+        };
+        let state = test_state(auth);
+        let resp = dispatch_for_test(&state, req("GET", "/health"));
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8(resp.body).expect("valid utf8");
+        assert!(body.contains("\"jwt\":\"on\""), "body={body}");
+        assert!(body.contains("\"oidc\":\"on\""), "body={body}");
     }
 }

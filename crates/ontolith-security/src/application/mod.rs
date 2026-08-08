@@ -2,7 +2,8 @@
 
 use crate::domain::{AuditEvent, AuditOutcome, AuthContext, AuthMode, Permission, TenantId};
 use crate::infrastructure::{
-    FileAuditLog, JwtVerifyOptions, auth_context_from_claims, verify_hs256,
+    FileAuditLog, JwksVerifier, JwtVerifyOptions, OidcConfig, auth_context_from_claims,
+    verify_hs256, verify_oidc_token,
 };
 use ontolith_core::domain::TimestampMs;
 use ontolith_core::error::OntolithError;
@@ -44,6 +45,13 @@ pub struct HeaderAuthenticator {
     pub jwt_issuer: Option<String>,
     /// Optional `aud` claim policy for JWT verification.
     pub jwt_audience: Option<String>,
+    /// Optional OIDC JWKS verification: when set, `Authorization: Bearer`
+    /// tokens are verified against the key set (RS256/HS256 + exp/nbf/iss/aud,
+    /// TTL-refreshed through the injected fetcher) instead of the
+    /// shared-secret HS256 path. Enables the R2+ OIDC chain.
+    pub jwt_oidc: Option<JwksVerifier>,
+    /// Clock leeway (seconds) for JWKS-verified token `exp`/`nbf`.
+    pub jwt_leeway_secs: u64,
     /// Default permissions granted to authenticated tenants.
     pub default_permissions: Vec<Permission>,
 }
@@ -56,6 +64,8 @@ impl Default for HeaderAuthenticator {
             jwt_secret: None,
             jwt_issuer: None,
             jwt_audience: None,
+            jwt_oidc: None,
+            jwt_leeway_secs: 0,
             default_permissions: vec![
                 Permission::new("sparql", "query"),
                 Permission::new("sparql", "explain"),
@@ -65,6 +75,14 @@ impl Default for HeaderAuthenticator {
                 Permission::new("cluster", "admin"),
             ],
         }
+    }
+}
+
+impl HeaderAuthenticator {
+    /// True when any JWT/Bearer verification path is configured: the
+    /// shared-secret HS256 path (P5-02) or the OIDC JWKS chain (R2+).
+    pub fn jwt_enabled(&self) -> bool {
+        self.jwt_secret.is_some() || self.jwt_oidc.is_some()
     }
 }
 
@@ -110,28 +128,47 @@ impl Authenticator for HeaderAuthenticator {
         api_key: Option<&str>,
         bearer: Option<&str>,
     ) -> Result<AuthContext, OntolithError> {
-        if let Some(secret) = &self.jwt_secret
-            && let Some(bearer) = bearer
-        {
+        if let Some(bearer) = bearer {
             let token = bearer
                 .strip_prefix("Bearer ")
                 .or_else(|| bearer.strip_prefix("bearer "))
                 .filter(|t| !t.is_empty());
             if let Some(token) = token {
-                let claims = verify_hs256(
-                    token,
-                    secret,
-                    &JwtVerifyOptions {
-                        issuer: self.jwt_issuer.clone(),
-                        audience: self.jwt_audience.clone(),
-                    },
-                )?;
-                return Ok(auth_context_from_claims(
-                    &claims,
-                    tenant,
-                    user,
-                    self.default_permissions.clone(),
-                ));
+                // OIDC/JWKS path takes precedence when configured (R2+ chain).
+                if let Some(verifier) = &self.jwt_oidc {
+                    let jwks = verifier.jwks()?;
+                    let claims = verify_oidc_token(
+                        token,
+                        &jwks,
+                        &OidcConfig {
+                            issuer: self.jwt_issuer.clone(),
+                            audience: self.jwt_audience.clone(),
+                            leeway_secs: self.jwt_leeway_secs,
+                        },
+                    )?;
+                    return Ok(auth_context_from_claims(
+                        &claims,
+                        tenant,
+                        user,
+                        self.default_permissions.clone(),
+                    ));
+                }
+                if let Some(secret) = &self.jwt_secret {
+                    let claims = verify_hs256(
+                        token,
+                        secret,
+                        &JwtVerifyOptions {
+                            issuer: self.jwt_issuer.clone(),
+                            audience: self.jwt_audience.clone(),
+                        },
+                    )?;
+                    return Ok(auth_context_from_claims(
+                        &claims,
+                        tenant,
+                        user,
+                        self.default_permissions.clone(),
+                    ));
+                }
             }
         }
         self.authenticate(tenant, user, api_key)

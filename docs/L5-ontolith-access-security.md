@@ -2,7 +2,7 @@
 
 文档 ID: IMPL-L5-0001  
 版本: 2.8.0  
-状态: Implemented (HTTP + gRPC + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC-ready JWT P5-02 + full-chain tracing P5-05)  
+状态: Implemented (HTTP + gRPC + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC 完整链路 R2+（JWKS 校验 + TTL 缓存刷新）+ full-chain tracing P5-05)  
 日期: 2026-07-23  
 对应 crate:
 
@@ -154,6 +154,44 @@ ONTOLITH_JWT_ISSUER=ontolith   # 可选：iss 精确匹配
 ONTOLITH_JWT_AUDIENCE=ontolith-server  # 可选：aud 精确匹配
 ```
 
+#### OIDC 完整链路（R2+）
+
+配置 `ONTOLITH_OIDC_JWKS_URL` 后，`Authorization: Bearer <token>` 走 OIDC/JWKS
+验证路径（优先于共享密钥 HS256 路径）。树内实现（`crates/ontolith-security/
+infrastructure/oidc.rs`，无第三方 JWT 依赖）：
+
+- **JWKS/JWK（RFC 7517）**：`{"keys":[...]}` 解析，`kid`+`alg` 选键；RSA（RS256，
+  RFC 7515 A.2.1 官方向量背书）与 oct（HS256）可用，EC/OKP 等键型在解析期被
+  过滤——全部为不可用键时启动即报错（fail fast）。
+- **签名验证**：RS256 = 自研无依赖大整数 RSA（PKCS#1 v1.5 + SHA-256，常量时间
+  比对），HS256 = 复用树内 HMAC-SHA256。
+- **claim 策略**：`exp`/`nbf` 强制校验（`ONTOLITH_JWT_LEEWAY_SECS` 允许时钟偏差）、
+  `iss`/`aud` 精确匹配（`ONTOLITH_OIDC_ISSUER`/`ONTOLITH_OIDC_AUDIENCE`，未设时
+  回退 `ONTOLITH_JWT_ISSUER`/`ONTOLITH_JWT_AUDIENCE`）；`tenant`/`scope`/`sub`
+  映射与 HS256 路径一致。
+- **密钥轮换**：`JwksVerifier` + `CachingJwks` 按 `ONTOLITH_OIDC_CACHE_TTL_SECS`
+  （默认 300s）刷新；刷新失败继续服务上一组好键（离线容忍），无需重启。
+- **发现文档（RFC 8414）**：`OidcDiscovery::parse` 强制 `issuer` 与配置一致
+  （防 provider-confusion），库级可用。
+
+JWKS 传输由 server 注入（`JwksFetcher`，与 L4 raft 同款最小 HTTP 栈）：
+
+```bash
+ONTOLITH_OIDC_JWKS_URL=file:///etc/ontolith/jwks.json   # 本地快照（演练/生产固定）
+ONTOLITH_OIDC_JWKS_URL=http://idp.example:8080/jwks     # 启动抓取 + TTL 刷新
+ONTOLITH_OIDC_CACHE_TTL_SECS=300                        # 可选：缓存 TTL（默认 300）
+ONTOLITH_OIDC_ISSUER=https://idp.example                # 可选：iss 精确匹配
+ONTOLITH_OIDC_AUDIENCE=ontolith-server                  # 可选：aud 精确匹配
+ONTOLITH_JWT_LEEWAY_SECS=0                              # 可选：exp/nbf 时钟偏差
+```
+
+`https://` JWKS URL 在当前树内客户端下明确拒绝启动（TLS 客户端为后续项），
+推荐经反向代理终结 TLS 或挂载 `file://` 快照。`/health` 暴露 `jwt`/`oidc` 姿态，
+gRPC `HealthResponse` 同步 `oidc` 字段；启动日志打印 `jwt=… oidc=…` 姿态。
+进程级演练固化在 [`scripts/drill-oidc-auth.sh`](../scripts/drill-oidc-auth.sh)
+（真实 gateway 启动 + 有效 Bearer 200/`oidc:on` + 错误 issuer 401 + 伪造签名 401，
+`=== OIDC DRILL PASS ===`）。
+
 ---
 
 ## 3. 存储后端切换
@@ -251,15 +289,15 @@ systemctl --user status ontolith-server
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
-| ontolith-security | **18** | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权） |
-| ontolith-server | **33** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）**、**gRPC 网关（roundtrip insert/select + `traceparent` 回带、enforced 401、跨租户 403、health）** |
+| ontolith-security | **24** | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权）+ **OIDC 完整链路**（RFC 7515 A.2.1 RS256 官方向量、RFC 7517 JWKS 解析/kid 选键/不可用键过滤、发现文档 issuer 强制匹配、oct 往返 + 篡改/过期/iss/aud 拒绝、TTL 缓存刷新与坏响应保留旧钥） |
+| ontolith-server | **49** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**OIDC 链路（file:// 加载 + Bearer 认证往返、http:// JWKS 抓取、https 拒绝启动、`/health` jwt/oidc 姿态）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）**、**gRPC 网关（roundtrip insert/select + `traceparent` 回带、enforced 401、跨租户 403、health+oidc）** |
 
 ---
 
 ## 7. 已知限制
 
 1. TLS 已落地（rustls 进程内终止 + R2 非 loopback 门禁）；HTTP/1.1 数据面尚无 HTTP/2；gRPC 网关为 HTTP/2（tonic，P5-01），完整框架中间件链仍无  
-2. 鉴权为 HS256 共享密钥基线（OIDC-ready：`Authorization: Bearer` + `exp`/`iss`/`aud`）；远程 JWKS/OIDC 发现仍为后续轨  
+2. OIDC 完整链路已落地（JWKS + RS256/HS256 + claim 策略 + TTL 缓存刷新）；树内客户端仅支持 `file://`/`http://` JWKS，`https://` 需反向代理终结 TLS 或挂载快照（TLS 客户端为后续项）；RFC 8414 发现文档解析为库级能力，自动发现端点接线为后续项  
 3. 审计哈希链为完整性级（FNV-1a 64，非加密级；加密升级保持同 schema）  
 4. 租户隔离已升级为强制分库/行级（`ONTOLITH_TENANT_MODE=enforced`：命名图命名空间隔离 + 执行器租户视图）；分库物理隔离（每租户独立 RocksDB 实例）仍为后续增强  
 5. SPARQL Results JSON 为兼容子集（非完整 XML/CSV）  
@@ -301,3 +339,4 @@ ONTOLITH_API_KEY=...
 | 2026-08-08 | 2.6.0 | **P5-02 OIDC/JWT 鉴权基线**：树内 HS256 JWT 验证（RFC 7519 子集 + FIPS 180-4/RFC 4231 向量背书）+ `Authorization: Bearer` 接入（`ONTOLITH_JWT_SECRET`/`ISSUER`/`AUDIENCE`，`exp`/`iss`/`aud` 校验、JWT tenant claim 优先于传输头、`scope` 权限覆盖）；`/health` 暴露 `jwt` 姿态；security 12→18、server 24→26 测 |
 | 2026-08-08 | 2.7.0 | **P5-05 Tracing 全链路**：`ontolith-observability` 追踪域模型 + `InMemoryTraceStore` + W3C `traceparent` 解析/生成 + 线程本地 `TraceScope`；server 网关 `http.request` 根 span + `http.auth`/`sparql.execute`/`data.ingest` 子 span、响应回带 `Traceparent`、`/health`+`/admin/config` 暴露 `tracing` 姿态、`GET /admin/traces`；observability 6→11、server 26→29 测 |
 | 2026-08-08 | 2.8.0 | **P5-01 gRPC 网关接入**：tonic 0.12 + prost 0.13 + `protoc-bin-vendored` 3（`grpc-backend` feature 默认开，`--no-default-features` 回退构建通过）；`proto/ontolith/v1/sparql.proto` `SparqlService{Query,Health}`；`SparqlGateway` 复用 HTTP 共享执行路径 + metadata 鉴权（enforced 401/跨租户 403）+ `traceparent` 延续/回带 + 根/子 span；`serve_grpc` 独立 tokio runtime 线程；`ONTOLITH_GRPC_BIND`（默认 `127.0.0.1:50051`），`ontolith-server` bin 升级为真实 HTTP+gRPC 双网关；server 29→33 测 |
+| 2026-08-08 | 2.9.0 | **OIDC 完整链路（R2+）**：`oidc.rs` 树内 JWKS/JWK（RFC 7517）+ RS256（RFC 7515 A.2.1 官方向量背书，自研无依赖大整数 RSA）+ HS256 + `exp`/`nbf`/`iss`/`aud` 策略 + RFC 8414 发现文档 issuer 强制匹配 + `JwksFetcher`/`CachingJwks`/`JwksVerifier` TTL 缓存刷新；server 接线 `ONTOLITH_OIDC_ISSUER`/`AUDIENCE`/`JWKS_URL`/`CACHE_TTL_SECS` + `ONTOLITH_JWT_LEEWAY_SECS`（file:///http:// 注入式传输，https 明确拒绝并文档化）；`/health`（HTTP+管理面）与 gRPC `HealthResponse` 暴露 `oidc` 姿态；security 18→24、server 44→49 测；R1 唯一剩余项勾选完成 |
