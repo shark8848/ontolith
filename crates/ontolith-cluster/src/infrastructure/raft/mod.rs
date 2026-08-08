@@ -16,8 +16,8 @@ use crate::application::{
 };
 use crate::domain::{
     ClusterEpoch, ClusterNode, ClusterNodeId, ClusterStatus, FailoverEvent, LogEntry, LogPayload,
-    Membership, NetworkPartition, RebalancePlan, SessionId, ShardId, ShardMap, SlotRange,
-    SyncReceipt,
+    Membership, NetworkPartition, NodeRole, NodeStatus, RebalancePlan, SessionId, ShardId,
+    ShardMap, SlotRange, SyncReceipt,
 };
 use crate::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
 use ontolith_core::domain::ConsistencyLevel;
@@ -540,6 +540,14 @@ pub struct RaftClusterRuntime {
     /// Lets `replicate_to_followers` report how many entries were newly
     /// acked since the previous call (M3 real replication semantics).
     replicated_watermark: Mutex<HashMap<u64, u64>>,
+    /// Replicated node registry (P4-01): folded from applied raft entries so
+    /// `register_node`/`heartbeat`/`set_node_status` are visible on every
+    /// cluster node, not only the local simulator.
+    nodes: RwLock<HashMap<String, ClusterNode>>,
+    /// Highest applied log index already folded into `nodes`.
+    applied_watermark: Mutex<u64>,
+    /// Shared cluster secret, retained for follower→leader apply forwarding.
+    secret: String,
 }
 
 impl RaftClusterRuntime {
@@ -632,6 +640,7 @@ impl RaftClusterRuntime {
             shard_count: config.shard_count,
             ..ClusterConfig::default()
         });
+        let secret = config.raft_secret.clone();
 
         Self {
             config,
@@ -644,6 +653,9 @@ impl RaftClusterRuntime {
             inner,
             http_server,
             replicated_watermark: Mutex::new(HashMap::new()),
+            nodes: RwLock::new(HashMap::new()),
+            applied_watermark: Mutex::new(0),
+            secret,
         }
     }
 
@@ -717,6 +729,121 @@ impl RaftClusterRuntime {
         total
     }
 
+    /// Fold newly applied raft entries (index > watermark) into the
+    /// replicated node registry (P4-01). Idempotent and cheap when nothing
+    /// new has been applied; safe to call on any read/mutation path.
+    fn sync_applied(&self) {
+        let mut watermark = self.applied_watermark.lock().unwrap();
+        let entries = self.store.applied_entries_from(*watermark + 1);
+        if entries.is_empty() {
+            return;
+        }
+        let mut nodes = self.nodes.write().unwrap();
+        let mut max_index = *watermark;
+        for entry in entries {
+            max_index = max_index.max(entry.index);
+            match entry.payload {
+                LogPayload::RegisterNode(node) => {
+                    nodes.insert(node.node_id.as_str().to_owned(), node);
+                }
+                LogPayload::Heartbeat { node_id, tick } => {
+                    if let Some(node) = nodes.get_mut(&node_id) {
+                        node.last_heartbeat = tick;
+                        if node.status != NodeStatus::Dead {
+                            node.status = NodeStatus::Healthy;
+                        }
+                    }
+                }
+                LogPayload::SetNodeStatus { node_id, status } => {
+                    if let Some(node) = nodes.get_mut(&node_id) {
+                        node.status = status;
+                    }
+                }
+                _ => {}
+            }
+        }
+        *watermark = max_index;
+    }
+
+    /// Replicated registry snapshot with roles refreshed from the current
+    /// raft leader (leader role on the leader, follower elsewhere).
+    fn registry_nodes(&self) -> Vec<ClusterNode> {
+        self.sync_applied();
+        let leader = self.metrics().current_leader;
+        let mut nodes = self.nodes.read().unwrap().values().cloned().collect::<Vec<_>>();
+        for node in &mut nodes {
+            node.role = if Some(self.raft_id_for(&node.node_id)) == leader {
+                NodeRole::Leader
+            } else {
+                NodeRole::Follower
+            };
+        }
+        nodes.sort_by(|a, b| a.node_id.as_str().cmp(b.node_id.as_str()));
+        nodes
+    }
+
+    /// Commit a metadata mutation through raft. As leader this appends
+    /// locally; as follower the payload is forwarded to the leader over the
+    /// multi-process apply RPC (P4-01) and retried once on leader change.
+    fn metadata_mutation(&self, payload: LogPayload) -> Result<LogEntry, OntolithError> {
+        if self.metrics().current_leader == Some(self.config.node_id) {
+            let entry = self.append(payload)?;
+            self.sync_applied();
+            return Ok(entry);
+        }
+        if self.config.http_listen_addr.is_none() {
+            return Err(OntolithError::Failed(format!(
+                "not the raft leader (leader={:?}); in-memory transport cannot forward metadata ops",
+                self.metrics().current_leader
+            )));
+        }
+
+        // Forward to the leader's apply endpoint; retry once if the leader
+        // changed between resolution and delivery.
+        for _ in 0..3 {
+            let (_, leader_addr) = {
+                let metrics = self.metrics();
+                let Some(leader_id) = metrics.current_leader else {
+                    return Err(OntolithError::InvalidState(
+                        "no raft leader to forward metadata op",
+                    ));
+                };
+                let addr = metrics
+                    .membership_config
+                    .membership()
+                    .get_node(&leader_id)
+                    .map(|node| node.addr.clone())
+                    .ok_or_else(|| {
+                        OntolithError::Failed(format!(
+                            "leader {leader_id} is not in the raft membership"
+                        ))
+                    })?;
+                (leader_id, addr)
+            };
+            let (status, body) = http::apply_on_peer(&leader_addr, &self.secret, &payload)
+                .map_err(|e| OntolithError::Failed(format!("forward metadata op: {e}")))?;
+            if status == 200 {
+                let entry: LogEntry = serde_json::from_slice(&body).map_err(|e| {
+                    OntolithError::Failed(format!("decode forwarded apply response: {e}"))
+                })?;
+                self.sync_applied();
+                return Ok(entry);
+            }
+            if status == 409 {
+                // Leader hint in body; re-resolve and retry.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            return Err(OntolithError::Failed(format!(
+                "forward metadata op to leader {leader_addr} failed: http {status}: {}",
+                String::from_utf8_lossy(&body)
+            )));
+        }
+        Err(OntolithError::Failed(
+            "forward metadata op: leader kept changing; giving up".into(),
+        ))
+    }
+
     /// Single-node bootstrap: initialize raft membership with just this
     /// node, wait for self-election, and mirror the control-plane registry.
     pub fn bootstrap(&self, nodes: Vec<(String, String)>) -> Result<ClusterNodeId, OntolithError> {
@@ -732,7 +859,18 @@ impl RaftClusterRuntime {
             })
             .collect();
         self.initialize_members(members)?;
-        self.inner.bootstrap(nodes)?;
+        self.inner.bootstrap(nodes.clone())?;
+        // Seed the replicated registry from the fixed member list (each node
+        // bootstraps the same membership, so the seed is identical).
+        self.sync_applied();
+        {
+            let mut registry = self.nodes.write().unwrap();
+            for (id, addr) in &nodes {
+                registry
+                    .entry(id.clone())
+                    .or_insert_with(|| ClusterNode::new(id.clone(), addr.clone()));
+            }
+        }
         self.leader_id()
             .ok_or(OntolithError::InvalidState("raft bootstrap did not elect a leader"))
     }
@@ -795,7 +933,7 @@ impl MetadataService for RaftClusterRuntime {
         Membership {
             epoch: ClusterEpoch::new(m.current_term),
             leader_id: m.current_leader.map(|id| self.cluster_id_for(id)),
-            nodes: self.inner.membership().nodes,
+            nodes: self.registry_nodes(),
         }
     }
 
@@ -813,7 +951,7 @@ impl MetadataService for RaftClusterRuntime {
 
     fn status(&self) -> ClusterStatus {
         let m = self.metrics();
-        let nodes = self.inner.membership().nodes;
+        let nodes = self.registry_nodes();
         ClusterStatus {
             epoch: ClusterEpoch::new(m.current_term),
             leader_id: m.current_leader.map(|id| self.cluster_id_for(id)),
@@ -829,11 +967,16 @@ impl MetadataService for RaftClusterRuntime {
 
     fn register_node(&self, node: ClusterNode) -> Result<(), OntolithError> {
         let _raft_id = self.raft_id_for(&node.node_id);
-        self.inner.register_node(node)
+        self.metadata_mutation(LogPayload::RegisterNode(node))?;
+        Ok(())
     }
 
     fn heartbeat(&self, node_id: &ClusterNodeId, tick: u64) -> Result<(), OntolithError> {
-        self.inner.heartbeat(node_id, tick)
+        self.metadata_mutation(LogPayload::Heartbeat {
+            node_id: node_id.as_str().to_owned(),
+            tick,
+        })?;
+        Ok(())
     }
 
     fn set_node_status(
@@ -841,7 +984,11 @@ impl MetadataService for RaftClusterRuntime {
         node_id: &ClusterNodeId,
         status: crate::domain::NodeStatus,
     ) -> Result<(), OntolithError> {
-        self.inner.set_node_status(node_id, status)
+        self.metadata_mutation(LogPayload::SetNodeStatus {
+            node_id: node_id.as_str().to_owned(),
+            status,
+        })?;
+        Ok(())
     }
 }
 
@@ -1263,6 +1410,125 @@ mod tests {
             ),
             "majority commit failed after one follower lost"
         );
+    }
+
+    #[test]
+    fn metadata_ops_replicate_across_http_nodes() {
+        let dirs = [
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        ];
+        let rts = vec![
+            RaftClusterRuntime::new(http_node_config(0, "cluster-secret", Some(dirs[0].path()))),
+            RaftClusterRuntime::new(http_node_config(1, "cluster-secret", Some(dirs[1].path()))),
+            RaftClusterRuntime::new(http_node_config(2, "cluster-secret", Some(dirs[2].path()))),
+        ];
+        let addrs = rts
+            .iter()
+            .map(|rt| rt.http_addr().expect("http addr"))
+            .collect::<Vec<_>>();
+        let members = (0..3)
+            .map(|j| (format!("n{j}"), format!("http://{}", addrs[j])))
+            .collect::<Vec<_>>();
+        for rt in &rts {
+            rt.bootstrap(members.clone()).expect("bootstrap 3-node membership");
+        }
+        assert!(
+            wait_until(
+                || rts.iter().any(|rt| rt.leader_id().is_some()),
+                30000
+            ),
+            "no leader elected"
+        );
+        let leader_idx = (0..3)
+            .find(|i| rts[*i].leader_id() == Some(ClusterNodeId::new(format!("n{i}"))))
+            .expect("leader node");
+        let follower_idx = (0..3).find(|i| *i != leader_idx).expect("follower node");
+
+        // Register a new node through the FOLLOWER: the metadata op is
+        // forwarded to the leader over `/internal/raft/apply` and lands in
+        // every node's replicated registry.
+        rts[follower_idx]
+            .register_node(ClusterNode::new("n4", "10.0.0.4:7004"))
+            .expect("register via follower forward");
+        assert!(
+            wait_until(
+                || {
+                    rts.iter().all(|rt| {
+                        rt.membership()
+                            .nodes
+                            .iter()
+                            .any(|n| n.node_id.as_str() == "n4")
+                    })
+                },
+                30000
+            ),
+            "registered node did not appear on all nodes"
+        );
+        assert_eq!(rts[leader_idx].status().node_count, 4);
+
+        // Heartbeat from the follower updates the replicated registry.
+        rts[follower_idx]
+            .heartbeat(&ClusterNodeId::new("n4"), 42)
+            .expect("heartbeat via follower forward");
+        assert!(
+            wait_until(
+                || {
+                    rts.iter().all(|rt| {
+                        rt.membership()
+                            .nodes
+                            .iter()
+                            .find(|n| n.node_id.as_str() == "n4")
+                            .map(|n| n.last_heartbeat)
+                            == Some(42)
+                    })
+                },
+                30000
+            ),
+            "heartbeat did not replicate to all nodes"
+        );
+
+        // Explicit status transition from the follower.
+        rts[follower_idx]
+            .set_node_status(&ClusterNodeId::new("n4"), NodeStatus::Suspect)
+            .expect("set_node_status via follower forward");
+        assert!(
+            wait_until(
+                || {
+                    rts.iter().all(|rt| {
+                        rt.membership()
+                            .nodes
+                            .iter()
+                            .find(|n| n.node_id.as_str() == "n4")
+                            .map(|n| n.status)
+                            == Some(NodeStatus::Suspect)
+                    })
+                },
+                30000
+            ),
+            "node status did not replicate to all nodes"
+        );
+
+        // Leader-path append works directly.
+        rts[leader_idx]
+            .register_node(ClusterNode::new("n5", "10.0.0.5:7005"))
+            .expect("register via leader");
+        assert!(
+            wait_until(
+                || {
+                    rts.iter().all(|rt| {
+                        rt.membership()
+                            .nodes
+                            .iter()
+                            .any(|n| n.node_id.as_str() == "n5")
+                    })
+                },
+                30000
+            ),
+            "leader-registered node did not appear on all nodes"
+        );
+        assert_eq!(rts[leader_idx].status().node_count, 5);
     }
 
     #[test]

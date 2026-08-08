@@ -7,6 +7,7 @@
 //! (`Authorization: Bearer <secret>`).
 
 use super::{NodeId, TypeConfig};
+use crate::domain::{LogEntry, LogPayload};
 use openraft::error::{NetworkError, RPCError, RaftError, RemoteError};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
@@ -310,6 +311,7 @@ fn route(
         "/internal/raft/vote" => handle_vote(runtime, raft, &request.body),
         "/internal/raft/append-entries" => handle_append_entries(runtime, raft, &request.body),
         "/internal/raft/install-snapshot" => handle_install_snapshot(runtime, raft, &request.body),
+        "/internal/raft/apply" => handle_apply(runtime, raft, &request.body),
         _ => HttpResponse::text(404, "Not Found", "unknown raft RPC endpoint"),
     }
 }
@@ -370,6 +372,45 @@ fn handle_install_snapshot(
     };
     match runtime.block_on(raft.install_snapshot(rpc)) {
         Ok(resp) => json_response(200, &resp),
+        Err(e) => json_response(400, &e),
+    }
+}
+
+/// Metadata apply RPC (P4-01): the leader commits a [`LogPayload`] as a raft
+/// entry and returns the committed [`LogEntry`]. A follower answers `409` with
+/// the current leader hint so the caller can forward and retry.
+fn handle_apply(
+    runtime: &tokio::runtime::Runtime,
+    raft: &openraft::Raft<TypeConfig>,
+    body: &[u8],
+) -> HttpResponse {
+    let payload: LogPayload = match serde_json::from_slice(body) {
+        Ok(p) => p,
+        Err(e) => return HttpResponse::text(400, "Bad Request", format!("invalid apply payload: {e}")),
+    };
+    let receiver = raft.metrics();
+    let metrics = receiver.borrow();
+    if metrics.current_leader != Some(metrics.id) {
+        let leader = metrics
+            .current_leader
+            .map(|id| format!("\"leader\":{id}"))
+            .unwrap_or_else(|| "\"leader\":null".to_owned());
+        return HttpResponse::text(
+            409,
+            "Conflict",
+            format!(r#"{{"error":"not_leader",{leader}}}"#),
+        );
+    }
+    drop(metrics);
+    match runtime.block_on(raft.client_write::<tokio::sync::oneshot::error::RecvError>(payload.clone())) {
+        Ok(resp) => json_response(
+            200,
+            &LogEntry {
+                index: resp.log_id.index,
+                term: crate::domain::ClusterEpoch::new(resp.log_id.leader_id.term),
+                payload,
+            },
+        ),
         Err(e) => json_response(400, &e),
     }
 }
@@ -448,6 +489,33 @@ fn parse_host_port(addr: &str) -> Result<SocketAddr, String> {
         .ok()
         .and_then(|mut it| it.next())
         .ok_or_else(|| format!("cannot resolve raft peer address {addr:?}"))
+}
+
+/// Blocking HTTP POST of a metadata [`LogPayload`] to a peer's apply endpoint
+/// (P4-01 forwarding). Returns `(status, body)`.
+pub(crate) fn apply_on_peer(
+    addr: &str,
+    secret: &str,
+    payload: &LogPayload,
+) -> Result<(u16, Vec<u8>), String> {
+    let host_port = parse_host_port(addr)?;
+    let body = serde_json::to_vec(payload).map_err(|e| format!("serialize apply payload: {e}"))?;
+    let mut stream = TcpStream::connect_timeout(&host_port, Duration::from_secs(5))
+        .map_err(|e| format!("connect raft peer {addr}: {e}"))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+    let head = format!(
+        "POST /internal/raft/apply HTTP/1.1\r\nHost: {host_port}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        secret,
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(&body))
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("write apply request: {e}"))?;
+    let resp = read_response(&mut stream).map_err(|e| format!("read apply response: {e}"))?;
+    Ok((resp.status, resp.body))
 }
 
 impl RaftNetwork<TypeConfig> for HttpRaftClient {

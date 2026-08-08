@@ -5,6 +5,10 @@ use ontolith_storage::domain::SnapshotRef;
 
 /// Logical region identifier (single-region MVP uses one region).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "raft-backend",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct RegionId(pub String);
 
 impl RegionId {
@@ -23,6 +27,10 @@ impl RegionId {
 
 /// Cluster node identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "raft-backend",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct ClusterNodeId(pub String);
 
 impl ClusterNodeId {
@@ -75,6 +83,10 @@ impl ClusterEpoch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "raft-backend",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum NodeRole {
     Leader,
     Follower,
@@ -94,6 +106,10 @@ impl NodeRole {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "raft-backend",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum NodeStatus {
     Healthy,
     Suspect,
@@ -115,6 +131,10 @@ impl NodeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "raft-backend",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct ClusterNode {
     pub node_id: ClusterNodeId,
     pub address: String,
@@ -244,6 +264,15 @@ pub enum LogPayload {
     Metadata(String),
     /// Data write op reference (shard-local).
     Data { shard_id: ShardId, op: String },
+    /// Register a node into the replicated metadata registry (P4-01).
+    RegisterNode(ClusterNode),
+    /// Follower heartbeat forwarded through the leader (P4-01).
+    Heartbeat { node_id: String, tick: u64 },
+    /// Explicit node status transition (P4-01).
+    SetNodeStatus {
+        node_id: String,
+        status: NodeStatus,
+    },
 }
 
 /// Result of routing a read under a consistency level.
