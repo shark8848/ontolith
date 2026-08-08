@@ -1,16 +1,16 @@
 //! Management server for unified control-plane operations.
 
 use crate::app::AppState;
-use crate::reasoning::InferenceConfig;
 use crate::http::{Handler, HttpRequest, HttpResponse, HttpServer, TlsServerConfig, now_ms};
+use crate::reasoning::InferenceConfig;
 use ontolith_cluster::domain::LogPayload;
 use ontolith_core::error::OntolithError;
+use ontolith_observability::infrastructure::render_traces_json;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
 use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode, TenantMode};
 use ontolith_security::infrastructure::FileAuditLog;
-use ontolith_observability::infrastructure::render_traces_json;
 use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
@@ -572,9 +572,15 @@ fn load_authenticator() -> HeaderAuthenticator {
     HeaderAuthenticator {
         mode,
         api_key: env::var(API_KEY_ENV).ok(),
-        jwt_secret: env::var(JWT_SECRET_ENV).ok().filter(|v| !v.trim().is_empty()),
-        jwt_issuer: env::var(JWT_ISSUER_ENV).ok().filter(|v| !v.trim().is_empty()),
-        jwt_audience: env::var(JWT_AUDIENCE_ENV).ok().filter(|v| !v.trim().is_empty()),
+        jwt_secret: env::var(JWT_SECRET_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty()),
+        jwt_issuer: env::var(JWT_ISSUER_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty()),
+        jwt_audience: env::var(JWT_AUDIENCE_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty()),
         ..HeaderAuthenticator::default()
     }
 }
@@ -582,9 +588,7 @@ fn load_authenticator() -> HeaderAuthenticator {
 /// `ONTOLITH_TENANT_MODE` → [`TenantMode`] (P5-03). Defaults to `disabled`
 /// so legacy single-tenant deployments keep their behavior.
 fn load_tenant_mode() -> TenantMode {
-    TenantMode::parse(
-        &env::var(TENANT_MODE_ENV).unwrap_or_else(|_| "disabled".to_owned()),
-    )
+    TenantMode::parse(&env::var(TENANT_MODE_ENV).unwrap_or_else(|_| "disabled".to_owned()))
 }
 
 fn load_management_acl_from_env() -> ManagementAcl {
@@ -705,7 +709,7 @@ fn build_managed_app_state(
                 cluster,
                 InferenceConfig::from_env(),
             )
-                .map_err(|e| e.message().to_owned());
+            .map_err(|e| e.message().to_owned());
         }
     }
 
@@ -743,7 +747,8 @@ pub(crate) fn build_gateway_app_state_from_env() -> Result<Arc<AppState>, String
 /// runtime is the production default; the in-memory simulator remains the
 /// deterministic test/CI harness). `raft` requires the `raft-backend`
 /// feature of `ontolith-cluster` (default on).
-fn build_cluster_runtime() -> Result<Arc<dyn ontolith_cluster::application::ClusterRuntime>, String> {
+fn build_cluster_runtime() -> Result<Arc<dyn ontolith_cluster::application::ClusterRuntime>, String>
+{
     let mode = env::var(CLUSTER_MODE_ENV)
         .unwrap_or_else(|_| "raft".to_owned())
         .trim()

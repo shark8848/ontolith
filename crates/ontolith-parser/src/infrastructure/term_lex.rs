@@ -612,17 +612,23 @@ impl<'a> Lexer<'a> {
                     ',' | ';' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '"' | '#'
                 )
                 || (c == '.'
-                    && self.input[self.pos + 1..]
-                        .chars()
-                        .next()
-                        .is_none_or(|n| {
-                            n.is_ascii_whitespace()
-                                || matches!(
-                                    n,
-                                    ',' | ';' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '"'
-                                        | '#' | '.'
-                                )
-                        }))
+                    && self.input[self.pos + 1..].chars().next().is_none_or(|n| {
+                        n.is_ascii_whitespace()
+                            || matches!(
+                                n,
+                                ',' | ';'
+                                    | '['
+                                    | ']'
+                                    | '('
+                                    | ')'
+                                    | '{'
+                                    | '}'
+                                    | '<'
+                                    | '"'
+                                    | '#'
+                                    | '.'
+                            )
+                    }))
             {
                 break;
             }

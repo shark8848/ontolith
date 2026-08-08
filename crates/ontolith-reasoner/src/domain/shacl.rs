@@ -72,11 +72,7 @@ impl PropertyPath {
         match self {
             Self::Predicate(iri) => iri.clone(),
             Self::Inverse(inner) => format!("^{}", parenthesize(inner)),
-            Self::Sequence(steps) => steps
-                .iter()
-                .map(parenthesize)
-                .collect::<Vec<_>>()
-                .join("/"),
+            Self::Sequence(steps) => steps.iter().map(parenthesize).collect::<Vec<_>>().join("/"),
             Self::Alternative(branches) => branches
                 .iter()
                 .map(parenthesize)

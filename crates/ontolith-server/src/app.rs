@@ -1,15 +1,13 @@
 //! Application state and route handlers for L5 HTTP gateway.
 
 use crate::http::{HttpRequest, HttpResponse, now_ms};
-use crate::reasoning::{
-    InferenceConfig, ReasoningReadService, base_read_service, reasoning_input,
-};
+use crate::reasoning::{InferenceConfig, ReasoningReadService, base_read_service, reasoning_input};
 use ontolith_cluster::application::ClusterRuntime;
 use ontolith_cluster::domain::{ClusterNodeId, LogPayload, SessionId};
-use ontolith_cluster::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
 #[cfg(feature = "raft-backend")]
 use ontolith_cluster::infrastructure::raft::{RaftClusterConfig, RaftClusterRuntime};
-use ontolith_core::domain::ConsistencyLevel;
+use ontolith_cluster::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
+use ontolith_core::domain::{ConsistencyLevel, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_observability::domain::{
     MetricKind, MetricPoint, SpanEvent, SpanName, SpanStatus, TraceContext,
@@ -26,16 +24,14 @@ use ontolith_query::domain::{
     BoundValue, PatternCost, QueryExplain, QueryKind, QueryRequest, QueryResult,
 };
 use ontolith_query::infrastructure::{update_pipeline, update_pipeline_with_read};
+use ontolith_rdf::domain::Triple;
 use ontolith_reasoner::application::Reasoner;
 use ontolith_reasoner::domain::{InferenceMode, ReasoningReport};
 use ontolith_reasoner::infrastructure::ForwardChainReasoner;
-use ontolith_rdf::domain::Triple;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
-use ontolith_security::domain::{
-    AuditOutcome, AuthContext, AuthMode, TenantMode, TenantNamespace,
-};
+use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode, TenantMode, TenantNamespace};
 use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
 use ontolith_storage::domain::{StorageStats, WriteBatch, WriteOperation};
 use ontolith_storage::infrastructure::{
@@ -665,6 +661,7 @@ impl AppState {
                         &ctx,
                         consistency,
                         outcome.reasoning.as_ref(),
+                        self.dictionary.as_ref(),
                     ),
                 ));
             }
@@ -676,6 +673,7 @@ impl AppState {
                     &ctx,
                     consistency,
                     outcome.reasoning.as_ref(),
+                    self.dictionary.as_ref(),
                 ),
             ))
         })();
@@ -752,8 +750,8 @@ impl AppState {
             );
             let input = reasoning_input(base.as_ref(), qreq.tenant_scope.as_ref())?;
             let task = inference.reasoning_task(Some(plan.id));
-            let outcome = ForwardChainReasoner::new()
-                .materialize(self.dictionary.as_ref(), &task, &input)?;
+            let outcome =
+                ForwardChainReasoner::new().materialize(self.dictionary.as_ref(), &task, &input)?;
             // Overlay only the increment so base triples are not duplicated.
             let inferred_only: Vec<Triple> = outcome
                 .triples
@@ -866,63 +864,63 @@ impl AppState {
                 })
             };
 
-        let mut ops = Vec::new();
-        for t in parsed.dataset.default_graph {
-            if let Some(g) = &tenant_graph {
-                ops.push(WriteOperation::PutQuad(
-                    ontolith_rdf::domain::Quad::in_named_graph(
-                        t,
-                        ontolith_core::domain::Iri::new(g.clone()),
-                    ),
-                ));
-            } else {
-                ops.push(WriteOperation::PutTriple(t));
+            let mut ops = Vec::new();
+            for t in parsed.dataset.default_graph {
+                if let Some(g) = &tenant_graph {
+                    ops.push(WriteOperation::PutQuad(
+                        ontolith_rdf::domain::Quad::in_named_graph(
+                            t,
+                            ontolith_core::domain::Iri::new(g.clone()),
+                        ),
+                    ));
+                } else {
+                    ops.push(WriteOperation::PutTriple(t));
+                }
             }
-        }
-        for ng in parsed.dataset.named_graphs {
-            if self.tenant_mode == TenantMode::Enforced {
-                namespace.require_owned(ng.name.as_str())?;
+            for ng in parsed.dataset.named_graphs {
+                if self.tenant_mode == TenantMode::Enforced {
+                    namespace.require_owned(ng.name.as_str())?;
+                }
+                for t in ng.triples {
+                    ops.push(WriteOperation::PutQuad(
+                        ontolith_rdf::domain::Quad::in_named_graph(t, ng.name.clone()),
+                    ));
+                }
             }
-            for t in ng.triples {
-                ops.push(WriteOperation::PutQuad(
-                    ontolith_rdf::domain::Quad::in_named_graph(t, ng.name.clone()),
-                ));
+            if ops.is_empty() {
+                return Err(OntolithError::InvalidArgument("no statements parsed"));
             }
-        }
-        if ops.is_empty() {
-            return Err(OntolithError::InvalidArgument("no statements parsed"));
-        }
 
-        let txn = self.txns.begin(TxnMode::ReadWrite)?;
-        self.storage.apply_write_batch(&WriteBatch {
-            txn_id: txn.id,
-            operations: ops.clone(),
-        })?;
-        self.storage.commit_transaction(txn.id)?;
-        let _ = self.txns.commit(txn.id);
+            let txn = self.txns.begin(TxnMode::ReadWrite)?;
+            self.storage.apply_write_batch(&WriteBatch {
+                txn_id: txn.id,
+                operations: ops.clone(),
+            })?;
+            self.storage.commit_transaction(txn.id)?;
+            let _ = self.txns.commit(txn.id);
 
-        let triple_n = ops
-            .iter()
-            .filter(|o| matches!(o, WriteOperation::PutTriple(_)))
-            .count();
-        let quad_n = ops
-            .iter()
-            .filter(|o| matches!(o, WriteOperation::PutQuad(_)))
-            .count();
+            let triple_n = ops
+                .iter()
+                .filter(|o| matches!(o, WriteOperation::PutTriple(_)))
+                .count();
+            let quad_n = ops
+                .iter()
+                .filter(|o| matches!(o, WriteOperation::PutQuad(_)))
+                .count();
 
-        self.audit.record(
-            now_ms(),
-            &ctx,
-            "write",
-            "data",
-            AuditOutcome::Allow,
-            format!(
-                "format={} triples={} quads={}",
-                format.as_str(),
-                triple_n,
-                quad_n
-            ),
-        );
+            self.audit.record(
+                now_ms(),
+                &ctx,
+                "write",
+                "data",
+                AuditOutcome::Allow,
+                format!(
+                    "format={} triples={} quads={}",
+                    format.as_str(),
+                    triple_n,
+                    quad_n
+                ),
+            );
 
             Ok(HttpResponse::json(
                 200,
@@ -1331,9 +1329,7 @@ pub(crate) fn default_raft_cluster() -> Result<Arc<dyn ClusterRuntime>, String> 
     let http_transport = listen.is_some();
 
     if http_transport && secret.is_empty() {
-        return Err(
-            "raft HTTP transport requires a non-empty ONTOLITH_RAFT_SECRET".to_owned(),
-        );
+        return Err("raft HTTP transport requires a non-empty ONTOLITH_RAFT_SECRET".to_owned());
     }
 
     let rt = Arc::new(RaftClusterRuntime::new(RaftClusterConfig {
@@ -1350,11 +1346,9 @@ pub(crate) fn default_raft_cluster() -> Result<Arc<dyn ClusterRuntime>, String> 
             let parsed = list
                 .split(',')
                 .map(|pair| {
-                    let (id, addr) = pair
-                        .split_once('=')
-                        .ok_or_else(|| {
-                            format!("invalid ONTOLITH_RAFT_MEMBERS entry '{pair}' (expected id=url)")
-                        })?;
+                    let (id, addr) = pair.split_once('=').ok_or_else(|| {
+                        format!("invalid ONTOLITH_RAFT_MEMBERS entry '{pair}' (expected id=url)")
+                    })?;
                     Ok((id.trim().to_owned(), addr.trim().to_owned()))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -1483,6 +1477,7 @@ pub(crate) fn sparql_results_json(
     ctx: &AuthContext,
     consistency: ConsistencyLevel,
     reasoning: Option<&ReasoningExecution>,
+    dict: &dyn DictionaryCodec,
 ) -> String {
     let reasoning = reasoning_meta(reasoning);
     match result.kind {
@@ -1503,8 +1498,8 @@ pub(crate) fn sparql_results_json(
                     triples.push(',');
                 }
                 triples.push_str(&format!(
-                    r#"{{"s":"n{}","p":{},"o":{}}}"#,
-                    t.subject.get(),
+                    r#"{{"s":{},"p":{},"o":{}}}"#,
+                    node_id_json(t.subject, dict),
                     json_string(t.predicate.as_str()),
                     term_json(&t.object)
                 ));
@@ -1546,7 +1541,7 @@ pub(crate) fn sparql_results_json(
                         bindings.push_str(&format!(
                             r#""{}":{}"#,
                             escape_json(var),
-                            bound_value_json(val)
+                            bound_value_json(val, dict)
                         ));
                     }
                 }
@@ -1560,7 +1555,7 @@ pub(crate) fn sparql_results_json(
                         bindings.push_str(&format!(
                             r#""{}":{}"#,
                             escape_json(var),
-                            bound_value_json(val)
+                            bound_value_json(val, dict)
                         ));
                     }
                 }
@@ -1580,7 +1575,7 @@ pub(crate) fn sparql_results_json(
     }
 }
 
-fn bound_value_json(val: &BoundValue) -> String {
+fn bound_value_json(val: &BoundValue, dict: &dyn DictionaryCodec) -> String {
     match val {
         BoundValue::Iri(iri) => {
             format!(r#"{{"type":"uri","value":{}}}"#, json_string(iri.as_str()))
@@ -1603,9 +1598,20 @@ fn bound_value_json(val: &BoundValue) -> String {
                 )
             }
         }
-        BoundValue::Node(n) | BoundValue::Blank(n) => {
-            format!(r#"{{"type":"bnode","value":"n{}"}}"#, n.get())
+        BoundValue::Node(n) => node_id_json(*n, dict),
+        BoundValue::Blank(n) => format!(r#"{{"type":"bnode","value":"n{}"}}"#, n.get()),
+    }
+}
+
+/// Render a stored node id: IRI when the dictionary maps the id to a non-blank
+/// string (subjects/predicate-position nodes are stored as dictionary ids),
+/// blank node otherwise. Mirrors the query engine's `node_id_term` decode.
+fn node_id_json(node: NodeId, dict: &dyn DictionaryCodec) -> String {
+    match dict.decode_node(node) {
+        Some(value) if !value.starts_with("_:") => {
+            format!(r#"{{"type":"uri","value":{}}}"#, json_string(&value))
         }
+        _ => format!(r#"{{"type":"bnode","value":"n{}"}}"#, node.get()),
     }
 }
 
@@ -1922,14 +1928,7 @@ mod tests {
         // Health surfaces the tenant posture.
         let health = dispatch_for_test(
             &state,
-            tenant_req(
-                "GET",
-                "/health",
-                HashMap::new(),
-                b"",
-                "acme",
-                "u1",
-            ),
+            tenant_req("GET", "/health", HashMap::new(), b"", "acme", "u1"),
         );
         assert_eq!(health.status, 200);
         assert!(String::from_utf8_lossy(&health.body).contains("\"tenant_mode\":\"enforced\""));
@@ -1981,7 +1980,10 @@ mod tests {
         );
         let body = String::from_utf8_lossy(&acme_read.body);
         assert!(body.contains("acme-data"), "acme read: {body}");
-        assert!(!body.contains("other-data"), "acme must not see other tenant: {body}");
+        assert!(
+            !body.contains("other-data"),
+            "acme must not see other tenant: {body}"
+        );
 
         let other_read = dispatch_for_test(
             &state,
@@ -1996,7 +1998,10 @@ mod tests {
         );
         let body = String::from_utf8_lossy(&other_read.body);
         assert!(body.contains("other-data"), "other read: {body}");
-        assert!(!body.contains("acme-data"), "other must not see acme tenant: {body}");
+        assert!(
+            !body.contains("acme-data"),
+            "other must not see acme tenant: {body}"
+        );
     }
 
     #[test]
@@ -2017,7 +2022,12 @@ mod tests {
                 "u1",
             ),
         );
-        assert_eq!(resp.status, 403, "body={}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            403,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
         // Named-graph quad in the payload outside the namespace -> 403.
         let resp = dispatch_for_test(
@@ -2031,7 +2041,12 @@ mod tests {
                 "u1",
             ),
         );
-        assert_eq!(resp.status, 403, "body={}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            403,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
         // SPARQL GRAPH reference to a foreign tenant -> 403.
         let resp = dispatch_for_test(
@@ -2045,7 +2060,12 @@ mod tests {
                 "u1",
             ),
         );
-        assert_eq!(resp.status, 403, "body={}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            403,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
         // SPARQL FROM reference to a foreign tenant -> 403.
         let resp = dispatch_for_test(
@@ -2059,7 +2079,12 @@ mod tests {
                 "u1",
             ),
         );
-        assert_eq!(resp.status, 403, "body={}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            403,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
         // An owned sub-graph write succeeds.
         let mut query = HashMap::new();
@@ -2075,7 +2100,12 @@ mod tests {
                 "u1",
             ),
         );
-        assert_eq!(resp.status, 200, "body={}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
         assert!(String::from_utf8_lossy(&resp.body).contains("urn:tenant:acme:sub"));
     }
 
@@ -2110,13 +2140,24 @@ mod tests {
     fn jwt_bearer_token_authenticates_requests() {
         use ontolith_security::infrastructure::sign_tenant_token;
         let state = jwt_state();
-        let token =
-            sign_tenant_token("acme", "alice", "s3cret", "ontolith", "ontolith-server", 300)
-                .unwrap();
+        let token = sign_tenant_token(
+            "acme",
+            "alice",
+            "s3cret",
+            "ontolith",
+            "ontolith-server",
+            300,
+        )
+        .unwrap();
 
         // The bearer token alone authenticates (no header credentials).
         let resp = dispatch_for_test(&state, jwt_req("GET", "/health", b"", &token));
-        assert_eq!(resp.status, 200, "body={}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
         let body = String::from_utf8_lossy(&resp.body);
         assert!(body.contains("\"auth_mode\":\"enforced\""), "body={body}");
         assert!(body.contains("\"jwt\":\"on\""), "body={body}");
@@ -2131,19 +2172,36 @@ mod tests {
         let forged =
             sign_tenant_token("acme", "alice", "wrong", "ontolith", "ontolith-server", 300)
                 .unwrap();
-        let expired =
-            sign_tenant_token("acme", "alice", "s3cret", "ontolith", "ontolith-server", -10)
-                .unwrap();
+        let expired = sign_tenant_token(
+            "acme",
+            "alice",
+            "s3cret",
+            "ontolith",
+            "ontolith-server",
+            -10,
+        )
+        .unwrap();
         for token in [forged, expired] {
             let resp = dispatch_for_test(&state, jwt_req("GET", "/health", b"", &token));
-            assert_eq!(resp.status, 401, "body={}", String::from_utf8_lossy(&resp.body));
+            assert_eq!(
+                resp.status,
+                401,
+                "body={}",
+                String::from_utf8_lossy(&resp.body)
+            );
         }
 
         // JWT tenant claim wins over the transport header: a write issued
         // with a conflicting header tenant is stamped into the JWT tenant.
-        let token =
-            sign_tenant_token("acme", "alice", "s3cret", "ontolith", "ontolith-server", 300)
-                .unwrap();
+        let token = sign_tenant_token(
+            "acme",
+            "alice",
+            "s3cret",
+            "ontolith",
+            "ontolith-server",
+            300,
+        )
+        .unwrap();
         let mut headers = HashMap::new();
         headers.insert("authorization".to_owned(), format!("Bearer {token}"));
         headers.insert("x-ontolith-tenant".to_owned(), "other".to_owned());
@@ -2158,7 +2216,12 @@ mod tests {
                 body: b"<http://ex.org/j1> <http://ex.org/p> \"jwt-tenant-wins\" .".to_vec(),
             },
         );
-        assert_eq!(resp.status, 200, "body={}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
         let read = dispatch_for_test(
             &state,
@@ -2178,10 +2241,8 @@ mod tests {
         use ontolith_observability::infrastructure::{
             format_traceparent, generate_span_id, generate_trace_id,
         };
-        let state = AppState::new_memory(
-            "127.0.0.1:8080".to_owned(),
-            HeaderAuthenticator::default(),
-        );
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
         let upstream_trace = generate_trace_id();
         let upstream_span = generate_span_id();
 
@@ -2191,7 +2252,12 @@ mod tests {
             format_traceparent(&upstream_trace, &upstream_span),
         );
         let resp = dispatch_for_test(&state, req);
-        assert_eq!(resp.status, 200, "body={}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
 
         // The response echoes the same trace id for downstream propagation.
         let echoed = resp
@@ -2221,10 +2287,12 @@ mod tests {
             query_span.parent_span_id.as_ref().unwrap().0,
             root.span_id.0
         );
-        assert!(query_span
-            .attributes
-            .iter()
-            .any(|(k, v)| k == "tenant" && v == "system"));
+        assert!(
+            query_span
+                .attributes
+                .iter()
+                .any(|(k, v)| k == "tenant" && v == "system")
+        );
         assert_eq!(root.status, SpanStatus::Ok);
     }
 
@@ -2261,10 +2329,7 @@ mod tests {
             .find(|s| s.name.0 == "http.auth")
             .expect("auth span");
         assert_eq!(auth_span.status, SpanStatus::Error);
-        assert_eq!(
-            auth_span.parent_span_id.as_ref().unwrap().0,
-            root.span_id.0
-        );
+        assert_eq!(auth_span.parent_span_id.as_ref().unwrap().0, root.span_id.0);
     }
 
     #[test]
@@ -2295,6 +2360,43 @@ mod tests {
         );
         assert_eq!(read.status, 200);
         assert!(String::from_utf8_lossy(&read.body).contains("\"c\""));
+    }
+
+    #[test]
+    fn sparql_http_json_renders_stored_iri_subject_as_uri() {
+        // Regression: stored IRI subjects are dictionary node ids; the JSON
+        // result renderer must decode them back to uri (not bnode).
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let ins = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "INSERT DATA { <http://ex.org/a> <http://ex.org/b> \"c\" }",
+            ),
+        );
+        assert_eq!(ins.status, 200);
+        assert!(String::from_utf8_lossy(&ins.body).contains("\"affected\":1"));
+
+        let sel = dispatch_for_test(
+            &state,
+            sparql_req("POST", "SELECT ?s WHERE { ?s <http://ex.org/b> ?o }"),
+        );
+        assert_eq!(sel.status, 200);
+        let body = String::from_utf8_lossy(&sel.body);
+        assert!(
+            body.contains("\"s\":{\"type\":\"uri\",\"value\":\"http://ex.org/a\"}"),
+            "body={body}"
+        );
+
+        let con = dispatch_for_test(&state, sparql_req("POST", "CONSTRUCT WHERE { ?s ?p ?o }"));
+        assert_eq!(con.status, 200);
+        assert!(
+            String::from_utf8_lossy(&con.body)
+                .contains("\"s\":{\"type\":\"uri\",\"value\":\"http://ex.org/a\"}"),
+            "body={}",
+            String::from_utf8_lossy(&con.body)
+        );
     }
 
     #[test]
@@ -2439,11 +2541,7 @@ mod tests {
         params.insert("inference".to_owned(), "bogus".to_owned());
         let invalid = dispatch_for_test(
             &state,
-            sparql_req_with(
-                "POST",
-                "SELECT ?s WHERE { ?s ?p ?o }",
-                params,
-            ),
+            sparql_req_with("POST", "SELECT ?s WHERE { ?s ?p ?o }", params),
         );
         assert_eq!(invalid.status, 400, "invalid override must 400");
     }
@@ -2471,10 +2569,7 @@ mod tests {
             String::from_utf8_lossy(&insert.body)
         );
 
-        let query = dispatch_for_test(
-            &state,
-            sparql_req("POST", "SELECT ?s WHERE { ?s ?p ?o }"),
-        );
+        let query = dispatch_for_test(&state, sparql_req("POST", "SELECT ?s WHERE { ?s ?p ?o }"));
         assert_eq!(query.status, 200);
         let body = String::from_utf8_lossy(&query.body);
         assert!(

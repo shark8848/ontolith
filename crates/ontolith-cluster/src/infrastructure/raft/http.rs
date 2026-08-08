@@ -8,14 +8,14 @@
 
 use super::{NodeId, TypeConfig};
 use crate::domain::{LogEntry, LogPayload, ShardId, SlotRange};
+use ontolith_storage::domain::SnapshotRef;
+use openraft::BasicNode;
 use openraft::error::{NetworkError, RPCError, RaftError, RemoteError};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
 };
-use openraft::BasicNode;
-use ontolith_storage::domain::SnapshotRef;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -26,7 +26,8 @@ use std::time::Duration;
 
 type RaftHandle = Arc<openraft::Raft<TypeConfig>>;
 type NetError = RPCError<NodeId, BasicNode, RaftError<NodeId>>;
-type SnapshotNetError = RPCError<NodeId, BasicNode, RaftError<NodeId, openraft::error::InstallSnapshotError>>;
+type SnapshotNetError =
+    RPCError<NodeId, BasicNode, RaftError<NodeId, openraft::error::InstallSnapshotError>>;
 
 /// Data-plane snapshot IO hook (P4-03): the owning process plugs its L2
 /// storage so `transfer_snapshot` can move real snapshot bytes between nodes.
@@ -328,7 +329,11 @@ fn route(
     match request.header("authorization") {
         Some(value) if value == format!("Bearer {secret}") => {}
         _ => {
-            return HttpResponse::text(401, "Unauthorized", "missing or invalid raft cluster secret");
+            return HttpResponse::text(
+                401,
+                "Unauthorized",
+                "missing or invalid raft cluster secret",
+            );
         }
     }
     if request.method != "POST" {
@@ -343,16 +348,18 @@ fn route(
         "/internal/raft/append-entries" => handle_append_entries(runtime, raft, &request.body),
         "/internal/raft/install-snapshot" => handle_install_snapshot(runtime, raft, &request.body),
         "/internal/raft/apply" => handle_apply(runtime, raft, &request.body),
-        "/internal/raft/transfer-snapshot" => {
-            handle_transfer_snapshot(data_plane, &request.body)
-        }
+        "/internal/raft/transfer-snapshot" => handle_transfer_snapshot(data_plane, &request.body),
         _ => HttpResponse::text(404, "Not Found", "unknown raft RPC endpoint"),
     }
 }
 
 fn json_response<T: serde::Serialize>(status: u16, value: &T) -> HttpResponse {
     match serde_json::to_vec(value) {
-        Ok(body) => HttpResponse::new(status, if status == 200 { "OK" } else { "Bad Request" }, body),
+        Ok(body) => HttpResponse::new(
+            status,
+            if status == 200 { "OK" } else { "Bad Request" },
+            body,
+        ),
         Err(e) => HttpResponse::text(
             500,
             "Internal Server Error",
@@ -368,7 +375,9 @@ fn handle_vote(
 ) -> HttpResponse {
     let rpc: VoteRequest<NodeId> = match serde_json::from_slice(body) {
         Ok(rpc) => rpc,
-        Err(e) => return HttpResponse::text(400, "Bad Request", format!("invalid vote payload: {e}")),
+        Err(e) => {
+            return HttpResponse::text(400, "Bad Request", format!("invalid vote payload: {e}"));
+        }
     };
     match runtime.block_on(raft.vote(rpc)) {
         Ok(resp) => json_response(200, &resp),
@@ -384,7 +393,11 @@ fn handle_append_entries(
     let rpc: AppendEntriesRequest<TypeConfig> = match serde_json::from_slice(body) {
         Ok(rpc) => rpc,
         Err(e) => {
-            return HttpResponse::text(400, "Bad Request", format!("invalid append-entries payload: {e}"));
+            return HttpResponse::text(
+                400,
+                "Bad Request",
+                format!("invalid append-entries payload: {e}"),
+            );
         }
     };
     match runtime.block_on(raft.append_entries(rpc)) {
@@ -401,7 +414,11 @@ fn handle_install_snapshot(
     let rpc: InstallSnapshotRequest<TypeConfig> = match serde_json::from_slice(body) {
         Ok(rpc) => rpc,
         Err(e) => {
-            return HttpResponse::text(400, "Bad Request", format!("invalid install-snapshot payload: {e}"));
+            return HttpResponse::text(
+                400,
+                "Bad Request",
+                format!("invalid install-snapshot payload: {e}"),
+            );
         }
     };
     match runtime.block_on(raft.install_snapshot(rpc)) {
@@ -420,7 +437,9 @@ fn handle_apply(
 ) -> HttpResponse {
     let payload: LogPayload = match serde_json::from_slice(body) {
         Ok(p) => p,
-        Err(e) => return HttpResponse::text(400, "Bad Request", format!("invalid apply payload: {e}")),
+        Err(e) => {
+            return HttpResponse::text(400, "Bad Request", format!("invalid apply payload: {e}"));
+        }
     };
     let receiver = raft.metrics();
     let metrics = receiver.borrow();
@@ -436,7 +455,9 @@ fn handle_apply(
         );
     }
     drop(metrics);
-    match runtime.block_on(raft.client_write::<tokio::sync::oneshot::error::RecvError>(payload.clone())) {
+    match runtime
+        .block_on(raft.client_write::<tokio::sync::oneshot::error::RecvError>(payload.clone()))
+    {
         Ok(resp) => json_response(
             200,
             &LogEntry {
@@ -521,8 +542,7 @@ impl HttpRaftClient {
                 &std::io::Error::other("peer isolated by network partition"),
             )));
         }
-        let body = serde_json::to_vec(rpc)
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let body = serde_json::to_vec(rpc).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let target = self.target;
         let secret = self.secret.clone();
         let addr = self.addr.clone();
@@ -549,12 +569,11 @@ impl HttpRaftClient {
         })
         .await
         .map_err(|e| RPCError::Network(NetworkError::new(&std::io::Error::other(format!("raft rpc task: {e}")))))?;
-        let (status, resp_body) = raw
-            .map_err(|msg| RPCError::Network(NetworkError::new(&std::io::Error::other(msg))))?;
+        let (status, resp_body) =
+            raw.map_err(|msg| RPCError::Network(NetworkError::new(&std::io::Error::other(msg))))?;
 
         if status == 200 {
-            serde_json::from_slice(&resp_body)
-                .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+            serde_json::from_slice(&resp_body).map_err(|e| RPCError::Network(NetworkError::new(&e)))
         } else {
             let raft_error: E = serde_json::from_slice(&resp_body)
                 .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
@@ -564,7 +583,10 @@ impl HttpRaftClient {
 }
 
 fn parse_host_port(addr: &str) -> Result<SocketAddr, String> {
-    let addr = addr.strip_prefix("http://").unwrap_or(addr).trim_end_matches('/');
+    let addr = addr
+        .strip_prefix("http://")
+        .unwrap_or(addr)
+        .trim_end_matches('/');
     if addr.contains("://") {
         return Err(format!("unsupported raft peer scheme in {addr:?}"));
     }
@@ -608,7 +630,8 @@ pub(crate) fn transfer_snapshot_on_peer(
     request: &TransferSnapshotRequest,
 ) -> Result<(u16, Vec<u8>), String> {
     let host_port = parse_host_port(addr)?;
-    let body = serde_json::to_vec(request).map_err(|e| format!("serialize transfer request: {e}"))?;
+    let body =
+        serde_json::to_vec(request).map_err(|e| format!("serialize transfer request: {e}"))?;
     let mut stream = TcpStream::connect_timeout(&host_port, Duration::from_secs(5))
         .map_err(|e| format!("connect raft peer {addr}: {e}"))?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));

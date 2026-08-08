@@ -39,10 +39,7 @@ impl SparqlGateway {
     }
 
     #[allow(clippy::result_large_err)] // tonic::Status is the idiomatic gRPC error type
-    fn authenticate(
-        &self,
-        metadata: &tonic::metadata::MetadataMap,
-    ) -> Result<AuthContext, Status> {
+    fn authenticate(&self, metadata: &tonic::metadata::MetadataMap) -> Result<AuthContext, Status> {
         let tenant = metadata
             .get("x-ontolith-tenant")
             .and_then(|value| value.to_str().ok());
@@ -168,6 +165,7 @@ impl SparqlServiceTrait for SparqlGateway {
                         &ctx,
                         consistency,
                         outcome.reasoning.as_ref(),
+                        self.app.dictionary.as_ref(),
                     )
                 })
         };
@@ -291,10 +289,7 @@ mod tests {
     use std::time::Duration;
 
     fn test_app() -> Arc<AppState> {
-        AppState::new_memory(
-            "127.0.0.1:8080".to_owned(),
-            HeaderAuthenticator::default(),
-        )
+        AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default())
     }
 
     fn enforced_app() -> Arc<AppState> {
@@ -358,7 +353,11 @@ mod tests {
     ) -> SparqlServiceClient<tonic::transport::Channel> {
         let endpoint =
             tonic::transport::Endpoint::from_shared(format!("http://{addr}")).expect("endpoint");
-        rt.block_on(async { SparqlServiceClient::connect(endpoint).await.expect("connect") })
+        rt.block_on(async {
+            SparqlServiceClient::connect(endpoint)
+                .await
+                .expect("connect")
+        })
     }
 
     fn query_req(query: &str) -> Request<QueryRequest> {
@@ -468,9 +467,7 @@ mod tests {
             .expect("tokio runtime");
         let mut client = connect(addr, &rt);
 
-        let mut req = query_req(
-            "SELECT * WHERE { GRAPH <urn:tenant:other> { ?s ?p ?o } }",
-        );
+        let mut req = query_req("SELECT * WHERE { GRAPH <urn:tenant:other> { ?s ?p ?o } }");
         req.metadata_mut()
             .insert("x-ontolith-tenant", "acme".parse().unwrap());
         req.metadata_mut()

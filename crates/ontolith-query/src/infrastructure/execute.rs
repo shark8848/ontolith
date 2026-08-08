@@ -3,9 +3,9 @@
 use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
     AggregateExpr, AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, GraphRef,
-    GraphTarget, TenantScope,
-    PathExpression, PreemptionReason, PreemptionToken, QueryKind, QueryPlan, QueryRequest,
-    QueryResult, Solution, TermPattern, TriplePattern, UpdateOp, UpdatePattern,
+    GraphTarget, PathExpression, PreemptionReason, PreemptionToken, QueryKind, QueryPlan,
+    QueryRequest, QueryResult, Solution, TenantScope, TermPattern, TriplePattern, UpdateOp,
+    UpdatePattern,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
@@ -1214,11 +1214,7 @@ impl UpdateWriteService for TenantScopedWrite<'_> {
         self.base
             .named_graph_quads_in_txn(txn_id)
             .into_iter()
-            .filter(|q| {
-                q.graph_name
-                    .as_ref()
-                    .is_some_and(|g| self.owned(g))
-            })
+            .filter(|q| q.graph_name.as_ref().is_some_and(|g| self.owned(g)))
             .collect()
     }
 
@@ -1335,7 +1331,8 @@ fn validate_tenant_update_plan(plan: &QueryPlan, scope: &TenantScope) -> Result<
                     }
                 }
             }
-            UpdateOp::Add { from, to, .. } | UpdateOp::Copy { from, to, .. }
+            UpdateOp::Add { from, to, .. }
+            | UpdateOp::Copy { from, to, .. }
             | UpdateOp::Move { from, to, .. } => {
                 if let GraphRef::Graph(g) = from {
                     require_owned_graph(scope, g)?;
@@ -1682,11 +1679,7 @@ fn eval_aggregate_spec(
 
 /// Evaluate an aggregate argument on one input row: a bare variable is a
 /// fast solution lookup, anything else is a full expression (`AVG(IF(...))`).
-fn aggregate_value(
-    expr: &AggregateExpr,
-    sol: &Solution,
-    ctx: &ExecCtx<'_>,
-) -> Option<BoundValue> {
+fn aggregate_value(expr: &AggregateExpr, sol: &Solution, ctx: &ExecCtx<'_>) -> Option<BoundValue> {
     match expr {
         AggregateExpr::Variable(v) => sol.get(v).cloned(),
         AggregateExpr::Expression(e) => eval_expr_value(e, sol, ctx),
@@ -1885,10 +1878,13 @@ impl SumAcc {
             SumAcc::Dec(d) => d.as_f64(),
             SumAcc::F64(_, acc) => acc,
         };
-        SumAcc::F64(rank.max(match self {
-            SumAcc::F64(r, _) => r,
-            _ => 0,
-        }), acc + x)
+        SumAcc::F64(
+            rank.max(match self {
+                SumAcc::F64(r, _) => r,
+                _ => 0,
+            }),
+            acc + x,
+        )
     }
 
     fn to_bound(self) -> BoundValue {
@@ -1918,19 +1914,19 @@ fn sum_aggregate(
     let mut seen: HashSet<String> = HashSet::new();
     let mut any = false;
     for s in rows {
-        let Some(bv) = aggregate_value(expr, s, ctx) else { continue };
-        let Some(n) = Numeric::from_bound(&bv) else { continue };
+        let Some(bv) = aggregate_value(expr, s, ctx) else {
+            continue;
+        };
+        let Some(n) = Numeric::from_bound(&bv) else {
+            continue;
+        };
         if distinct && !seen.insert(format!("{bv:?}")) {
             continue;
         }
         any = true;
         acc = acc.add_numeric(n);
     }
-    if !any {
-        None
-    } else {
-        Some(acc.to_bound())
-    }
+    if !any { None } else { Some(acc.to_bound()) }
 }
 
 fn avg_aggregate(
@@ -1975,13 +1971,9 @@ fn avg_aggregate(
         SumAcc::F64(2, acc) => Some(BoundValue::Literal(LiteralValue::Float(
             (acc / n as f64) as f32,
         ))),
-        SumAcc::F64(3, acc) => Some(BoundValue::Literal(LiteralValue::Double(
-            acc / n as f64,
-        ))),
+        SumAcc::F64(3, acc) => Some(BoundValue::Literal(LiteralValue::Double(acc / n as f64))),
         // Degraded overflow fallback: keep xsd:decimal typing.
-        SumAcc::F64(_, acc) => Some(BoundValue::Literal(LiteralValue::Decimal(
-            acc / n as f64,
-        ))),
+        SumAcc::F64(_, acc) => Some(BoundValue::Literal(LiteralValue::Decimal(acc / n as f64))),
     }
 }
 
@@ -1995,7 +1987,9 @@ fn extremum_aggregate(
     let mut best: Option<BoundValue> = None;
     let mut seen: HashSet<String> = HashSet::new();
     for s in rows {
-        let Some(bv) = aggregate_value(expr, s, ctx) else { continue };
+        let Some(bv) = aggregate_value(expr, s, ctx) else {
+            continue;
+        };
         if distinct && !seen.insert(format!("{bv:?}")) {
             continue;
         }
@@ -2026,9 +2020,8 @@ fn sparql_order_cmp(a: &BoundValue, b: &BoundValue) -> Option<i8> {
         0 => match (a, b) {
             (BoundValue::Blank(x), BoundValue::Blank(y)) => Some(ord(x.get().cmp(&y.get()))),
             (BoundValue::Node(x), BoundValue::Node(y)) => Some(ord(x.get().cmp(&y.get()))),
-            (BoundValue::Blank(x), BoundValue::Node(y)) | (BoundValue::Node(x), BoundValue::Blank(y)) => {
-                Some(ord(x.get().cmp(&y.get())))
-            }
+            (BoundValue::Blank(x), BoundValue::Node(y))
+            | (BoundValue::Node(x), BoundValue::Blank(y)) => Some(ord(x.get().cmp(&y.get()))),
             _ => None,
         },
         1 => match (a, b) {
@@ -2049,7 +2042,9 @@ fn group_concat_aggregate(
     let mut parts: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for s in rows {
-        let Some(bv) = aggregate_value(expr, s, ctx) else { continue };
+        let Some(bv) = aggregate_value(expr, s, ctx) else {
+            continue;
+        };
         if distinct && !seen.insert(format!("{bv:?}")) {
             continue;
         }
@@ -2069,7 +2064,6 @@ fn group_concat_aggregate(
         )))
     }
 }
-
 
 fn eval_path_pattern(
     subject: &TermPattern,
@@ -2952,11 +2946,7 @@ fn eval_function(
             BoundValue::Iri(i) => Some(i.as_str().to_owned()),
             BoundValue::Node(n) | BoundValue::Blank(n) => {
                 let s = ctx.read.decode_node(*n)?;
-                if s.starts_with("_:") {
-                    None
-                } else {
-                    Some(s)
-                }
+                if s.starts_with("_:") { None } else { Some(s) }
             }
         }
     };

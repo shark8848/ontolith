@@ -300,8 +300,15 @@ mod tests {
             jwt_audience: Some("ontolith-server".into()),
             ..Default::default()
         };
-        let token = sign_tenant_token("acme", "alice", "s3cret", "ontolith", "ontolith-server", 300)
-            .unwrap();
+        let token = sign_tenant_token(
+            "acme",
+            "alice",
+            "s3cret",
+            "ontolith",
+            "ontolith-server",
+            300,
+        )
+        .unwrap();
         let ctx = auth
             .authenticate_with_bearer(None, None, None, Some(&format!("Bearer {token}")))
             .unwrap();

@@ -1110,7 +1110,10 @@ fn parse_rdf_result_set(path: &Path) -> Result<ResultRows, String> {
         .parent()
         .and_then(|p| std::fs::canonicalize(p).ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let base = format!("file://{}/", parent.display().to_string().replace('\\', "/"));
+    let base = format!(
+        "file://{}/",
+        parent.display().to_string().replace('\\', "/")
+    );
     let dict = InMemoryDictionary::new();
     let parsed = BasicRdfParser::new()
         .parse(
@@ -1128,15 +1131,15 @@ fn parse_rdf_result_set(path: &Path) -> Result<ResultRows, String> {
     }
     let mut root = None;
     for (subject, props) in &map {
-        if props.iter().any(|(p, o)| {
-            p.as_str() == RDF_TYPE && term_iri(o).as_deref() == Some(RS_RESULT_SET)
-        }) {
+        if props
+            .iter()
+            .any(|(p, o)| p.as_str() == RDF_TYPE && term_iri(o).as_deref() == Some(RS_RESULT_SET))
+        {
             root = Some(*subject);
             break;
         }
     }
-    let root =
-        root.ok_or_else(|| format!("{} is not an rs:ResultSet", path.display()))?;
+    let root = root.ok_or_else(|| format!("{} is not an rs:ResultSet", path.display()))?;
     let props = map
         .get(&root)
         .ok_or_else(|| "rs:ResultSet node has no properties".to_owned())?;
@@ -1156,13 +1159,19 @@ fn parse_rdf_result_set(path: &Path) -> Result<ResultRows, String> {
     let mut rows = Vec::new();
     for sol in solutions {
         let mut row = BTreeMap::new();
-        let Some(sol_props) = map.get(&sol) else { continue };
+        let Some(sol_props) = map.get(&sol) else {
+            continue;
+        };
         for (p, o) in sol_props {
             if p.as_str() != RS_BINDING {
                 continue;
             }
-            let Term::BlankNode(binding) = o else { continue };
-            let Some(bind_props) = map.get(binding) else { continue };
+            let Term::BlankNode(binding) = o else {
+                continue;
+            };
+            let Some(bind_props) = map.get(binding) else {
+                continue;
+            };
             let mut var = None;
             let mut value = None;
             for (bp, bo) in bind_props {
@@ -1189,9 +1198,7 @@ fn term_to_norm(term: &Term, dict: &InMemoryDictionary, base: &str) -> NormTerm 
             NormTerm::Iri(s.to_owned())
         }
         Term::Literal(l) => match l {
-            LiteralValue::Lang { value, lang } => {
-                norm_literal(value, None, Some(lang.as_str()))
-            }
+            LiteralValue::Lang { value, lang } => norm_literal(value, None, Some(lang.as_str())),
             LiteralValue::Typed { value, datatype } => {
                 norm_literal(value, Some(datatype.as_str()), None)
             }
@@ -1212,11 +1219,7 @@ fn term_to_norm(term: &Term, dict: &InMemoryDictionary, base: &str) -> NormTerm 
 /// data files (`rdf:Description` + prefixed property elements, `rdf:about`,
 /// `rdf:resource`, `rdf:nodeID`, `rdf:datatype`, `xml:lang`, text content).
 /// Relative IRIs (including `rdf:resource=""`) resolve against `base`.
-fn parse_rdf_xml(
-    text: &str,
-    dict: &InMemoryDictionary,
-    base: &str,
-) -> Result<Vec<Triple>, String> {
+fn parse_rdf_xml(text: &str, dict: &InMemoryDictionary, base: &str) -> Result<Vec<Triple>, String> {
     use quick_xml::events::Event;
 
     let mut reader = quick_xml::Reader::from_str(text);
@@ -1238,10 +1241,7 @@ fn parse_rdf_xml(
             .find(|a| a.key.as_ref() == key.as_bytes())
             .map(|a| String::from_utf8_lossy(&a.value).into_owned())
     };
-    let emit = |triples: &mut Vec<Triple>,
-                subject: NodeId,
-                pred: &Iri,
-                object: &Term| {
+    let emit = |triples: &mut Vec<Triple>, subject: NodeId, pred: &Iri, object: &Term| {
         triples.push(Triple {
             subject,
             predicate: pred.clone(),
@@ -1382,10 +1382,7 @@ fn resolve_iri(reference: &str, base: &str) -> String {
         return reference.to_owned();
     }
     if let Some(fragment) = reference.strip_prefix('#') {
-        let cut = base
-            .rfind(['#', '/'])
-            .map(|i| i + 1)
-            .unwrap_or(base.len());
+        let cut = base.rfind(['#', '/']).map(|i| i + 1).unwrap_or(base.len());
         return format!("{}{fragment}", &base[..cut]);
     }
     match base.rfind('/') {
@@ -1399,16 +1396,20 @@ fn parse_graph_file(path: &Path) -> Result<(Vec<Triple>, InMemoryDictionary), St
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let dict = InMemoryDictionary::new();
     let triples = match path.extension().and_then(|e| e.to_str()) {
-        Some("nt") => parse_ntriples(&text, &dict)
-            .map_err(|e| format!("parse {}: {e:?}", path.display()))?
-            .dataset
-            .default_graph,
+        Some("nt") => {
+            parse_ntriples(&text, &dict)
+                .map_err(|e| format!("parse {}: {e:?}", path.display()))?
+                .dataset
+                .default_graph
+        }
         Some("rdf") => parse_rdf_xml(&text, &dict, &file_uri(path))
             .map_err(|e| format!("parse {}: {e}", path.display()))?,
-        _ => parse_turtle_doc(&text, &dict)
-            .map_err(|e| format!("parse {}: {e:?}", path.display()))?
-            .dataset
-            .default_graph,
+        _ => {
+            parse_turtle_doc(&text, &dict)
+                .map_err(|e| format!("parse {}: {e:?}", path.display()))?
+                .dataset
+                .default_graph
+        }
     };
     Ok((triples, dict))
 }
@@ -1449,25 +1450,31 @@ fn load_data(
             .unwrap_or("")
             .to_owned();
         let triples = match file.extension().and_then(|e| e.to_str()) {
-            Some("nt") => parse_ntriples(&text, dict.as_ref())
-                .map_err(|e| format!("parse {}: {e:?}", file.display()))?
-                .dataset
-                .default_graph,
+            Some("nt") => {
+                parse_ntriples(&text, dict.as_ref())
+                    .map_err(|e| format!("parse {}: {e:?}", file.display()))?
+                    .dataset
+                    .default_graph
+            }
             Some("rdf") => parse_rdf_xml(&text, dict.as_ref(), &base)
                 .map_err(|e| format!("parse {}: {e}", file.display()))?,
-            _ if expose_data_graphs => BasicRdfParser::new()
-                .parse(
-                    &ParseRequest::turtle("data.ttl").with_base(base.clone()),
-                    &text,
-                    dict.as_ref(),
-                )
-                .map_err(|e| format!("parse {}: {e:?}", file.display()))?
-                .dataset
-                .default_graph,
-            _ => parse_turtle_doc(&text, dict.as_ref())
-                .map_err(|e| format!("parse {}: {e:?}", file.display()))?
-                .dataset
-                .default_graph,
+            _ if expose_data_graphs => {
+                BasicRdfParser::new()
+                    .parse(
+                        &ParseRequest::turtle("data.ttl").with_base(base.clone()),
+                        &text,
+                        dict.as_ref(),
+                    )
+                    .map_err(|e| format!("parse {}: {e:?}", file.display()))?
+                    .dataset
+                    .default_graph
+            }
+            _ => {
+                parse_turtle_doc(&text, dict.as_ref())
+                    .map_err(|e| format!("parse {}: {e:?}", file.display()))?
+                    .dataset
+                    .default_graph
+            }
         };
         for triple in triples {
             repo.insert(txn, triple)
@@ -1483,15 +1490,17 @@ fn load_data(
         let triples = match ng.file.extension().and_then(|e| e.to_str()) {
             Some("rdf") => parse_rdf_xml(&text, dict.as_ref(), &ng.name)
                 .map_err(|e| format!("parse {}: {e}", ng.file.display()))?,
-            _ => BasicRdfParser::new()
-                .parse(
-                    &ParseRequest::turtle("graph.ttl").with_base(ng.name.clone()),
-                    &text,
-                    dict.as_ref(),
-                )
-                .map_err(|e| format!("parse {}: {e:?}", ng.file.display()))?
-                .dataset
-                .default_graph,
+            _ => {
+                BasicRdfParser::new()
+                    .parse(
+                        &ParseRequest::turtle("graph.ttl").with_base(ng.name.clone()),
+                        &text,
+                        dict.as_ref(),
+                    )
+                    .map_err(|e| format!("parse {}: {e:?}", ng.file.display()))?
+                    .dataset
+                    .default_graph
+            }
         };
         let graph_name = Iri::new(ng.name.clone());
         for triple in triples {
@@ -1727,9 +1736,8 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
             Ok(())
         }
         TestKind::QueryEvaluation => {
-            let loaded =
-                load_data(&entry.data_files, &entry.graph_data, true)
-                    .map_err(FailReason::DataFormat)?;
+            let loaded = load_data(&entry.data_files, &entry.graph_data, true)
+                .map_err(FailReason::DataFormat)?;
             let actual = execute_query(&loaded, &text).map_err(|e| classify_query_error(&e))?;
             if actual.timed_out {
                 return fail(FailReason::Timeout);
@@ -1777,8 +1785,7 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
                     // aggregates/agg-empty-group-count-graph.ttl) compare as
                     // tables despite the `.ttl` extension.
                     if let Ok((vars, rows)) = parse_rdf_result_set(path) {
-                        compare_table(&actual, &vars, &rows, &loaded)
-                            .map_err(FailReason::Semantic)
+                        compare_table(&actual, &vars, &rows, &loaded).map_err(FailReason::Semantic)
                     } else {
                         compare_graph(&actual, path, &loaded).map_err(FailReason::Semantic)
                     }
@@ -1790,9 +1797,8 @@ fn run_entry_inner(entry: &TestEntry) -> Result<(), FailReason> {
             }
         }
         TestKind::UpdateEvaluation => {
-            let loaded =
-                load_data(&entry.data_files, &entry.graph_data, false)
-                    .map_err(FailReason::DataFormat)?;
+            let loaded = load_data(&entry.data_files, &entry.graph_data, false)
+                .map_err(FailReason::DataFormat)?;
             let actual = execute_query(&loaded, &text).map_err(|e| classify_query_error(&e))?;
             if actual.timed_out {
                 return fail(FailReason::Timeout);

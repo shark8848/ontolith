@@ -351,7 +351,9 @@ pub fn status() -> &'static str {
 mod tests {
     use super::*;
     use crate::application::QueryPipeline;
-    use crate::domain::{Algebra, BoundValue, QueryRequest, TenantScope, TermPattern, TriplePattern};
+    use crate::domain::{
+        Algebra, BoundValue, QueryRequest, TenantScope, TermPattern, TriplePattern,
+    };
     use ontolith_core::domain::{Iri, LiteralValue, NodeId};
     use ontolith_rdf::domain::{Quad, Term, Triple};
     use ontolith_storage::application::{
@@ -1786,7 +1788,9 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(result.solutions.len(), 1);
-        let BoundValue::Literal(LiteralValue::Decimal(avg)) = result.solutions[0].get("avg").unwrap() else {
+        let BoundValue::Literal(LiteralValue::Decimal(avg)) =
+            result.solutions[0].get("avg").unwrap()
+        else {
             panic!("expected decimal avg");
         };
         // (1 + 0 + 3) / 3 = 4/3 -> 1.3333333333333333
@@ -2578,8 +2582,7 @@ mod tests {
     // ---- P5-03: enforced tenant scope (read isolation + write stamping) ----
 
     /// Pipeline seeded with one named-graph quad per tenant.
-    fn tenant_seeded_pipeline(
-    ) -> (
+    fn tenant_seeded_pipeline() -> (
         Arc<InMemoryStorageEngine>,
         crate::application::QueryPipeline<
             SimpleQueryPlanner,
@@ -2611,7 +2614,11 @@ mod tests {
                 "SELECT ?s WHERE { ?s <http://ex.org/name> ?n }",
             ))
             .unwrap();
-        assert_eq!(r.solutions.len(), 2, "unscoped sees the shared default graph");
+        assert_eq!(
+            r.solutions.len(),
+            2,
+            "unscoped sees the shared default graph"
+        );
 
         // Scoped: the default graph becomes the tenant graph only.
         let req = QueryRequest::new("SELECT ?s WHERE { ?s <http://ex.org/name> ?n }")
@@ -2626,7 +2633,11 @@ mod tests {
         let other = QueryRequest::new("SELECT ?s WHERE { ?s <http://ex.org/name> ?n }")
             .with_tenant_scope(TenantScope::new("other"));
         let r = p.execute(&other).unwrap();
-        assert_eq!(r.solutions.len(), 1, "other sees only its own tenant graph (dave)");
+        assert_eq!(
+            r.solutions.len(),
+            1,
+            "other sees only its own tenant graph (dave)"
+        );
     }
 
     #[test]
@@ -2682,11 +2693,16 @@ mod tests {
 
         // The shared default graph is untouched by scoped writes.
         let default = engine.default_graph_triples_in_txn(None);
-        assert_eq!(default.len(), 2, "alice/bob remain in the shared default graph");
+        assert_eq!(
+            default.len(),
+            2,
+            "alice/bob remain in the shared default graph"
+        );
 
         // A scoped read sees the stamped data.
-        let req = QueryRequest::new("SELECT ?n WHERE { <http://ex.org/eve> <http://ex.org/name> ?n }")
-            .with_tenant_scope(TenantScope::new("acme"));
+        let req =
+            QueryRequest::new("SELECT ?n WHERE { <http://ex.org/eve> <http://ex.org/name> ?n }")
+                .with_tenant_scope(TenantScope::new("acme"));
         let r = p.execute(&req).unwrap();
         assert_eq!(r.solutions.len(), 1);
 

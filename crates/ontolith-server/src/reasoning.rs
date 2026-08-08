@@ -6,8 +6,8 @@ use ontolith_core::domain::{Iri, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_query::application::QueryReadService;
 use ontolith_query::domain::{QueryPlanId, TenantScope};
-use ontolith_reasoner::domain::{InferenceMode, ReasoningTask};
 use ontolith_rdf::domain::{Term, Triple};
+use ontolith_reasoner::domain::{InferenceMode, ReasoningTask};
 use ontolith_storage::application::{
     DictionaryCodec, QuadRepository, StorageEngine, TripleRepository,
 };
@@ -106,11 +106,13 @@ pub fn base_read_service(
     storage: Arc<dyn StorageEngine>,
 ) -> Arc<dyn QueryReadService> {
     let quads: Arc<dyn QuadRepository> = Arc::new(EngineQuadRepository::new(storage));
-    Arc::new(ontolith_query::infrastructure::InMemoryQueryReadService::with_quads(
-        triples,
-        Some(dictionary),
-        quads,
-    ))
+    Arc::new(
+        ontolith_query::infrastructure::InMemoryQueryReadService::with_quads(
+            triples,
+            Some(dictionary),
+            quads,
+        ),
+    )
 }
 
 /// Materialization input: all triples, or (enforced tenant mode) the union of
@@ -242,18 +244,17 @@ mod tests {
             ("hybrid", InferenceMode::Hybrid),
         ] {
             assert_eq!(InferenceMode::parse(text), Some(expected), "parse {text}");
-            assert_eq!(expected.as_str(), InferenceMode::parse(text).unwrap().as_str());
+            assert_eq!(
+                expected.as_str(),
+                InferenceMode::parse(text).unwrap().as_str()
+            );
         }
         assert_eq!(InferenceMode::parse("bogus"), None);
     }
 
     #[test]
     fn inference_config_override_keeps_guards() {
-        let base = InferenceConfig::new(
-            InferenceMode::Off,
-            7,
-            Some(250),
-        );
+        let base = InferenceConfig::new(InferenceMode::Off, 7, Some(250));
         let overridden = base.with_override("forward").expect("override");
         assert_eq!(overridden.mode, InferenceMode::ForwardChaining);
         assert_eq!(overridden.max_iterations, 7);

@@ -275,7 +275,10 @@ fn parse_claims(payload: &Value) -> Result<JwtClaims, OntolithError> {
                 .collect()
         })
         .unwrap_or_default();
-    let issuer = payload.get("iss").and_then(Value::as_str).map(str::to_owned);
+    let issuer = payload
+        .get("iss")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let audience = payload
         .get("aud")
         .and_then(Value::as_str)
@@ -520,41 +523,49 @@ mod tests {
         claims.insert("iss".into(), Value::from("https://issuer.example"));
         claims.insert("aud".into(), Value::from("ontolith"));
         let token = sign_hs256(&claims, "s3cret", Some(3600)).unwrap();
-        assert!(verify_hs256(
-            &token,
-            "s3cret",
-            &JwtVerifyOptions {
-                issuer: Some("https://issuer.example".into()),
-                audience: None,
-            },
-        )
-        .is_ok());
-        assert!(verify_hs256(
-            &token,
-            "s3cret",
-            &JwtVerifyOptions {
-                issuer: Some("https://other.example".into()),
-                audience: None,
-            },
-        )
-        .is_err());
-        assert!(verify_hs256(
-            &token,
-            "s3cret",
-            &JwtVerifyOptions {
-                issuer: None,
-                audience: Some("ontolith".into()),
-            },
-        )
-        .is_ok());
-        assert!(verify_hs256(
-            &token,
-            "s3cret",
-            &JwtVerifyOptions {
-                issuer: None,
-                audience: Some("other-app".into()),
-            },
-        )
-        .is_err());
+        assert!(
+            verify_hs256(
+                &token,
+                "s3cret",
+                &JwtVerifyOptions {
+                    issuer: Some("https://issuer.example".into()),
+                    audience: None,
+                },
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_hs256(
+                &token,
+                "s3cret",
+                &JwtVerifyOptions {
+                    issuer: Some("https://other.example".into()),
+                    audience: None,
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            verify_hs256(
+                &token,
+                "s3cret",
+                &JwtVerifyOptions {
+                    issuer: None,
+                    audience: Some("ontolith".into()),
+                },
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_hs256(
+                &token,
+                "s3cret",
+                &JwtVerifyOptions {
+                    issuer: None,
+                    audience: Some("other-app".into()),
+                },
+            )
+            .is_err()
+        );
     }
 }

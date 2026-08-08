@@ -245,9 +245,7 @@ fn now_nanos() -> u64 {
 /// 128-bit trace id (32 hex chars, W3C traceparent compatible).
 pub fn generate_trace_id() -> TraceId {
     let hi = mix64(now_nanos() ^ TRACE_COUNTER.fetch_add(1, Ordering::Relaxed));
-    let lo = mix64(
-        now_nanos().rotate_left(32) ^ TRACE_COUNTER.fetch_add(1, Ordering::Relaxed),
-    );
+    let lo = mix64(now_nanos().rotate_left(32) ^ TRACE_COUNTER.fetch_add(1, Ordering::Relaxed));
     TraceId(format!("{hi:016x}{lo:016x}"))
 }
 
@@ -579,9 +577,24 @@ mod tests {
         assert!(parse_traceparent(None).is_none());
         assert!(parse_traceparent(Some("01-abcdef-1234-01")).is_none());
         assert!(parse_traceparent(Some("00-xyz-1234567890abcdef-01")).is_none());
-        assert!(parse_traceparent(Some("00-00000000000000000000000000000000-1234567890abcdef-01")).is_none());
-        assert!(parse_traceparent(Some("00-abcdefabcdefabcdefabcdefabcdefab-0000000000000000-01")).is_none());
-        assert!(parse_traceparent(Some("00-abcdefabcdefabcdefabcdefabcdefab-1234567890abcdef-zz")).is_none());
+        assert!(
+            parse_traceparent(Some(
+                "00-00000000000000000000000000000000-1234567890abcdef-01"
+            ))
+            .is_none()
+        );
+        assert!(
+            parse_traceparent(Some(
+                "00-abcdefabcdefabcdefabcdefabcdefab-0000000000000000-01"
+            ))
+            .is_none()
+        );
+        assert!(
+            parse_traceparent(Some(
+                "00-abcdefabcdefabcdefabcdefabcdefab-1234567890abcdef-zz"
+            ))
+            .is_none()
+        );
     }
 
     #[test]

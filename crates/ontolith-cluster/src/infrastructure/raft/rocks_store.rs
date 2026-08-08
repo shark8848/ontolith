@@ -152,10 +152,7 @@ pub struct RocksLogReader {
 }
 
 impl openraft::RaftLogReader<TypeConfig> for RocksLogReader {
-    async fn try_get_log_entries<RB>(
-        &mut self,
-        range: RB,
-    ) -> Result<Vec<Entry>, StorageError>
+    async fn try_get_log_entries<RB>(&mut self, range: RB) -> Result<Vec<Entry>, StorageError>
     where
         RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
     {
@@ -175,10 +172,7 @@ impl openraft::RaftLogReader<TypeConfig> for RocksLogReader {
 /// The storage type itself also reads the log (openraft 0.9 v1
 /// `RaftStorage: RaftLogReader` supertrait); delegate to the same scan.
 impl openraft::RaftLogReader<TypeConfig> for RocksRaftStorage {
-    async fn try_get_log_entries<RB>(
-        &mut self,
-        range: RB,
-    ) -> Result<Vec<Entry>, StorageError>
+    async fn try_get_log_entries<RB>(&mut self, range: RB) -> Result<Vec<Entry>, StorageError>
     where
         RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
     {
@@ -209,7 +203,11 @@ impl openraft::RaftSnapshotBuilder<TypeConfig> for RocksSnapshotBuilder {
             .map_err(|e| storage_io(&ErrorSubject::StateMachine, ErrorVerb::Read, e))?;
         let mut applied: Vec<LogEntry> = Vec::new();
         for (_, value) in raw {
-            applied.push(decode_json(&ErrorSubject::StateMachine, ErrorVerb::Read, &value)?);
+            applied.push(decode_json(
+                &ErrorSubject::StateMachine,
+                ErrorVerb::Read,
+                &value,
+            )?);
         }
 
         let last_log_id: Option<LogId<NodeId>> = match self
@@ -321,10 +319,7 @@ impl openraft::RaftStorage<TypeConfig> for RocksRaftStorage {
                 encode_json(&ErrorSubject::Logs, ErrorVerb::Write, entry)?,
             ));
         }
-        let last = entries
-            .last()
-            .expect("non-empty entries")
-            .log_id;
+        let last = entries.last().expect("non-empty entries").log_id;
         batch.push((
             KEY_LOG_LAST.to_vec(),
             encode_json(&ErrorSubject::Logs, ErrorVerb::Write, &last)?,
@@ -390,13 +385,7 @@ impl openraft::RaftStorage<TypeConfig> for RocksRaftStorage {
 
     async fn last_applied_state(
         &mut self,
-    ) -> Result<
-        (
-            Option<LogId<NodeId>>,
-            StoredMembership<NodeId, BasicNode>,
-        ),
-        StorageError,
-    > {
+    ) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, BasicNode>), StorageError> {
         let last_applied: Option<LogId<NodeId>> =
             self.read_json_opt(KEY_LAST_APPLIED, &ErrorSubject::StateMachine)?;
         let membership: StoredMembership<NodeId, BasicNode> = match self
@@ -491,16 +480,28 @@ impl openraft::RaftStorage<TypeConfig> for RocksRaftStorage {
         ));
         ops.push(ontolith_storage::infrastructure::RaftCfOp::Put(
             KEY_MEMBERSHIP.to_vec(),
-            encode_json(&ErrorSubject::Snapshot(None), ErrorVerb::Write, &meta.last_membership)?,
+            encode_json(
+                &ErrorSubject::Snapshot(None),
+                ErrorVerb::Write,
+                &meta.last_membership,
+            )?,
         ));
         if let Some(last_log_id) = meta.last_log_id {
             ops.push(ontolith_storage::infrastructure::RaftCfOp::Put(
                 KEY_LOG_LAST.to_vec(),
-                encode_json(&ErrorSubject::Snapshot(None), ErrorVerb::Write, &last_log_id)?,
+                encode_json(
+                    &ErrorSubject::Snapshot(None),
+                    ErrorVerb::Write,
+                    &last_log_id,
+                )?,
             ));
             ops.push(ontolith_storage::infrastructure::RaftCfOp::Put(
                 KEY_LAST_PURGED.to_vec(),
-                encode_json(&ErrorSubject::Snapshot(None), ErrorVerb::Write, &last_log_id)?,
+                encode_json(
+                    &ErrorSubject::Snapshot(None),
+                    ErrorVerb::Write,
+                    &last_log_id,
+                )?,
             ));
         }
         ops.push(ontolith_storage::infrastructure::RaftCfOp::Put(
@@ -571,11 +572,18 @@ mod tests {
         let mut store = open_store(dir.path());
 
         let e1 = entry(1, 1, LogPayload::Metadata("alpha".into()));
-        let e2 = entry(2, 1, LogPayload::Data {
-            shard_id: ShardId::new(3),
-            op: "write".into(),
-        });
-        store.append_to_log(vec![e1.clone(), e2.clone()]).await.unwrap();
+        let e2 = entry(
+            2,
+            1,
+            LogPayload::Data {
+                shard_id: ShardId::new(3),
+                op: "write".into(),
+            },
+        );
+        store
+            .append_to_log(vec![e1.clone(), e2.clone()])
+            .await
+            .unwrap();
 
         let state = store.get_log_state().await.unwrap();
         assert_eq!(state.last_purged_log_id, None);
@@ -587,10 +595,7 @@ mod tests {
         assert_eq!(entries[1].log_id.index, 2);
 
         // purge up to index 1
-        store
-            .purge_logs_upto(log_id(1, 0, 1))
-            .await
-            .unwrap();
+        store.purge_logs_upto(log_id(1, 0, 1)).await.unwrap();
         let state = store.get_log_state().await.unwrap();
         assert_eq!(state.last_purged_log_id, Some(log_id(1, 0, 1)));
         assert_eq!(state.last_log_id, Some(e2.log_id));
@@ -618,12 +623,22 @@ mod tests {
         let mut store_b = open_store(dir_b.path());
 
         let e1 = entry(1, 1, LogPayload::Metadata("alpha".into()));
-        let e2 = entry(2, 1, LogPayload::Data {
-            shard_id: ShardId::new(7),
-            op: "write".into(),
-        });
-        store_a.append_to_log(vec![e1.clone(), e2.clone()]).await.unwrap();
-        let applied = store_a.apply_to_state_machine(&[e1, e2.clone()]).await.unwrap();
+        let e2 = entry(
+            2,
+            1,
+            LogPayload::Data {
+                shard_id: ShardId::new(7),
+                op: "write".into(),
+            },
+        );
+        store_a
+            .append_to_log(vec![e1.clone(), e2.clone()])
+            .await
+            .unwrap();
+        let applied = store_a
+            .apply_to_state_machine(&[e1, e2.clone()])
+            .await
+            .unwrap();
         assert_eq!(applied.len(), 2);
         let (last_applied, _membership) = store_a.last_applied_state().await.unwrap();
         assert_eq!(last_applied, Some(e2.log_id));
@@ -634,7 +649,11 @@ mod tests {
         assert_eq!(snapshot.meta.last_log_id, Some(e2.log_id));
         assert!(!snapshot.snapshot.get_ref().is_empty());
 
-        let current = store_a.get_current_snapshot().await.unwrap().expect("current snapshot");
+        let current = store_a
+            .get_current_snapshot()
+            .await
+            .unwrap()
+            .expect("current snapshot");
         assert_eq!(current.meta.snapshot_id, snapshot.meta.snapshot_id);
 
         // Install the snapshot bytes on the follower store.
@@ -657,7 +676,11 @@ mod tests {
                 op: "write".into(),
             }
         );
-        let current_b = store_b.get_current_snapshot().await.unwrap().expect("installed snapshot");
+        let current_b = store_b
+            .get_current_snapshot()
+            .await
+            .unwrap()
+            .expect("installed snapshot");
         assert_eq!(current_b.meta.last_log_id, Some(e2.log_id));
     }
 }

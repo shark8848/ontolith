@@ -21,10 +21,10 @@
 use ontolith_parser::application::RdfParser;
 use ontolith_parser::domain::ParseRequest;
 use ontolith_parser::infrastructure::BasicRdfParser;
+use ontolith_rdf::domain::{Term, Triple};
 use ontolith_reasoner::application::ShaclValidator;
 use ontolith_reasoner::domain::{PropertyPath, ValidationResult, shacl};
 use ontolith_reasoner::infrastructure::ShaclEngine;
-use ontolith_rdf::domain::{Term, Triple};
 use ontolith_storage::application::DictionaryCodec;
 use ontolith_storage::infrastructure::InMemoryDictionary;
 use std::collections::{BTreeMap, BTreeSet};
@@ -244,7 +244,11 @@ fn resolve_graph(
         return Ok(test_file.to_path_buf());
     };
     let iri = term_iri(term).ok_or_else(|| {
-        FailReason::Other(format!("{} object is not an IRI in {}", predicate, test_file.display()))
+        FailReason::Other(format!(
+            "{} object is not an IRI in {}",
+            predicate,
+            test_file.display()
+        ))
     })?;
     if iri == self_uri {
         return Ok(test_file.to_path_buf());
@@ -290,14 +294,14 @@ fn expected_result_signature(
     let get = |p: &str| props.iter().find(|(q, _)| q == p).map(|(_, o)| o);
     let focus = get(SH_FOCUS_NODE)
         .map(|o| term_key(dict, o))
-        .ok_or_else(|| FailReason::Other(format!("expected result {result_node} lacks focusNode")))?;
+        .ok_or_else(|| {
+            FailReason::Other(format!("expected result {result_node} lacks focusNode"))
+        })?;
     let path = match get(SH_RESULT_PATH) {
         None => None,
         Some(o) => Some(expected_path(dict, map, o, &mut BTreeSet::new())?.canonical()),
     };
-    let component = get(SH_SOURCE_CC)
-        .and_then(term_iri)
-        .unwrap_or_default();
+    let component = get(SH_SOURCE_CC).and_then(term_iri).unwrap_or_default();
     let severity = get(SH_RESULT_SEVERITY)
         .and_then(term_iri)
         .unwrap_or_else(|| SH_VIOLATION.to_owned());
@@ -314,11 +318,7 @@ fn expected_result_signature(
 }
 
 /// Resolve an RDF collection starting at `start` into its members.
-fn collect_expected_list(
-    dict: &dyn DictionaryCodec,
-    map: &GraphMap,
-    start: &Term,
-) -> Vec<Term> {
+fn collect_expected_list(dict: &dyn DictionaryCodec, map: &GraphMap, start: &Term) -> Vec<Term> {
     let mut out = Vec::new();
     let mut cur = start.clone();
     let mut seen = BTreeSet::new();
@@ -429,12 +429,11 @@ fn expected_path(
                         _ => {}
                     }
                 }
-                found
-                    .unwrap_or_else(|| {
-                        Err(FailReason::Unsupported(
-                            "unparseable expected result path".to_owned(),
-                        ))
-                    })
+                found.unwrap_or_else(|| {
+                    Err(FailReason::Unsupported(
+                        "unparseable expected result path".to_owned(),
+                    ))
+                })
             };
             visiting.remove(&key);
             result
@@ -496,9 +495,7 @@ fn run_entry(entry: &TestEntry) -> TestOutcome {
         Ok(f) => f,
         Err(e) => return fail(e),
     };
-    let shapes_file = match resolve_graph(
-        &entry.file, &map, &entry.action, SHT_SHAPES_GRAPH,
-    ) {
+    let shapes_file = match resolve_graph(&entry.file, &map, &entry.action, SHT_SHAPES_GRAPH) {
         Ok(f) => f,
         Err(e) => return fail(e),
     };
@@ -518,7 +515,7 @@ fn run_entry(entry: &TestEntry) -> TestOutcome {
             return fail(FailReason::Other(format!(
                 "expected report {} lacks sh:conforms",
                 entry.result
-            )))
+            )));
         }
     };
     let expected_results = match expected_results(&dict, &map, &entry.result) {
@@ -530,11 +527,7 @@ fn run_entry(entry: &TestEntry) -> TestOutcome {
         Ok(r) => r,
         Err(e) => return fail(FailReason::Other(format!("engine error: {e:?}"))),
     };
-    let actual: BTreeSet<ResultSig> = report
-        .results
-        .iter()
-        .map(actual_signature)
-        .collect();
+    let actual: BTreeSet<ResultSig> = report.results.iter().map(actual_signature).collect();
     let expected: BTreeSet<ResultSig> = expected_results.into_iter().collect();
 
     if report.conforms != expected_conforms {

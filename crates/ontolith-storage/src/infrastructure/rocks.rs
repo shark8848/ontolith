@@ -238,10 +238,7 @@ impl RocksDbStorageEngine {
     }
 
     /// Put several byte blobs into the `raft` CF in one durable batch.
-    pub fn raft_cf_put_batch(
-        &self,
-        entries: &[(Vec<u8>, Vec<u8>)],
-    ) -> Result<(), OntolithError> {
+    pub fn raft_cf_put_batch(&self, entries: &[(Vec<u8>, Vec<u8>)]) -> Result<(), OntolithError> {
         let ops: Vec<RaftCfOp> = entries
             .iter()
             .map(|(key, value)| RaftCfOp::Put(key.clone(), value.clone()))
@@ -309,10 +306,7 @@ impl RocksDbStorageEngine {
     }
 
     /// Scan the `raft` CF for all keys with the given byte prefix.
-    pub fn raft_cf_scan_prefix(
-        &self,
-        prefix: &[u8],
-    ) -> Result<Vec<RaftCfEntry>, OntolithError> {
+    pub fn raft_cf_scan_prefix(&self, prefix: &[u8]) -> Result<Vec<RaftCfEntry>, OntolithError> {
         let mut to = prefix.to_vec();
         to.push(0xFF);
         self.raft_cf_scan_range(prefix, &to)

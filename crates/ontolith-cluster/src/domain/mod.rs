@@ -5,10 +5,7 @@ use ontolith_storage::domain::SnapshotRef;
 
 /// Logical region identifier (single-region MVP uses one region).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(
-    feature = "raft-backend",
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "raft-backend", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegionId(pub String);
 
 impl RegionId {
@@ -27,10 +24,7 @@ impl RegionId {
 
 /// Cluster node identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(
-    feature = "raft-backend",
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "raft-backend", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClusterNodeId(pub String);
 
 impl ClusterNodeId {
@@ -44,10 +38,7 @@ impl ClusterNodeId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(
-    feature = "raft-backend",
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "raft-backend", derive(serde::Serialize, serde::Deserialize))]
 pub struct ShardId(pub u32);
 
 impl ShardId {
@@ -62,10 +53,7 @@ impl ShardId {
 
 /// Raft-like term / epoch for metadata leadership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-#[cfg_attr(
-    feature = "raft-backend",
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "raft-backend", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClusterEpoch(pub u64);
 
 impl ClusterEpoch {
@@ -83,10 +71,7 @@ impl ClusterEpoch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(
-    feature = "raft-backend",
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "raft-backend", derive(serde::Serialize, serde::Deserialize))]
 pub enum NodeRole {
     Leader,
     Follower,
@@ -106,10 +91,7 @@ impl NodeRole {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(
-    feature = "raft-backend",
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "raft-backend", derive(serde::Serialize, serde::Deserialize))]
 pub enum NodeStatus {
     Healthy,
     Suspect,
@@ -131,10 +113,7 @@ impl NodeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    feature = "raft-backend",
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "raft-backend", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClusterNode {
     pub node_id: ClusterNodeId,
     pub address: String,
@@ -242,10 +221,7 @@ pub fn hash_slot(key: &str, slot_count: u32) -> u32 {
 
 /// Replicated log entry (metadata or data op placeholder).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    feature = "raft-backend",
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "raft-backend", derive(serde::Serialize, serde::Deserialize))]
 pub struct LogEntry {
     pub index: u64,
     pub term: ClusterEpoch,
@@ -253,10 +229,7 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    feature = "raft-backend",
-    derive(serde::Serialize, serde::Deserialize)
-)]
+#[cfg_attr(feature = "raft-backend", derive(serde::Serialize, serde::Deserialize))]
 pub enum LogPayload {
     /// No-op heartbeat / barrier.
     Noop,
@@ -269,10 +242,7 @@ pub enum LogPayload {
     /// Follower heartbeat forwarded through the leader (P4-01).
     Heartbeat { node_id: String, tick: u64 },
     /// Explicit node status transition (P4-01).
-    SetNodeStatus {
-        node_id: String,
-        status: NodeStatus,
-    },
+    SetNodeStatus { node_id: String, status: NodeStatus },
 }
 
 /// Result of routing a read under a consistency level.

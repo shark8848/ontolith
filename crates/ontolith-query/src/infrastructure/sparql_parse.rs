@@ -6,9 +6,8 @@
 
 use crate::domain::{
     AggregateExpr, AggregateFunction, AggregateSpec, Algebra, Expression, GraphRef, GraphTarget,
-    OrderKey,
-    PathExpression, ProjectionExpr, QueryKind, QueryPlan, QueryPlanId, QueryRequest, TermPattern,
-    TriplePattern, UpdateOp, UpdatePattern,
+    OrderKey, PathExpression, ProjectionExpr, QueryKind, QueryPlan, QueryPlanId, QueryRequest,
+    TermPattern, TriplePattern, UpdateOp, UpdatePattern,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue};
 use ontolith_core::error::OntolithError;
@@ -267,7 +266,8 @@ impl<'a> SparqlParser<'a> {
             self.logical.push(format!("from:{}", from.len()));
         }
         if !from_named.is_empty() {
-            self.logical.push(format!("from_named:{}", from_named.len()));
+            self.logical
+                .push(format!("from_named:{}", from_named.len()));
         }
         // `CONSTRUCT FROM <g> WHERE { pattern }` shorthand: the WHERE pattern
         // doubles as the template when no explicit template was given.
@@ -377,8 +377,7 @@ impl<'a> SparqlParser<'a> {
         while self.eat_keyword("HAVING") {
             self.skip();
             while self.peek_char() == Some('(') {
-                let constraint =
-                    lift_aggregates(self.parse_constraint()?, &mut aggregates)?;
+                let constraint = lift_aggregates(self.parse_constraint()?, &mut aggregates)?;
                 having = Some(match having {
                     None => constraint,
                     Some(prev) => Expression::And(Box::new(prev), Box::new(constraint)),
@@ -704,12 +703,9 @@ impl<'a> SparqlParser<'a> {
         let rest = &self.input[self.pos..];
         for (i, c) in rest.chars().enumerate() {
             if c == ':' {
-                return rest[i + 1..]
-                    .chars()
-                    .next()
-                    .is_some_and(|nc| {
-                        nc.is_ascii_alphanumeric() || nc == '_' || nc == '-' || nc == ':'
-                    });
+                return rest[i + 1..].chars().next().is_some_and(|nc| {
+                    nc.is_ascii_alphanumeric() || nc == '_' || nc == '-' || nc == ':'
+                });
             }
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
                 continue;
@@ -1231,9 +1227,9 @@ impl<'a> SparqlParser<'a> {
                 // (`{ SELECT ... }`); a bare SELECT after other elements is a
                 // syntax error (w3c syn-bad-07).
                 if self.pos != group_start {
-                    return Err(self.err(
-                        "subquery is only allowed as the first element of a group",
-                    ));
+                    return Err(
+                        self.err("subquery is only allowed as the first element of a group")
+                    );
                 }
                 let subquery = self.parse_subquery_select()?;
                 acc = join(acc, subquery);
@@ -1579,19 +1575,13 @@ impl<'a> SparqlParser<'a> {
                         self.skip();
                         self.expect_char(')')?;
                         select_vars.push(alias.clone());
-                        projection_exprs.push(ProjectionExpr {
-                            expression,
-                            alias,
-                        });
+                        projection_exprs.push(ProjectionExpr { expression, alias });
                     }
                 } else {
                     break;
                 }
             }
-            if select_vars.is_empty()
-                && aggregates.is_empty()
-                && projection_exprs.is_empty()
-            {
+            if select_vars.is_empty() && aggregates.is_empty() && projection_exprs.is_empty() {
                 return Err(self.err("subquery SELECT requires '*' or variables"));
             }
         }
@@ -1989,15 +1979,11 @@ impl<'a> SparqlParser<'a> {
                 "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil",
             )));
         }
-        let rdf_first = TermPattern::Iri(Iri::new(
-            "http://www.w3.org/1999/02/22-rdf-syntax-ns#first",
-        ));
-        let rdf_rest = TermPattern::Iri(Iri::new(
-            "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest",
-        ));
-        let rdf_nil = TermPattern::Iri(Iri::new(
-            "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil",
-        ));
+        let rdf_first =
+            TermPattern::Iri(Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#first"));
+        let rdf_rest =
+            TermPattern::Iri(Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#rest"));
+        let rdf_nil = TermPattern::Iri(Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"));
         let head = TermPattern::Blank(self.fresh_blank());
         let mut prev = head.clone();
         for (i, item) in items.iter().enumerate() {
@@ -2036,9 +2022,7 @@ impl<'a> SparqlParser<'a> {
         self.skip();
         if self.eat_keyword("a") {
             return Ok((
-                TermPattern::Iri(Iri::new(
-                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-                )),
+                TermPattern::Iri(Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")),
                 None,
             ));
         }
@@ -2047,9 +2031,7 @@ impl<'a> SparqlParser<'a> {
             self.restore(save);
             let path = self.parse_path_alternative()?;
             return Ok((
-                TermPattern::Iri(Iri::new(
-                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-                )),
+                TermPattern::Iri(Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")),
                 Some(path),
             ));
         }
@@ -2829,22 +2811,53 @@ impl<'a> SparqlParser<'a> {
             if c.is_whitespace()
                 || matches!(
                     c,
-                    '{' | '}' | '(' | ')' | ';' | ',' | '<' | '"' | '\'' | '#' | '!' | '=' | '>'
-                        | '/' | '^' | '+' | '*' | '&' | '|' | '?'
+                    '{' | '}'
+                        | '('
+                        | ')'
+                        | ';'
+                        | ','
+                        | '<'
+                        | '"'
+                        | '\''
+                        | '#'
+                        | '!'
+                        | '='
+                        | '>'
+                        | '/'
+                        | '^'
+                        | '+'
+                        | '*'
+                        | '&'
+                        | '|'
+                        | '?'
                 )
                 || (c == '.'
-                    && self.input[self.pos + 1..]
-                        .chars()
-                        .next()
-                        .is_none_or(|n| {
-                            n.is_whitespace()
-                                || matches!(
-                                    n,
-                                    '{' | '}' | '(' | ')' | '.' | ';' | ',' | '<' | '"' | '\''
-                                        | '#' | '!' | '=' | '>' | '/' | '^' | '+' | '*' | '&'
-                                        | '|' | '?'
-                                )
-                        }))
+                    && self.input[self.pos + 1..].chars().next().is_none_or(|n| {
+                        n.is_whitespace()
+                            || matches!(
+                                n,
+                                '{' | '}'
+                                    | '('
+                                    | ')'
+                                    | '.'
+                                    | ';'
+                                    | ','
+                                    | '<'
+                                    | '"'
+                                    | '\''
+                                    | '#'
+                                    | '!'
+                                    | '='
+                                    | '>'
+                                    | '/'
+                                    | '^'
+                                    | '+'
+                                    | '*'
+                                    | '&'
+                                    | '|'
+                                    | '?'
+                            )
+                    }))
             {
                 break;
             }
@@ -2902,9 +2915,8 @@ impl<'a> SparqlParser<'a> {
                     if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
                         return Err(self.err("malformed unicode escape in string literal"));
                     }
-                    let cp = u32::from_str_radix(hex, 16).map_err(|_| {
-                        self.err("malformed unicode escape in string literal")
-                    })?;
+                    let cp = u32::from_str_radix(hex, 16)
+                        .map_err(|_| self.err("malformed unicode escape in string literal"))?;
                     if (0xD800..=0xDFFF).contains(&cp) {
                         return Err(self.err("surrogate codepoint in string literal escape"));
                     }
@@ -3120,9 +3132,7 @@ fn walk_physical(algebra: &Algebra, steps: &mut Vec<String>) {
                     AggregateFunction::Max { expr, .. } => {
                         format!("MAX({})", summarize_agg_expr(expr))
                     }
-                    AggregateFunction::GroupConcat {
-                        expr, distinct, ..
-                    } => {
+                    AggregateFunction::GroupConcat { expr, distinct, .. } => {
                         if *distinct {
                             format!("GROUP_CONCAT(DISTINCT {})", summarize_agg_expr(expr))
                         } else {
@@ -3202,9 +3212,7 @@ fn unescape(s: &str) -> String {
                 let hex_start = i + 2;
                 if hex_start + ndigits <= bytes.len() {
                     let hex = &s[hex_start..hex_start + ndigits];
-                    if let Some(ch) =
-                        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
-                    {
+                    if let Some(ch) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
                         out.push(ch);
                         i = hex_start + ndigits;
                         continue;
@@ -3307,9 +3315,7 @@ fn lift_aggregates(
                 Expression::Variable(output)
             }
         }
-        Expression::Not(e) => {
-            Expression::Not(Box::new(lift_aggregates(*e, aggregates)?))
-        }
+        Expression::Not(e) => Expression::Not(Box::new(lift_aggregates(*e, aggregates)?)),
         Expression::And(a, b) => Expression::And(
             Box::new(lift_aggregates(*a, aggregates)?),
             Box::new(lift_aggregates(*b, aggregates)?),
@@ -3347,18 +3353,12 @@ fn lift_aggregates(
             left: Box::new(lift_aggregates(*left, aggregates)?),
             right: Box::new(lift_aggregates(*right, aggregates)?),
         },
-        Expression::Negate(e) => {
-            Expression::Negate(Box::new(lift_aggregates(*e, aggregates)?))
-        }
-        Expression::IsIri(e) => {
-            Expression::IsIri(Box::new(lift_aggregates(*e, aggregates)?))
-        }
+        Expression::Negate(e) => Expression::Negate(Box::new(lift_aggregates(*e, aggregates)?)),
+        Expression::IsIri(e) => Expression::IsIri(Box::new(lift_aggregates(*e, aggregates)?)),
         Expression::IsLiteral(e) => {
             Expression::IsLiteral(Box::new(lift_aggregates(*e, aggregates)?))
         }
-        Expression::IsBlank(e) => {
-            Expression::IsBlank(Box::new(lift_aggregates(*e, aggregates)?))
-        }
+        Expression::IsBlank(e) => Expression::IsBlank(Box::new(lift_aggregates(*e, aggregates)?)),
         Expression::Function { name, args } => Expression::Function {
             name,
             args: args

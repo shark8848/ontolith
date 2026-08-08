@@ -563,9 +563,7 @@ fn summarize_aggregate(function: &AggregateFunction) -> String {
             expr,
             distinct: true,
         } => format!("MAX(DISTINCT {})", summarize_aggregate_expr(expr)),
-        AggregateFunction::GroupConcat {
-            expr, distinct, ..
-        } => {
+        AggregateFunction::GroupConcat { expr, distinct, .. } => {
             if *distinct {
                 format!("GROUP_CONCAT(DISTINCT {})", summarize_aggregate_expr(expr))
             } else {

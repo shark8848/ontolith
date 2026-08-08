@@ -18,8 +18,8 @@
 
 use crate::application::ShaclValidator;
 use crate::domain::{
-    ConstraintComponent, NodeKind, PropertyPath, PropertyShape, SHACL_NS, Severity, Shape,
-    Target, ValidationReport, ValidationResult, shacl,
+    ConstraintComponent, NodeKind, PropertyPath, PropertyShape, SHACL_NS, Severity, Shape, Target,
+    ValidationReport, ValidationResult, shacl,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
@@ -130,7 +130,9 @@ fn compare_terms(a: &Term, b: &Term) -> Option<Ordering> {
             {
                 return compare_date_times(&x.lexical_form(), &y.lexical_form());
             }
-            numeric_value(x).zip(numeric_value(y)).and_then(|(u, v)| u.partial_cmp(&v))
+            numeric_value(x)
+                .zip(numeric_value(y))
+                .and_then(|(u, v)| u.partial_cmp(&v))
         }
         _ => None,
     }
@@ -150,7 +152,14 @@ struct DateTimeValue {
 impl DateTimeValue {
     /// Local fields as a sortable tuple (used when both sides lack a timezone).
     fn local(&self) -> (i32, u32, u32, u32, u32, u32) {
-        (self.year, self.month, self.day, self.hour, self.minute, self.second)
+        (
+            self.year,
+            self.month,
+            self.day,
+            self.hour,
+            self.minute,
+            self.second,
+        )
     }
 
     /// Instant as seconds since the Unix epoch (used when both sides carry a
@@ -225,7 +234,15 @@ fn parse_date_time(lex: &str) -> Option<DateTimeValue> {
     {
         return None;
     }
-    Some(DateTimeValue { year, month, day, hour, minute, second, tz })
+    Some(DateTimeValue {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        tz,
+    })
 }
 
 /// XSD dateTime ordering per SHACL/SPARQL: two values with explicit timezones
@@ -322,7 +339,6 @@ fn integer_in_range(dt: &str, value: &str) -> bool {
         _ => true,
     }
 }
-
 
 /// Numeric value of a literal for cross-datatype ordering (integer/decimal/
 /// float/double compare by their numeric value, per XSD value-space ordering).
@@ -702,10 +718,7 @@ fn parse_shapes(dict: &dyn DictionaryCodec, shapes: &[Triple]) -> Vec<Shape> {
                 // Implicit class target: a shape that is itself a class
                 // (`rdfs:Class` / `owl:Class`) targets all its instances.
                 x if x == RDF_TYPE
-                    && matches!(
-                        term_iri(o).as_deref(),
-                        Some(RDFS_CLASS) | Some(OWL_CLASS)
-                    ) =>
+                    && matches!(term_iri(o).as_deref(), Some(RDFS_CLASS) | Some(OWL_CLASS)) =>
                 {
                     targets.push(Target::Class(id.clone()));
                 }
@@ -865,7 +878,9 @@ fn parse_path_node(
     for (p, o) in triples {
         match p.as_str() {
             x if x == shacl("inversePath") => {
-                result = parse_path(dict, map, o, visiting).map(Box::new).map(PropertyPath::Inverse);
+                result = parse_path(dict, map, o, visiting)
+                    .map(Box::new)
+                    .map(PropertyPath::Inverse);
                 break;
             }
             x if x == shacl("alternativePath") => {
@@ -877,15 +892,21 @@ fn parse_path_node(
                 break;
             }
             x if x == shacl("zeroOrMorePath") => {
-                result = parse_path(dict, map, o, visiting).map(Box::new).map(PropertyPath::ZeroOrMore);
+                result = parse_path(dict, map, o, visiting)
+                    .map(Box::new)
+                    .map(PropertyPath::ZeroOrMore);
                 break;
             }
             x if x == shacl("oneOrMorePath") => {
-                result = parse_path(dict, map, o, visiting).map(Box::new).map(PropertyPath::OneOrMore);
+                result = parse_path(dict, map, o, visiting)
+                    .map(Box::new)
+                    .map(PropertyPath::OneOrMore);
                 break;
             }
             x if x == shacl("zeroOrOnePath") => {
-                result = parse_path(dict, map, o, visiting).map(Box::new).map(PropertyPath::ZeroOrOne);
+                result = parse_path(dict, map, o, visiting)
+                    .map(Box::new)
+                    .map(PropertyPath::ZeroOrOne);
                 break;
             }
             _ => {}
@@ -1340,7 +1361,12 @@ fn check_values(
             }
         }
         ConstraintComponent::Equals(other_path) => {
-            let other = path_values(dict, data, focus, &PropertyPath::Predicate(other_path.clone()));
+            let other = path_values(
+                dict,
+                data,
+                focus,
+                &PropertyPath::Predicate(other_path.clone()),
+            );
             for (vkey, _) in values {
                 if !other.iter().any(|(k, _)| k == vkey) {
                     push_result(
@@ -1373,7 +1399,12 @@ fn check_values(
             }
         }
         ConstraintComponent::Disjoint(other_path) => {
-            let other = path_values(dict, data, focus, &PropertyPath::Predicate(other_path.clone()));
+            let other = path_values(
+                dict,
+                data,
+                focus,
+                &PropertyPath::Predicate(other_path.clone()),
+            );
             for (vkey, _) in values {
                 if other.iter().any(|(k, _)| k == vkey) {
                     push_result(
@@ -1391,7 +1422,12 @@ fn check_values(
             }
         }
         ConstraintComponent::LessThan(other_path) => {
-            let other = path_values(dict, data, focus, &PropertyPath::Predicate(other_path.clone()));
+            let other = path_values(
+                dict,
+                data,
+                focus,
+                &PropertyPath::Predicate(other_path.clone()),
+            );
             for (vkey, v) in values {
                 let ok = other
                     .iter()
@@ -1412,7 +1448,12 @@ fn check_values(
             }
         }
         ConstraintComponent::LessThanOrEquals(other_path) => {
-            let other = path_values(dict, data, focus, &PropertyPath::Predicate(other_path.clone()));
+            let other = path_values(
+                dict,
+                data,
+                focus,
+                &PropertyPath::Predicate(other_path.clone()),
+            );
             for (vkey, v) in values {
                 let ok = other.iter().all(|(_, u)| {
                     matches!(
@@ -1630,9 +1671,7 @@ fn check_values(
         | ConstraintComponent::QualifiedValueShapesDisjoint
         | ConstraintComponent::PatternFlags(_) => {}
         ConstraintComponent::QualifiedMinCount(n) => {
-            if let Some((shape_key, disjoint, siblings)) =
-                qualified_value_context(shapes, ps)
-            {
+            if let Some((shape_key, disjoint, siblings)) = qualified_value_context(shapes, ps) {
                 let count = values
                     .iter()
                     .filter(|(vkey, _)| {
@@ -1661,9 +1700,7 @@ fn check_values(
             }
         }
         ConstraintComponent::QualifiedMaxCount(n) => {
-            if let Some((shape_key, disjoint, siblings)) =
-                qualified_value_context(shapes, ps)
-            {
+            if let Some((shape_key, disjoint, siblings)) = qualified_value_context(shapes, ps) {
                 let count = values
                     .iter()
                     .filter(|(vkey, _)| {
@@ -1962,7 +1999,9 @@ fn focus_as_term(key: &str) -> Term {
     if let Some(rest) = key.strip_prefix("literal:") {
         // Formats: `lex|datatype` or `lex|rdf:langString|tag`.
         if let Some((head, tail)) = rest.rsplit_once('|') {
-            if let Some(lex) = head.strip_suffix(RDF_LANG_STRING).and_then(|h| h.strip_suffix('|'))
+            if let Some(lex) = head
+                .strip_suffix(RDF_LANG_STRING)
+                .and_then(|h| h.strip_suffix('|'))
             {
                 let lang = LanguageTag::parse(tail)
                     .unwrap_or_else(|_| LanguageTag::parse("und").expect("und is a valid tag"));
@@ -2183,9 +2222,7 @@ fn parse_brace_quant(chars: &[char], i: &mut usize) -> Option<Quant> {
     let body: String = rest[..close].iter().collect();
     let q = match body.split_once(',') {
         None => Quant::Exactly(body.trim().parse::<usize>().ok()?),
-        Some((lo, hi)) if hi.trim().is_empty() => {
-            Quant::AtLeast(lo.trim().parse::<usize>().ok()?)
-        }
+        Some((lo, hi)) if hi.trim().is_empty() => Quant::AtLeast(lo.trim().parse::<usize>().ok()?),
         Some((lo, hi)) => {
             let l = lo.trim().parse::<usize>().ok()?;
             let h = hi.trim().parse::<usize>().ok()?;
@@ -2255,9 +2292,7 @@ fn match_at(
         }
         Some(Quant::Exactly(n)) => {
             let end = ci + *n;
-            if end <= text.len()
-                && text[ci..end].iter().all(|c| atom_matches(atom, *c))
-            {
+            if end <= text.len() && text[ci..end].iter().all(|c| atom_matches(atom, *c)) {
                 match_at(tokens, ti + 1, text, end, anchored_end)
             } else {
                 false
@@ -2274,7 +2309,15 @@ fn match_at(
             if consumed < *n {
                 false
             } else {
-                at_least_rest(tokens, ti + 1, text, ci + consumed, anchored_end, atom, None)
+                at_least_rest(
+                    tokens,
+                    ti + 1,
+                    text,
+                    ci + consumed,
+                    anchored_end,
+                    atom,
+                    None,
+                )
             }
         }
         Some(Quant::Range(lo, hi)) => {
@@ -2551,7 +2594,10 @@ mod tests {
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].focus_node, "http://ex.org/p2");
-        assert_eq!(report.results[0].path.as_deref(), Some("http://ex.org/address"));
+        assert_eq!(
+            report.results[0].path.as_deref(),
+            Some("http://ex.org/address")
+        );
         assert_eq!(report.results[0].value.as_deref(), Some("http://ex.org/a2"));
         assert_eq!(
             report.results[0].component,
@@ -3021,7 +3067,11 @@ mod tests {
                 ex:i2 a ex:Item ; ex:label \"bonjour\"@fr ."
             ),
         );
-        assert!(report.conforms, "both labels use allowed tags: {:?}", report.results);
+        assert!(
+            report.conforms,
+            "both labels use allowed tags: {:?}",
+            report.results
+        );
         assert!(report.results.is_empty());
     }
 
@@ -3067,7 +3117,11 @@ mod tests {
                 ex:i1 a ex:Item ; ex:label \"hello\"@EN ."
             ),
         );
-        assert!(report.conforms, "EN should match en (case-insensitive): {:?}", report.results);
+        assert!(
+            report.conforms,
+            "EN should match en (case-insensitive): {:?}",
+            report.results
+        );
     }
 
     #[test]
@@ -3111,7 +3165,11 @@ mod tests {
                 ex:i2 a ex:Item ; ex:title \"hello\"@en, \"salut\"@fr ."
             ),
         );
-        assert!(report.conforms, "non-tagged literals do not compete: {:?}", report.results);
+        assert!(
+            report.conforms,
+            "non-tagged literals do not compete: {:?}",
+            report.results
+        );
     }
 
     #[test]
@@ -3281,11 +3339,9 @@ mod tests {
         // (not comparable against a timezone-carrying minimum).
         assert_eq!(report.results.len(), 2);
         assert!(
-            report
-                .results
-                .iter()
-                .all(|r| r.component
-                    == "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent")
+            report.results.iter().all(
+                |r| r.component == "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent"
+            )
         );
     }
 
@@ -3518,7 +3574,10 @@ mod tests {
         // class, the parent does not.
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 1);
-        assert_eq!(report.results[0].value.as_deref(), Some("http://ex.org/parent"));
+        assert_eq!(
+            report.results[0].value.as_deref(),
+            Some("http://ex.org/parent")
+        );
     }
 
     #[test]
@@ -3542,13 +3601,8 @@ mod tests {
         );
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 2);
-        assert!(
-            report
-                .results
-                .iter()
-                .all(|r| r.path.as_deref()
-                    == Some("(^http://ex.org/p)/(^http://ex.org/p)")
-                    && r.component == "http://www.w3.org/ns/shacl#ClassConstraintComponent")
-        );
+        assert!(report.results.iter().all(|r| r.path.as_deref()
+            == Some("(^http://ex.org/p)/(^http://ex.org/p)")
+            && r.component == "http://www.w3.org/ns/shacl#ClassConstraintComponent"));
     }
 }

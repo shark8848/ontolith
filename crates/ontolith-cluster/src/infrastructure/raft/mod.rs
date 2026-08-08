@@ -169,7 +169,6 @@ impl MemStorage {
             .map(|(_, e)| e.clone())
             .collect()
     }
-
 }
 
 /// Clone-on-read log reader sharing the store's backing map.
@@ -179,10 +178,7 @@ pub struct MemLogReader {
 }
 
 impl openraft::RaftLogReader<TypeConfig> for MemStorage {
-    async fn try_get_log_entries<RB>(
-        &mut self,
-        range: RB,
-    ) -> Result<Vec<Entry>, StorageError>
+    async fn try_get_log_entries<RB>(&mut self, range: RB) -> Result<Vec<Entry>, StorageError>
     where
         RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
     {
@@ -192,10 +188,7 @@ impl openraft::RaftLogReader<TypeConfig> for MemStorage {
 }
 
 impl openraft::RaftLogReader<TypeConfig> for MemLogReader {
-    async fn try_get_log_entries<RB>(
-        &mut self,
-        range: RB,
-    ) -> Result<Vec<Entry>, StorageError>
+    async fn try_get_log_entries<RB>(&mut self, range: RB) -> Result<Vec<Entry>, StorageError>
     where
         RB: RangeBounds<u64> + Clone + std::fmt::Debug + openraft::OptionalSend,
     {
@@ -285,13 +278,19 @@ impl openraft::RaftStorage<TypeConfig> for MemStorage {
         Ok(())
     }
 
-    async fn delete_conflict_logs_since(&mut self, log_id: openraft::LogId<NodeId>) -> Result<(), StorageError> {
+    async fn delete_conflict_logs_since(
+        &mut self,
+        log_id: openraft::LogId<NodeId>,
+    ) -> Result<(), StorageError> {
         let mut inner = self.inner.write().unwrap();
         inner.entries.retain(|index, _| *index < log_id.index);
         Ok(())
     }
 
-    async fn purge_logs_upto(&mut self, log_id: openraft::LogId<NodeId>) -> Result<(), StorageError> {
+    async fn purge_logs_upto(
+        &mut self,
+        log_id: openraft::LogId<NodeId>,
+    ) -> Result<(), StorageError> {
         let mut inner = self.inner.write().unwrap();
         inner.entries.retain(|index, _| *index > log_id.index);
         let cur = inner.last_purged.unwrap_or_default();
@@ -314,7 +313,10 @@ impl openraft::RaftStorage<TypeConfig> for MemStorage {
         Ok((inner.last_applied, inner.membership.clone()))
     }
 
-    async fn apply_to_state_machine(&mut self, entries: &[Entry]) -> Result<Vec<LogEntry>, StorageError> {
+    async fn apply_to_state_machine(
+        &mut self,
+        entries: &[Entry],
+    ) -> Result<Vec<LogEntry>, StorageError> {
         let mut inner = self.inner.write().unwrap();
         let mut out = Vec::new();
         for entry in entries {
@@ -363,14 +365,19 @@ impl openraft::RaftStorage<TypeConfig> for MemStorage {
         Ok(())
     }
 
-    async fn get_current_snapshot(&mut self) -> Result<Option<openraft::Snapshot<TypeConfig>>, StorageError> {
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<openraft::Snapshot<TypeConfig>>, StorageError> {
         let inner = self.inner.read().unwrap();
         Ok(match &inner.last_applied {
             Some(last_log_id) => {
                 let meta = openraft::SnapshotMeta {
                     last_log_id: Some(*last_log_id),
                     last_membership: inner.membership.clone(),
-                    snapshot_id: format!("mem-{}-{}", last_log_id.leader_id.term, last_log_id.index),
+                    snapshot_id: format!(
+                        "mem-{}-{}",
+                        last_log_id.leader_id.term, last_log_id.index
+                    ),
                 };
                 Some(openraft::Snapshot {
                     meta,
@@ -417,7 +424,8 @@ pub struct MemNetwork {
     target: NodeId,
 }
 
-type NetError = openraft::error::RPCError<NodeId, openraft::BasicNode, openraft::error::RaftError<NodeId>>;
+type NetError =
+    openraft::error::RPCError<NodeId, openraft::BasicNode, openraft::error::RaftError<NodeId>>;
 
 impl MemNetwork {
     #[allow(clippy::result_large_err)] // error type is mandated by openraft::RaftNetwork
@@ -440,9 +448,12 @@ impl openraft::RaftNetwork<TypeConfig> for MemNetwork {
         _option: openraft::network::RPCOption,
     ) -> Result<openraft::raft::AppendEntriesResponse<NodeId>, NetError> {
         let raft = self.target_raft()?;
-        raft.append_entries(rpc)
-            .await
-            .map_err(|e| openraft::error::RPCError::RemoteError(openraft::error::RemoteError::new(self.target, e)))
+        raft.append_entries(rpc).await.map_err(|e| {
+            openraft::error::RPCError::RemoteError(openraft::error::RemoteError::new(
+                self.target,
+                e,
+            ))
+        })
     }
 
     async fn install_snapshot(
@@ -463,9 +474,12 @@ impl openraft::RaftNetwork<TypeConfig> for MemNetwork {
                 &std::io::Error::other("snapshot rpc failed"),
             )),
         })?;
-        raft.install_snapshot(rpc)
-            .await
-            .map_err(|e| openraft::error::RPCError::RemoteError(openraft::error::RemoteError::new(self.target, e)))
+        raft.install_snapshot(rpc).await.map_err(|e| {
+            openraft::error::RPCError::RemoteError(openraft::error::RemoteError::new(
+                self.target,
+                e,
+            ))
+        })
     }
 
     async fn vote(
@@ -474,9 +488,12 @@ impl openraft::RaftNetwork<TypeConfig> for MemNetwork {
         _option: openraft::network::RPCOption,
     ) -> Result<openraft::raft::VoteResponse<NodeId>, NetError> {
         let raft = self.target_raft()?;
-        raft.vote(rpc)
-            .await
-            .map_err(|e| openraft::error::RPCError::RemoteError(openraft::error::RemoteError::new(self.target, e)))
+        raft.vote(rpc).await.map_err(|e| {
+            openraft::error::RPCError::RemoteError(openraft::error::RemoteError::new(
+                self.target,
+                e,
+            ))
+        })
     }
 }
 
@@ -626,18 +643,34 @@ impl RaftClusterRuntime {
         let data_plane_io = Arc::new(Mutex::new(None::<Arc<dyn DataPlaneSnapshotIo>>));
 
         let raft = match (&store, &net) {
-            (RaftStoreKind::Mem(store), RaftNetKind::Mem(net)) => {
-                build_node(&rt, node_id, raft_config.clone(), store.clone(), net.clone())
-            }
-            (RaftStoreKind::Mem(store), RaftNetKind::Http(net)) => {
-                build_node(&rt, node_id, raft_config.clone(), store.clone(), net.clone())
-            }
-            (RaftStoreKind::Rocks(store), RaftNetKind::Mem(net)) => {
-                build_node(&rt, node_id, raft_config.clone(), store.clone(), net.clone())
-            }
-            (RaftStoreKind::Rocks(store), RaftNetKind::Http(net)) => {
-                build_node(&rt, node_id, raft_config.clone(), store.clone(), net.clone())
-            }
+            (RaftStoreKind::Mem(store), RaftNetKind::Mem(net)) => build_node(
+                &rt,
+                node_id,
+                raft_config.clone(),
+                store.clone(),
+                net.clone(),
+            ),
+            (RaftStoreKind::Mem(store), RaftNetKind::Http(net)) => build_node(
+                &rt,
+                node_id,
+                raft_config.clone(),
+                store.clone(),
+                net.clone(),
+            ),
+            (RaftStoreKind::Rocks(store), RaftNetKind::Mem(net)) => build_node(
+                &rt,
+                node_id,
+                raft_config.clone(),
+                store.clone(),
+                net.clone(),
+            ),
+            (RaftStoreKind::Rocks(store), RaftNetKind::Http(net)) => build_node(
+                &rt,
+                node_id,
+                raft_config.clone(),
+                store.clone(),
+                net.clone(),
+            ),
         };
         if let RaftNetKind::Mem(_) = &net {
             registry.register(node_id, raft.clone());
@@ -756,9 +789,9 @@ impl RaftClusterRuntime {
             if *follower == self.config.node_id {
                 continue;
             }
-            if exclude.is_some_and(|excluded| {
-                excluded.contains(self.cluster_id_for(*follower).as_str())
-            }) {
+            if exclude
+                .is_some_and(|excluded| excluded.contains(self.cluster_id_for(*follower).as_str()))
+            {
                 continue;
             }
             let acked_index = acked.map(|log_id| log_id.index).unwrap_or(0);
@@ -812,7 +845,13 @@ impl RaftClusterRuntime {
     fn registry_nodes(&self) -> Vec<ClusterNode> {
         self.sync_applied();
         let leader = self.metrics().current_leader;
-        let mut nodes = self.nodes.read().unwrap().values().cloned().collect::<Vec<_>>();
+        let mut nodes = self
+            .nodes
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         for node in &mut nodes {
             node.role = if Some(self.raft_id_for(&node.node_id)) == leader {
                 NodeRole::Leader
@@ -878,9 +917,8 @@ impl RaftClusterRuntime {
             snapshot_id: transfer.snapshot.snapshot_id,
             bytes,
         };
-        let (status, body) =
-            http::transfer_snapshot_on_peer(&target_addr, &self.secret, &request)
-                .map_err(|e| OntolithError::Failed(format!("transfer snapshot: {e}")))?;
+        let (status, body) = http::transfer_snapshot_on_peer(&target_addr, &self.secret, &request)
+            .map_err(|e| OntolithError::Failed(format!("transfer snapshot: {e}")))?;
         if status != 200 {
             return Err(OntolithError::Failed(format!(
                 "transfer snapshot to {} failed: http {status}: {}",
@@ -997,8 +1035,9 @@ impl RaftClusterRuntime {
                     .or_insert_with(|| ClusterNode::new(id.clone(), addr.clone()));
             }
         }
-        self.leader_id()
-            .ok_or(OntolithError::InvalidState("raft bootstrap did not elect a leader"))
+        self.leader_id().ok_or(OntolithError::InvalidState(
+            "raft bootstrap did not elect a leader",
+        ))
     }
 
     /// Initialize the raft cluster with the given membership (used by the
@@ -1022,9 +1061,9 @@ impl RaftClusterRuntime {
             // ignore (the cluster is already formed and in motion).
             if !matches!(
                 &e,
-                openraft::error::RaftError::APIError(
-                    openraft::error::InitializeError::NotAllowed(_)
-                )
+                openraft::error::RaftError::APIError(openraft::error::InitializeError::NotAllowed(
+                    _
+                ))
             ) {
                 return Err(OntolithError::Failed(format!("raft initialize: {e}")));
             }
@@ -1072,7 +1111,9 @@ impl MetadataService for RaftClusterRuntime {
     }
 
     fn leader_id(&self) -> Option<ClusterNodeId> {
-        self.metrics().current_leader.map(|id| self.cluster_id_for(id))
+        self.metrics()
+            .current_leader
+            .map(|id| self.cluster_id_for(id))
     }
 
     fn status(&self) -> ClusterStatus {
@@ -1268,13 +1309,16 @@ impl DataPlaneSync for RaftClusterRuntime {
             ));
         }
         drop(known);
-        self.data_plane_pending.lock().unwrap().push(RaftPendingTransfer {
-            source: source.clone(),
-            target: target.clone(),
-            shard_id,
-            slots,
-            snapshot,
-        });
+        self.data_plane_pending
+            .lock()
+            .unwrap()
+            .push(RaftPendingTransfer {
+                source: source.clone(),
+                target: target.clone(),
+                shard_id,
+                slots,
+                snapshot,
+            });
         Ok(())
     }
 
@@ -1287,7 +1331,10 @@ impl DataPlaneSync for RaftClusterRuntime {
         let mut receipts = Vec::with_capacity(pending.len());
         for transfer in pending {
             let receipt = self.complete_transfer(transfer)?;
-            self.data_plane_history.lock().unwrap().push(receipt.clone());
+            self.data_plane_history
+                .lock()
+                .unwrap()
+                .push(receipt.clone());
             receipts.push(receipt);
         }
         Ok(receipts)
@@ -1474,8 +1521,16 @@ mod tests {
             ),
             "no leader elected over HTTP"
         );
-        let leader = if rt0.leader_id().is_some() { &rt0 } else { &rt1 };
-        let follower = if rt0.leader_id().is_some() { &rt1 } else { &rt0 };
+        let leader = if rt0.leader_id().is_some() {
+            &rt0
+        } else {
+            &rt1
+        };
+        let follower = if rt0.leader_id().is_some() {
+            &rt1
+        } else {
+            &rt0
+        };
 
         // index 2: index 1 is the membership entry written by initialize().
         let entry = leader
@@ -1491,7 +1546,10 @@ mod tests {
         // The follower materialized the entry in its RocksDB `raft` CF.
         let replicated = follower.entries_from(2);
         assert_eq!(replicated.len(), 1);
-        assert_eq!(replicated[0].payload, LogPayload::Metadata("over-http".into()));
+        assert_eq!(
+            replicated[0].payload,
+            LogPayload::Metadata("over-http".into())
+        );
     }
 
     #[test]
@@ -1522,10 +1580,7 @@ mod tests {
         }
 
         assert!(
-            wait_until(
-                || rts.iter().any(|rt| rt.leader_id().is_some()),
-                30000
-            ),
+            wait_until(|| rts.iter().any(|rt| rt.leader_id().is_some()), 30000),
             "no leader elected in 3-node cluster"
         );
         let leader = rts
@@ -1542,10 +1597,7 @@ mod tests {
         let entry = leader_append(&rts, LogPayload::Metadata("majority-commit".into()));
         assert_eq!(entry.index, 2);
         assert!(
-            wait_until(
-                || rts.iter().all(|rt| rt.commit_index() >= 2),
-                30000
-            ),
+            wait_until(|| rts.iter().all(|rt| rt.commit_index() >= 2), 30000),
             "all 3 nodes did not commit replicated entry"
         );
         assert!(
@@ -1562,19 +1614,13 @@ mod tests {
         // Lose one follower: majority (2 of 3) still commits.
         drop(rts.remove(2));
         assert!(
-            wait_until(
-                || rts.iter().any(|rt| rt.leader_id().is_some()),
-                30000
-            ),
+            wait_until(|| rts.iter().any(|rt| rt.leader_id().is_some()), 30000),
             "no leader after follower loss"
         );
         let entry = leader_append(&rts, LogPayload::Metadata("survives-loss".into()));
         assert_eq!(entry.index, 3);
         assert!(
-            wait_until(
-                || rts.iter().all(|rt| rt.commit_index() >= 3),
-                30000
-            ),
+            wait_until(|| rts.iter().all(|rt| rt.commit_index() >= 3), 30000),
             "majority commit failed after one follower lost"
         );
     }
@@ -1599,13 +1645,11 @@ mod tests {
             .map(|j| (format!("n{j}"), format!("http://{}", addrs[j])))
             .collect::<Vec<_>>();
         for rt in &rts {
-            rt.bootstrap(members.clone()).expect("bootstrap 3-node membership");
+            rt.bootstrap(members.clone())
+                .expect("bootstrap 3-node membership");
         }
         assert!(
-            wait_until(
-                || rts.iter().any(|rt| rt.leader_id().is_some()),
-                30000
-            ),
+            wait_until(|| rts.iter().any(|rt| rt.leader_id().is_some()), 30000),
             "no leader elected"
         );
         let leader_idx = (0..3)
@@ -1740,13 +1784,11 @@ mod tests {
             .map(|j| (format!("n{j}"), format!("http://{}", addrs[j])))
             .collect::<Vec<_>>();
         for rt in &rts {
-            rt.bootstrap(members.clone()).expect("bootstrap 3-node membership");
+            rt.bootstrap(members.clone())
+                .expect("bootstrap 3-node membership");
         }
         assert!(
-            wait_until(
-                || rts.iter().any(|rt| rt.leader_id().is_some()),
-                30000
-            ),
+            wait_until(|| rts.iter().any(|rt| rt.leader_id().is_some()), 30000),
             "no leader elected"
         );
         let leader_idx = (0..3)
@@ -1770,7 +1812,10 @@ mod tests {
         }));
 
         let shard = ShardId::new(7);
-        let slots = SlotRange { start: 100, end: 199 };
+        let slots = SlotRange {
+            start: 100,
+            end: 199,
+        };
         let snapshot = SnapshotRef::new(42, None, ConsistencyLevel::Eventual, 3);
         rts[leader_idx]
             .transfer_snapshot(&source_id, &target_id, shard, slots, snapshot)
@@ -1804,7 +1849,11 @@ mod tests {
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].transferred_entries, 43);
         assert_eq!(rts[sim_idx].sync_history().len(), 1);
-        assert_eq!(imports.lock().unwrap().len(), 1, "fallback must not hit HTTP");
+        assert_eq!(
+            imports.lock().unwrap().len(),
+            1,
+            "fallback must not hit HTTP"
+        );
     }
 
     #[test]
@@ -1827,13 +1876,11 @@ mod tests {
             .map(|j| (format!("n{j}"), format!("http://{}", addrs[j])))
             .collect::<Vec<_>>();
         for rt in &rts {
-            rt.bootstrap(members.clone()).expect("bootstrap 3-node membership");
+            rt.bootstrap(members.clone())
+                .expect("bootstrap 3-node membership");
         }
         assert!(
-            wait_until(
-                || rts.iter().any(|rt| rt.leader_id().is_some()),
-                30000
-            ),
+            wait_until(|| rts.iter().any(|rt| rt.leader_id().is_some()), 30000),
             "no leader elected"
         );
         let leader_idx = (0..3)
@@ -1911,7 +1958,9 @@ mod tests {
     #[test]
     fn single_node_bootstrap_elects_leader() {
         let rt = RaftClusterRuntime::with_defaults();
-        let leader = rt.bootstrap(vec![("n0".into(), "mem://n0".into())]).unwrap();
+        let leader = rt
+            .bootstrap(vec![("n0".into(), "mem://n0".into())])
+            .unwrap();
         assert_eq!(leader.as_str(), "n0");
         assert!(rt.is_leader(&ClusterNodeId::new("n0")));
         assert_eq!(rt.leader_id(), Some(ClusterNodeId::new("n0")));
@@ -1921,7 +1970,8 @@ mod tests {
     #[test]
     fn append_commits_through_raft() {
         let rt = RaftClusterRuntime::with_defaults();
-        rt.bootstrap(vec![("n0".into(), "mem://n0".into())]).unwrap();
+        rt.bootstrap(vec![("n0".into(), "mem://n0".into())])
+            .unwrap();
 
         // index 1 is the membership entry written by initialize().
         let e1 = rt.append(LogPayload::Metadata("alpha".into())).unwrap();
@@ -1948,7 +1998,8 @@ mod tests {
     #[test]
     fn trait_adapter_roundtrip() {
         let rt = RaftClusterRuntime::with_defaults();
-        rt.bootstrap(vec![("n0".into(), "mem://n0".into())]).unwrap();
+        rt.bootstrap(vec![("n0".into(), "mem://n0".into())])
+            .unwrap();
 
         let status = rt.status();
         assert_eq!(status.node_count, 1);
@@ -2000,8 +2051,16 @@ mod tests {
             15000
         ));
 
-        let leader = if rt0.leader_id().is_some() { &rt0 } else { &rt1 };
-        let follower = if rt0.leader_id().is_some() { &rt1 } else { &rt0 };
+        let leader = if rt0.leader_id().is_some() {
+            &rt0
+        } else {
+            &rt1
+        };
+        let follower = if rt0.leader_id().is_some() {
+            &rt1
+        } else {
+            &rt0
+        };
         // index 2: index 1 is the membership entry written by initialize().
         let entry = leader
             .append(LogPayload::Metadata("replicated".into()))

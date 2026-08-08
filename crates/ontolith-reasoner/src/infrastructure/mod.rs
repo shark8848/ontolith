@@ -1685,7 +1685,12 @@ mod tests {
         let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         let input = vec![
             t("_:r", &format!("{owl}onProperty"), "urn:age", &dict),
-            tl("_:r", &format!("{owl}hasValue"), LiteralValue::Integer(42), &dict),
+            tl(
+                "_:r",
+                &format!("{owl}hasValue"),
+                LiteralValue::Integer(42),
+                &dict,
+            ),
             tl("urn:alice", "urn:age", LiteralValue::Integer(42), &dict),
         ];
         let reasoner = ForwardChainReasoner::new();
@@ -1707,7 +1712,12 @@ mod tests {
         let dict = InMemoryDictionary::new();
         let owl = "http://www.w3.org/2002/07/owl#";
         let mut input = vec![
-            t("urn:uncleOf", &format!("{owl}propertyChainAxiom"), "_:u", &dict),
+            t(
+                "urn:uncleOf",
+                &format!("{owl}propertyChainAxiom"),
+                "_:u",
+                &dict,
+            ),
             t(
                 "urn:ancestorOf",
                 &format!("{owl}propertyChainAxiom"),
@@ -1755,7 +1765,12 @@ mod tests {
         let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         let reasoner = ForwardChainReasoner::new();
         let conflicting = vec![
-            t("urn:p", rdf_type, &format!("{owl}IrreflexiveProperty"), &dict),
+            t(
+                "urn:p",
+                rdf_type,
+                &format!("{owl}IrreflexiveProperty"),
+                &dict,
+            ),
             t("urn:x", "urn:p", "urn:x", &dict),
         ];
         let outcome = reasoner
@@ -1763,7 +1778,12 @@ mod tests {
             .expect("materialize");
         assert!(outcome.report.inconsistent, "expected prp-irp ⊥ (x p x)");
         let fine = vec![
-            t("urn:p", rdf_type, &format!("{owl}IrreflexiveProperty"), &dict),
+            t(
+                "urn:p",
+                rdf_type,
+                &format!("{owl}IrreflexiveProperty"),
+                &dict,
+            ),
             t("urn:x", "urn:p", "urn:y", &dict),
         ];
         let outcome = reasoner
@@ -1782,7 +1802,12 @@ mod tests {
         let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         let reasoner = ForwardChainReasoner::new();
         let mut conflicting = vec![
-            t("_:adc", rdf_type, &format!("{owl}AllDisjointClasses"), &dict),
+            t(
+                "_:adc",
+                rdf_type,
+                &format!("{owl}AllDisjointClasses"),
+                &dict,
+            ),
             t("_:adc", &format!("{owl}members"), "_:l", &dict),
             t("urn:z", rdf_type, "urn:A", &dict),
             t("urn:z", rdf_type, "urn:B", &dict),
@@ -1796,7 +1821,12 @@ mod tests {
             "expected cax-adc ⊥ (z typed into two disjoint classes)"
         );
         let mut fine = vec![
-            t("_:adc", rdf_type, &format!("{owl}AllDisjointClasses"), &dict),
+            t(
+                "_:adc",
+                rdf_type,
+                &format!("{owl}AllDisjointClasses"),
+                &dict,
+            ),
             t("_:adc", &format!("{owl}members"), "_:l", &dict),
             t("urn:z", rdf_type, "urn:A", &dict),
             t("urn:w", rdf_type, "urn:B", &dict),
