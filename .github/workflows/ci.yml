@@ -100,6 +100,104 @@ jobs:
       - name: SPARQL R1 smoke (integration)
         run: cargo test -p ontolith-compliance --test sparql_r1_smoke -- --nocapture
 
+      - name: multi-node raft smoke (3 processes, M3)
+        run: |
+          set -euo pipefail
+          base=$((23000 + (RANDOM % 2000)))
+          p0=$base; p1=$((base+1)); p2=$((base+2))
+          m0=$((base+100)); m1=$((base+101)); m2=$((base+102))
+          secret="ci-raft-secret-${RANDOM}"
+          d0="$(mktemp -d)"; d1="$(mktemp -d)"; d2="$(mktemp -d)"
+          members="n0=http://127.0.0.1:${p0},n1=http://127.0.0.1:${p1},n2=http://127.0.0.1:${p2}"
+          pids=()
+          for i in 0 1 2; do
+            eval p=\$p$i; eval m=\$m$i; eval d=\$d$i
+            ONTOLITH_CLUSTER_MODE=raft \
+            ONTOLITH_RAFT_NODE_ID=$i \
+            ONTOLITH_RAFT_LISTEN="127.0.0.1:${p}" \
+            ONTOLITH_RAFT_SECRET="$secret" \
+            ONTOLITH_RAFT_MEMBERS="$members" \
+            ONTOLITH_RAFT_STORAGE_PATH="$d" \
+            ONTOLITH_MANAGEMENT_BIND="127.0.0.1:${m}" \
+            ./target/debug/ontolith-management-server >"/tmp/raft-smoke-$i.log" 2>&1 &
+            pids+=($!)
+          done
+          cleanup() {
+            for pid in "${pids[@]:-}"; do
+              if [[ -n "$pid" ]]; then kill "$pid" >/dev/null 2>&1 || true; fi
+            done
+            wait "${pids[@]:-}" 2>/dev/null || true
+            rm -rf "$d0" "$d1" "$d2"
+          }
+          trap cleanup EXIT
+
+          leader_id=""
+          for _ in $(seq 1 90); do
+            for j in 0 1 2; do
+              eval m=\$m$j
+              body="$(curl -fsS --max-time 2 "http://127.0.0.1:${m}/admin/monitoring" 2>/dev/null || true)"
+              lid="$(echo "$body" | grep -o '"leader":"n[012]"' | head -1 | sed 's/.*"n\([012]\)".*/\1/')"
+              if [[ -n "$lid" ]]; then leader_id=$lid; break 2; fi
+            done
+            sleep 1
+          done
+          if [[ -z "$leader_id" ]]; then
+            echo "raft smoke failed: no leader elected"
+            for i in 0 1 2; do echo "--- node $i log ---"; tail -n 20 "/tmp/raft-smoke-$i.log" || true; done
+            exit 1
+          fi
+          eval lm=\$m$leader_id
+          echo "raft smoke: leader=n$leader_id bind=${lm}"
+
+          body="$(curl -fsS --max-time 10 -X POST "http://127.0.0.1:${lm}/admin/data/replicate?append=1")"
+          echo "raft smoke replicate: ${body}"
+          if ! echo "$body" | grep -q '"applied_entries":[1-9]'; then
+            echo "raft smoke failed: applied_entries not >= 1"
+            exit 1
+          fi
+          commit="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2)"
+          if (( commit < 2 )); then
+            echo "raft smoke failed: commit_index < 2 (${commit})"
+            exit 1
+          fi
+
+          reached=0
+          for _ in $(seq 1 60); do
+            reached=1
+            for j in 0 1 2; do
+              eval m=\$m$j
+              body="$(curl -fsS --max-time 2 "http://127.0.0.1:${m}/admin/monitoring" 2>/dev/null || true)"
+              c="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2)"
+              if [[ -z "$c" || "$c" -lt "$commit" ]]; then reached=0; fi
+            done
+            (( reached == 1 )) && break
+            sleep 1
+          done
+          if (( reached != 1 )); then
+            echo "raft smoke failed: nodes did not reach commit_index ${commit}"
+            exit 1
+          fi
+          echo "raft smoke: all 3 nodes reached commit_index >= ${commit}"
+
+          follower=""
+          for j in 0 1 2; do
+            if [[ "$j" != "$leader_id" ]]; then follower=$j; break; fi
+          done
+          echo "raft smoke: killing follower n${follower}"
+          kill "${pids[$follower]}" >/dev/null 2>&1 || true
+          wait "${pids[$follower]}" 2>/dev/null || true
+          pids[$follower]=""
+
+          body="$(curl -fsS --max-time 10 -X POST "http://127.0.0.1:${lm}/admin/data/replicate?append=1")"
+          echo "raft smoke replicate after follower loss: ${body}"
+          commit2="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2)"
+          if (( commit2 <= commit )); then
+            echo "raft smoke failed: commit did not advance after follower loss (${commit} -> ${commit2})"
+            exit 1
+          fi
+          echo "raft smoke: majority commit survived follower loss (commit ${commit} -> ${commit2})"
+          echo "multi-node raft smoke OK"
+
   # Required-lite gate: block regressions in must-pass subset without requiring
   # zero known-gap / zero unsupported yet.
   w3c-subset:

@@ -536,6 +536,10 @@ pub struct RaftClusterRuntime {
     inner: InMemoryClusterRuntime,
     /// M2: raft RPC server owned by this node (stopped on drop).
     http_server: Option<HttpRaftServer>,
+    /// Leader-perspective per-follower replicated (acked) index watermark.
+    /// Lets `replicate_to_followers` report how many entries were newly
+    /// acked since the previous call (M3 real replication semantics).
+    replicated_watermark: Mutex<HashMap<u64, u64>>,
 }
 
 impl RaftClusterRuntime {
@@ -639,6 +643,7 @@ impl RaftClusterRuntime {
             bootstrapped: AtomicBool::new(false),
             inner,
             http_server,
+            replicated_watermark: Mutex::new(HashMap::new()),
         }
     }
 
@@ -682,6 +687,36 @@ impl RaftClusterRuntime {
         self.raft.metrics().borrow().clone()
     }
 
+    /// Sum of entries newly acked by followers since the previous call,
+    /// from the leader's replication metrics (`M3`). When `exclude` is
+    /// given, followers whose cluster id appears in the set are skipped
+    /// (partition-respecting variant).
+    fn replication_delta(&self, exclude: Option<&std::collections::HashSet<String>>) -> usize {
+        let metrics = self.metrics();
+        let mut watermark = self.replicated_watermark.lock().unwrap();
+        let mut total = 0usize;
+        let Some(replication) = metrics.replication.as_ref() else {
+            return 0;
+        };
+        for (follower, acked) in replication {
+            if *follower == self.config.node_id {
+                continue;
+            }
+            if exclude.is_some_and(|excluded| {
+                excluded.contains(self.cluster_id_for(*follower).as_str())
+            }) {
+                continue;
+            }
+            let acked_index = acked.map(|log_id| log_id.index).unwrap_or(0);
+            let prev = watermark.entry(*follower).or_insert(0);
+            if acked_index > *prev {
+                total += (acked_index - *prev) as usize;
+                *prev = acked_index;
+            }
+        }
+        total
+    }
+
     /// Single-node bootstrap: initialize raft membership with just this
     /// node, wait for self-election, and mirror the control-plane registry.
     pub fn bootstrap(&self, nodes: Vec<(String, String)>) -> Result<ClusterNodeId, OntolithError> {
@@ -716,9 +751,20 @@ impl RaftClusterRuntime {
                 .entry(*id)
                 .or_insert_with(|| format!("n{id}"));
         }
-        self.rt
-            .block_on(self.raft.initialize(members))
-            .map_err(|e| OntolithError::Failed(format!("raft initialize: {e}")))?;
+        let init = self.rt.block_on(self.raft.initialize(members));
+        if let Err(e) = init {
+            // Multi-node bootstrap: every node may call `initialize` with the
+            // same membership; openraft documents `NotAllowed` as safe to
+            // ignore (the cluster is already formed and in motion).
+            if !matches!(
+                &e,
+                openraft::error::RaftError::APIError(
+                    openraft::error::InitializeError::NotAllowed(_)
+                )
+            ) {
+                return Err(OntolithError::Failed(format!("raft initialize: {e}")));
+            }
+        }
         self.bootstrapped.store(true, Ordering::SeqCst);
         let wait = self.raft.wait(Some(std::time::Duration::from_secs(10)));
         self.rt
@@ -876,17 +922,30 @@ impl Replicator for RaftClusterRuntime {
         if raft_id == self.config.node_id {
             self.commit_index()
         } else {
-            // M1: followers' applied indexes arrive with M2 replication.
-            0
+            // Leader perspective: the last log index this node has acked
+            // (replicated) back to the leader.
+            self.metrics()
+                .replication
+                .as_ref()
+                .and_then(|r| r.get(&raft_id).copied().flatten())
+                .map(|log_id| log_id.index)
+                .unwrap_or(0)
         }
     }
 
     fn replicate_to_followers(&self) -> Result<usize, OntolithError> {
-        Ok(0)
+        Ok(self.replication_delta(None))
     }
 
     fn replicate_to_followers_respecting_partition(&self) -> Result<usize, OntolithError> {
-        Ok(0)
+        let isolated = self
+            .inner
+            .current_partition()
+            .isolated
+            .iter()
+            .map(|n| n.as_str().to_owned())
+            .collect::<std::collections::HashSet<_>>();
+        Ok(self.replication_delta(Some(&isolated)))
     }
 
     fn entries_from(&self, index: u64) -> Vec<LogEntry> {
@@ -1111,6 +1170,99 @@ mod tests {
         let replicated = follower.entries_from(2);
         assert_eq!(replicated.len(), 1);
         assert_eq!(replicated[0].payload, LogPayload::Metadata("over-http".into()));
+    }
+
+    #[test]
+    fn http_three_node_cluster_majority_commit_survives_follower_loss() {
+        let dirs = [
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        ];
+        let mut rts = vec![
+            RaftClusterRuntime::new(http_node_config(0, "cluster-secret", Some(dirs[0].path()))),
+            RaftClusterRuntime::new(http_node_config(1, "cluster-secret", Some(dirs[1].path()))),
+            RaftClusterRuntime::new(http_node_config(2, "cluster-secret", Some(dirs[2].path()))),
+        ];
+        let addrs = rts
+            .iter()
+            .map(|rt| rt.http_addr().expect("http addr"))
+            .collect::<Vec<_>>();
+        let members = (0..3)
+            .map(|j| (format!("n{j}"), format!("http://{}", addrs[j])))
+            .collect::<Vec<_>>();
+
+        // Every node bootstraps the same 3-node membership; `NotAllowed`
+        // (already initialized) is tolerated per openraft docs.
+        for rt in &rts {
+            rt.bootstrap(members.clone())
+                .expect("bootstrap 3-node membership over http");
+        }
+
+        assert!(
+            wait_until(
+                || rts.iter().any(|rt| rt.leader_id().is_some()),
+                30000
+            ),
+            "no leader elected in 3-node cluster"
+        );
+        let leader = rts
+            .iter()
+            .find(|rt| rt.leader_id().is_some())
+            .expect("leader");
+        let leader_index = rts.iter().position(|rt| std::ptr::eq(rt, leader)).unwrap();
+        let follower_ids = (0..3)
+            .filter(|i| *i != leader_index)
+            .map(|i| rts[i].node_id())
+            .collect::<Vec<_>>();
+
+        // Index 2: index 1 is the membership entry written by initialize().
+        let entry = leader
+            .append(LogPayload::Metadata("majority-commit".into()))
+            .expect("append over http");
+        assert_eq!(entry.index, 2);
+        assert!(
+            wait_until(
+                || rts.iter().all(|rt| rt.commit_index() >= 2),
+                30000
+            ),
+            "all 3 nodes did not commit replicated entry"
+        );
+        assert!(
+            leader.replicate_to_followers().unwrap() >= 1,
+            "replicate_to_followers must report real replicated entries"
+        );
+        for follower_id in &follower_ids {
+            assert!(
+                leader.applied_index(&ClusterNodeId::new(format!("n{follower_id}"))) >= 2,
+                "leader must observe follower acked index"
+            );
+        }
+
+        // Lose one follower: majority (2 of 3) still commits.
+        drop(rts.remove(2));
+        assert!(
+            wait_until(
+                || rts.iter().any(|rt| rt.leader_id().is_some()),
+                30000
+            ),
+            "no leader after follower loss"
+        );
+        let leader = rts
+            .iter()
+            .find(|rt| rt.leader_id().is_some())
+            .expect("leader after follower loss");
+        let entry = leader
+            .append(LogPayload::Metadata("survives-loss".into()))
+            .expect("append with 2 of 3 alive");
+        assert_eq!(entry.index, 3);
+        assert!(
+            wait_until(
+                || rts.iter().all(|rt| rt.commit_index() >= 3),
+                30000
+            ),
+            "majority commit failed after one follower lost"
+        );
     }
 
     #[test]

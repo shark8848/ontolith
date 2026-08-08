@@ -1,7 +1,7 @@
 # ADR-0004: Multi-process Raft data plane (openraft behind cluster traits)
 
 - Status: Accepted
-- Date: 2026-08-06 (M2 landed 2026-08-08)
+- Date: 2026-08-06 (M3 landed 2026-08-08)
 - Deciders: Codex (workspace) — pending PLAN-0001 signature review
 - Tags: cluster, raft, l4, tier-a
 
@@ -62,6 +62,10 @@ Forces:
      byte primitives + `RocksRaftStorage` + HTTP two-node election/replication)
    - M3: default runtime switch to `RaftClusterRuntime`; `InMemoryClusterRuntime`
      demoted to test/CI harness; CI multi-node smoke (3 processes).
+     (landed 2026-08-08: `AppState.cluster` -> `Arc<dyn ClusterRuntime>`,
+     `ONTOLITH_CLUSTER_MODE=raft` default in the management binary,
+     `replicate_to_followers` real acked-index watermark semantics,
+     three-node HTTP+RocksDB majority-commit test, CI 3-process smoke)
 6. **Scope for R1**: single-region, fixed membership bootstrap via config
    file; dynamic membership/learner ops are follow-up.
 

@@ -2,7 +2,7 @@
 
 use crate::app::AppState;
 use crate::http::{Handler, HttpRequest, HttpResponse, HttpServer, TlsServerConfig, now_ms};
-use ontolith_cluster::application::{MetadataService, RebalanceService, Replicator};
+use ontolith_cluster::domain::LogPayload;
 use ontolith_core::error::OntolithError;
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
@@ -23,6 +23,7 @@ const DATA_DIR_ENV: &str = "ONTOLITH_DATA_DIR";
 const AUTH_MODE_ENV: &str = "ONTOLITH_AUTH_MODE";
 const API_KEY_ENV: &str = "ONTOLITH_API_KEY";
 const AUDIT_PATH_ENV: &str = "ONTOLITH_AUDIT_PATH";
+const CLUSTER_MODE_ENV: &str = "ONTOLITH_CLUSTER_MODE";
 const MGMT_READ_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_READ_KEY";
 const MGMT_WRITE_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_WRITE_KEY";
 const MGMT_KEY_HEADER: &str = "x-ontolith-management-key";
@@ -400,6 +401,19 @@ impl ManagementState {
 
     fn admin_data_replicate(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
         let _ = self.authorize_admin_mutation(req)?;
+        // Optional demo append (`?append=1`), mirroring `/cluster/replicate`:
+        // drives one raft entry so the multi-node smoke can assert commit
+        // propagation through the management API.
+        if req
+            .query
+            .get("append")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false)
+        {
+            self.app
+                .cluster
+                .append(LogPayload::Metadata("mgmt-api-append".into()))?;
+        }
         let applied = self.app.cluster.replicate_to_followers()?;
         Ok(HttpResponse::json(
             200,
@@ -629,6 +643,7 @@ fn build_managed_app_state(
     auth: HeaderAuthenticator,
     audit: InMemoryAuditLog,
 ) -> Result<Arc<AppState>, String> {
+    let cluster = build_cluster_runtime()?;
     let wants_rocks = env::var(STORAGE_ENV)
         .ok()
         .map(|v| {
@@ -646,7 +661,7 @@ fn build_managed_app_state(
     {
         if wants_rocks || data_dir.is_some() {
             let path = data_dir.unwrap_or_else(|| PathBuf::from("./data/ontolith"));
-            return AppState::new_rocksdb_with_audit(bind_address, auth, path, audit)
+            return AppState::new_rocksdb_with_cluster(bind_address, auth, path, audit, cluster)
                 .map_err(|e| e.message().to_owned());
         }
     }
@@ -658,7 +673,39 @@ fn build_managed_app_state(
         }
     }
 
-    Ok(AppState::new_memory_with_audit(bind_address, auth, audit))
+    Ok(AppState::new_memory_with_cluster(bind_address, auth, audit, cluster))
+}
+
+/// Select the L4 cluster runtime for the management binary.
+///
+/// `ONTOLITH_CLUSTER_MODE` defaults to `raft` (ADR-0004 M3: the raft-backed
+/// runtime is the production default; the in-memory simulator remains the
+/// deterministic test/CI harness). `raft` requires the `raft-backend`
+/// feature of `ontolith-cluster` (default on).
+fn build_cluster_runtime() -> Result<Arc<dyn ontolith_cluster::application::ClusterRuntime>, String> {
+    let mode = env::var(CLUSTER_MODE_ENV)
+        .unwrap_or_else(|_| "raft".to_owned())
+        .trim()
+        .to_ascii_lowercase();
+    match mode.as_str() {
+        "raft" => {
+            #[cfg(feature = "raft-backend")]
+            {
+                crate::app::default_raft_cluster()
+            }
+            #[cfg(not(feature = "raft-backend"))]
+            {
+                Err(
+                    "cluster mode 'raft' requested but ontolith-server was built without the raft-backend feature"
+                        .to_owned(),
+                )
+            }
+        }
+        "memory" | "simulator" | "in-memory" => Ok(crate::app::default_cluster()),
+        other => Err(format!(
+            "unknown {CLUSTER_MODE_ENV} '{other}' (expected raft|memory)"
+        )),
+    }
 }
 
 fn error_response(err: OntolithError) -> HttpResponse {

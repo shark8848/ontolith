@@ -1,12 +1,11 @@
 //! Application state and route handlers for L5 HTTP gateway.
 
 use crate::http::{HttpRequest, HttpResponse, now_ms};
-use ontolith_cluster::application::{
-    ClusterRuntime, FailoverController, FaultInjector, MetadataService, RebalanceService,
-    Replicator, ShardRouter,
-};
+use ontolith_cluster::application::ClusterRuntime;
 use ontolith_cluster::domain::{ClusterNodeId, LogPayload, SessionId};
 use ontolith_cluster::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
+#[cfg(feature = "raft-backend")]
+use ontolith_cluster::infrastructure::raft::{RaftClusterConfig, RaftClusterRuntime};
 use ontolith_core::domain::ConsistencyLevel;
 use ontolith_core::error::OntolithError;
 use ontolith_observability::domain::{MetricKind, MetricPoint};
@@ -69,7 +68,7 @@ pub struct AppState {
     pub bind_address: String,
     pub backend: StorageBackendKind,
     pub data_dir: Option<PathBuf>,
-    pub cluster: Arc<InMemoryClusterRuntime>,
+    pub cluster: Arc<dyn ClusterRuntime>,
     pub cluster_tick: AtomicU64,
 }
 
@@ -96,6 +95,32 @@ impl AppState {
             StorageBackendKind::Memory,
             None,
             default_cluster(),
+            audit,
+        )
+    }
+
+    /// Build a memory-storage `AppState` with an explicit cluster runtime
+    /// (used by the management binary when `ONTOLITH_CLUSTER_MODE` selects
+    /// the raft-backed runtime).
+    pub fn new_memory_with_cluster(
+        bind_address: String,
+        auth: HeaderAuthenticator,
+        audit: InMemoryAuditLog,
+        cluster: Arc<dyn ClusterRuntime>,
+    ) -> Arc<Self> {
+        let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
+        let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
+        let triples: Arc<dyn TripleRepository> =
+            Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        Self::from_parts(
+            storage,
+            dictionary,
+            triples,
+            bind_address,
+            auth,
+            StorageBackendKind::Memory,
+            None,
+            cluster,
             audit,
         )
     }
@@ -134,8 +159,35 @@ impl AppState {
         ))
     }
 
+    /// RocksDB-storage variant with an explicit cluster runtime (raft mode).
+    #[cfg(feature = "rocksdb-backend")]
+    pub fn new_rocksdb_with_cluster(
+        bind_address: String,
+        auth: HeaderAuthenticator,
+        path: PathBuf,
+        audit: InMemoryAuditLog,
+        cluster: Arc<dyn ClusterRuntime>,
+    ) -> Result<Arc<Self>, OntolithError> {
+        let engine = Arc::new(ontolith_storage::open_durable_engine(&path)?);
+        let dictionary: Arc<dyn DictionaryCodec> = Arc::clone(&engine) as Arc<dyn DictionaryCodec>;
+        let storage: Arc<dyn StorageEngine> = Arc::clone(&engine) as Arc<dyn StorageEngine>;
+        let triples: Arc<dyn TripleRepository> =
+            Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        Ok(Self::from_parts(
+            storage,
+            dictionary,
+            triples,
+            bind_address,
+            auth,
+            StorageBackendKind::RocksDb,
+            Some(path),
+            cluster,
+            audit,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn from_parts(
+    pub(crate) fn from_parts(
         storage: Arc<dyn StorageEngine>,
         dictionary: Arc<dyn DictionaryCodec>,
         triples: Arc<dyn TripleRepository>,
@@ -143,7 +195,7 @@ impl AppState {
         auth: HeaderAuthenticator,
         backend: StorageBackendKind,
         data_dir: Option<PathBuf>,
-        cluster: Arc<InMemoryClusterRuntime>,
+        cluster: Arc<dyn ClusterRuntime>,
         audit: InMemoryAuditLog,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -956,7 +1008,7 @@ impl AppState {
     }
 }
 
-fn default_cluster() -> Arc<InMemoryClusterRuntime> {
+pub(crate) fn default_cluster() -> Arc<dyn ClusterRuntime> {
     let rt = Arc::new(InMemoryClusterRuntime::new(ClusterConfig {
         shard_count: 2,
         slot_count: 1024,
@@ -969,6 +1021,97 @@ fn default_cluster() -> Arc<InMemoryClusterRuntime> {
         ("n3".into(), "127.0.0.1:7003".into()),
     ]);
     rt
+}
+
+/// Raft-backed cluster runtime selected from the environment (M3,
+/// ADR-0004 decision 5). Env:
+///   `ONTOLITH_CLUSTER_MODE=raft` (default in the management binary)
+///   `ONTOLITH_RAFT_NODE_ID`    raft node id (0-based position in members)
+///   `ONTOLITH_RAFT_LISTEN`     `ip:port` for the raft RPC server
+///   `ONTOLITH_RAFT_SECRET`     shared cluster secret (HTTP transport)
+///   `ONTOLITH_RAFT_STORAGE_PATH` optional RocksDB dir for the raft log
+///   `ONTOLITH_RAFT_MEMBERS`    `n0=http://host:p0,n1=http://host:p1,...`
+///
+/// With no `ONTOLITH_RAFT_LISTEN` the in-memory transport is used and the
+/// membership defaults to a single `n0=mem://n0` node.
+#[cfg(feature = "raft-backend")]
+pub(crate) fn default_raft_cluster() -> Result<Arc<dyn ClusterRuntime>, String> {
+    use std::env;
+
+    let node_id = env::var("ONTOLITH_RAFT_NODE_ID")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let listen = env::var("ONTOLITH_RAFT_LISTEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let secret = env::var("ONTOLITH_RAFT_SECRET").unwrap_or_default();
+    let storage_path = env::var("ONTOLITH_RAFT_STORAGE_PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    let members_env = env::var("ONTOLITH_RAFT_MEMBERS")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let http_transport = listen.is_some();
+
+    if http_transport && secret.is_empty() {
+        return Err(
+            "raft HTTP transport requires a non-empty ONTOLITH_RAFT_SECRET".to_owned(),
+        );
+    }
+
+    let rt = Arc::new(RaftClusterRuntime::new(RaftClusterConfig {
+        node_id,
+        http_listen_addr: listen,
+        raft_secret: secret,
+        raft_storage_path: storage_path,
+        ..RaftClusterConfig::default()
+    }));
+
+    let nodes: Vec<(String, String)> = match members_env {
+        Some(list) => {
+            let parsed = list
+                .split(',')
+                .map(|pair| {
+                    let (id, addr) = pair
+                        .split_once('=')
+                        .ok_or_else(|| {
+                            format!("invalid ONTOLITH_RAFT_MEMBERS entry '{pair}' (expected id=url)")
+                        })?;
+                    Ok((id.trim().to_owned(), addr.trim().to_owned()))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            if parsed.is_empty() {
+                return Err("ONTOLITH_RAFT_MEMBERS must not be empty".to_owned());
+            }
+            if node_id as usize >= parsed.len() {
+                return Err(format!(
+                    "ONTOLITH_RAFT_NODE_ID={node_id} is out of range for {} members",
+                    parsed.len()
+                ));
+            }
+            let http_members = parsed.iter().any(|(_, addr)| addr.starts_with("http://"));
+            if http_members && !http_transport {
+                return Err(
+                    "ONTOLITH_RAFT_MEMBERS uses http:// addresses but ONTOLITH_RAFT_LISTEN is not set"
+                        .to_owned(),
+                );
+            }
+            if !http_members && http_transport {
+                return Err(
+                    "ONTOLITH_RAFT_LISTEN is set but ONTOLITH_RAFT_MEMBERS does not use http:// addresses"
+                        .to_owned(),
+                );
+            }
+            parsed
+        }
+        None => vec![("n0".into(), "mem://n0".into())],
+    };
+
+    rt.bootstrap(nodes)
+        .map_err(|e| format!("raft cluster bootstrap: {}", e.message()))?;
+    Ok(rt)
 }
 
 fn detect_ingest_format(req: &HttpRequest, path: &str) -> Result<ParseFormat, OntolithError> {

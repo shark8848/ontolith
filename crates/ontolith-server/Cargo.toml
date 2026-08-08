@@ -12,8 +12,9 @@ name = "ontolith-management-server"
 path = "src/bin/ontolith-management-server.rs"
 
 [features]
-default = ["rocksdb-backend"]
+default = ["rocksdb-backend", "raft-backend"]
 rocksdb-backend = ["ontolith-storage/rocksdb-backend"]
+raft-backend = ["ontolith-cluster/raft-backend"]
 
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
