@@ -2308,4 +2308,178 @@ mod tests {
                 .is_empty()
         );
     }
+
+    /// R1 gate: idempotent-write verification.
+    /// PutTriple/PutQuad are set-semantic: re-inserting an existing statement
+    /// (same batch, later batch, or replay after commit) must not duplicate.
+    #[test]
+    fn idempotent_put_set_semantics_no_duplicates() {
+        let storage = InMemoryStorageEngine::new();
+        let triple = Triple::new(
+            NodeId::new(10),
+            Iri::new("urn:test:knows"),
+            Term::Iri(Iri::new("urn:test:bob")),
+        );
+
+        // Same triple staged twice inside one batch.
+        let first = TxnId::new(101);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: first,
+                operations: vec![
+                    WriteOperation::PutTriple(triple.clone()),
+                    WriteOperation::PutTriple(triple.clone()),
+                ],
+            })
+            .expect("stage duplicate put");
+        storage
+            .commit_transaction(first)
+            .expect("commit duplicate put");
+        assert_eq!(storage.default_graph_triples().len(), 1);
+
+        // Replay of the same statement in a later txn must stay a no-op.
+        let replay = TxnId::new(102);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: replay,
+                operations: vec![WriteOperation::PutTriple(triple.clone())],
+            })
+            .expect("stage replay");
+        storage.commit_transaction(replay).expect("commit replay");
+        assert_eq!(
+            storage.default_graph_triples().len(),
+            1,
+            "set semantics must dedup replayed puts"
+        );
+        assert_eq!(storage.default_graph_triples()[0], triple);
+    }
+
+    /// Double-commit of the same txn id must be refused and never duplicate.
+    #[test]
+    fn idempotent_double_commit_refused_no_duplication() {
+        let storage = InMemoryStorageEngine::new();
+        let txn = TxnId::new(200);
+        let triple = Triple::new(
+            NodeId::new(20),
+            Iri::new("urn:test:p"),
+            Term::Iri(Iri::new("urn:test:o")),
+        );
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![WriteOperation::PutTriple(triple)],
+            })
+            .expect("stage");
+        storage.commit_transaction(txn).expect("commit");
+        assert!(storage.commit_transaction(txn).is_err());
+        assert_eq!(storage.default_graph_triples().len(), 1);
+    }
+
+    /// DeleteTriple/DeleteQuad are idempotent: deleting an absent statement
+    /// is a no-op, and a delete-after-delete leaves the store empty.
+    #[test]
+    fn idempotent_delete_absent_is_noop() {
+        let storage = InMemoryStorageEngine::new();
+        let triple = Triple::new(
+            NodeId::new(30),
+            Iri::new("urn:test:never"),
+            Term::Iri(Iri::new("urn:test:inserted")),
+        );
+
+        // Delete of an absent triple commits cleanly and changes nothing.
+        let absent = TxnId::new(301);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: absent,
+                operations: vec![WriteOperation::DeleteTriple(triple.clone())],
+            })
+            .expect("stage absent delete");
+        storage
+            .commit_transaction(absent)
+            .expect("commit absent delete");
+        assert!(storage.default_graph_triples().is_empty());
+
+        // Put -> delete -> delete again.
+        let put = TxnId::new(302);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: put,
+                operations: vec![WriteOperation::PutTriple(triple.clone())],
+            })
+            .expect("stage put");
+        storage.commit_transaction(put).expect("commit put");
+        assert_eq!(storage.default_graph_triples().len(), 1);
+
+        let delete = TxnId::new(303);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: delete,
+                operations: vec![WriteOperation::DeleteTriple(triple.clone())],
+            })
+            .expect("stage delete");
+        storage.commit_transaction(delete).expect("commit delete");
+        assert!(storage.default_graph_triples().is_empty());
+
+        let delete_again = TxnId::new(304);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: delete_again,
+                operations: vec![WriteOperation::DeleteTriple(triple.clone())],
+            })
+            .expect("stage delete again");
+        storage
+            .commit_transaction(delete_again)
+            .expect("commit delete again");
+        assert!(storage.default_graph_triples().is_empty());
+    }
+
+    /// Quad put dedup + delete idempotency (named graph, set semantics).
+    #[test]
+    fn idempotent_quad_set_semantics_and_delete() {
+        let storage = InMemoryStorageEngine::new();
+        let graph = Iri::new("urn:graph:set");
+        let quad = Quad::in_named_graph(
+            Triple::new(
+                NodeId::new(40),
+                Iri::new("urn:test:p"),
+                Term::Iri(Iri::new("urn:test:o")),
+            ),
+            graph.clone(),
+        );
+
+        let first = TxnId::new(401);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: first,
+                operations: vec![
+                    WriteOperation::PutQuad(quad.clone()),
+                    WriteOperation::PutQuad(quad.clone()),
+                ],
+            })
+            .expect("stage duplicate quad put");
+        storage.commit_transaction(first).expect("commit");
+        assert_eq!(
+            storage
+                .quads_matching_in_graph(&graph, None, None, None, None)
+                .len(),
+            1
+        );
+
+        let delete = TxnId::new(402);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: delete,
+                operations: vec![
+                    WriteOperation::DeleteQuad(quad.clone()),
+                    WriteOperation::DeleteQuad(quad.clone()),
+                ],
+            })
+            .expect("stage duplicate quad delete");
+        storage.commit_transaction(delete).expect("commit");
+        assert!(
+            storage
+                .quads_matching_in_graph(&graph, None, None, None, None)
+                .is_empty()
+        );
+    }
 }

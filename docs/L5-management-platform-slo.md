@@ -137,6 +137,37 @@ SLO（R1）：
 
 ---
 
+## 5. R1 实测基线（2026-08-08）
+
+核心 SLO 基线达标（R1 检查项）实测证据：本机启动 `ontolith-management-server`
+（debug 构建，`ONTOLITH_MANAGEMENT_BIND`/`ONTOLITH_BIND` 指向同一随机端口），
+用现有采集/评估脚本走真实观测窗口。
+
+### 短窗口 SLO（`check-management-slo-window.sh`）
+
+- 配置：20 样本 × 1s 间隔，阈值 success% >= 99、p95 <= 250ms
+- 结果：**通过**（20/20 可达，success 100%，p95 = 0ms）
+
+### 天/周窗口历史 SLO（`collect-slo-sample.sh` + `check-slo-window-history.sh`）
+
+- 配置：20 样本 × 1s 间隔写入 `samples.jsonl`，`--window-hours 1` 评估
+  （阈值 success% >= 99、p95 <= 250ms、连续失败 < 3、尖峰 <= 2.0×）
+- 结果：**通过**，报告 `{"samples":20,"success_percent":100,"p95_latency_ms":0,
+  "consecutive_failures":0,"passed":1}`
+
+### 实测延迟分布（20 样本）
+
+| 指标 | 值 |
+|------|-----|
+| min / p50 / p95 / max（ms） | 0 / 0 / 0 / 3 |
+| 目标阈值 p95（ms） | <= 250 |
+
+结论：R1 核心 SLO 基线已达标（远优于阈值）；门禁由 CI `management server smoke`
+与 `bench` 作业持续守护。长期天/周窗口由 systemd timers 采集并评估
+（`scripts/install-ontolith-slo-timers.sh`）。
+
+---
+
 ## 5. R1 之后的扩展
 
 - 增加时间窗口 SLO（例如 24h `availability >= 99.9%`）

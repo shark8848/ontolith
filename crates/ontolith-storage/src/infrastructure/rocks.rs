@@ -2366,4 +2366,83 @@ mod tests {
         let engine = RocksDbStorageEngine::open(path).unwrap();
         assert_eq!(engine.stats().triple_count, 1);
     }
+
+    /// R1 gate: idempotent-write verification on the RocksDB backend.
+    /// Replay/duplicate puts must dedup, deletes of absent statements are
+    /// no-ops, and the SPO/POS/OSP index CFs must stay consistent.
+    #[test]
+    fn rocksdb_idempotent_writes_dedup_and_delete_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        let triple = Triple::new(
+            NodeId::new(50),
+            Iri::new("urn:p"),
+            Term::Iri(Iri::new("urn:o")),
+        );
+
+        // Duplicate put in one batch + replay in a later txn both dedup.
+        let first = TxnId::new(1001);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: first,
+                operations: vec![
+                    WriteOperation::PutTriple(triple.clone()),
+                    WriteOperation::PutTriple(triple.clone()),
+                ],
+            })
+            .unwrap();
+        engine.commit_transaction(first).unwrap();
+        let replay = TxnId::new(1002);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: replay,
+                operations: vec![WriteOperation::PutTriple(triple.clone())],
+            })
+            .unwrap();
+        engine.commit_transaction(replay).unwrap();
+        assert_eq!(engine.stats().triple_count, 1);
+        assert_eq!(engine.default_graph_triples().len(), 1);
+        assert_eq!(
+            engine
+                .triples_by_predicate_in_txn(&Iri::new("urn:p"), None)
+                .len(),
+            1
+        );
+
+        // Delete of an absent statement is a no-op (idempotent).
+        let absent = TxnId::new(1003);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: absent,
+                operations: vec![WriteOperation::DeleteTriple(Triple::new(
+                    NodeId::new(999),
+                    Iri::new("urn:p"),
+                    Term::Iri(Iri::new("urn:never")),
+                ))],
+            })
+            .unwrap();
+        engine.commit_transaction(absent).unwrap();
+        assert_eq!(engine.stats().triple_count, 1);
+
+        // Double delete of the real statement leaves the store empty.
+        let delete = TxnId::new(1004);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: delete,
+                operations: vec![
+                    WriteOperation::DeleteTriple(triple.clone()),
+                    WriteOperation::DeleteTriple(triple.clone()),
+                ],
+            })
+            .unwrap();
+        engine.commit_transaction(delete).unwrap();
+        assert_eq!(engine.stats().triple_count, 0);
+        assert!(engine.default_graph_triples().is_empty());
+
+        // Reopen: idempotency outcome survives restart.
+        drop(engine);
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        assert_eq!(engine.stats().triple_count, 0);
+        assert!(engine.default_graph_triples().is_empty());
+    }
 }
