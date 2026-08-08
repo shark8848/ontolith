@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.34  
+版本: 0.1.35  
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -307,6 +307,7 @@
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-08 | Codex | **项目进度同步至 GitHub Projects #2 DONE（SYNC-PROJ-0001）**：`docs/github-projects-sync.md` 固化同步契约（认证要求——用户级 Projects v2 不支持 fine-grained PAT，实测 FORBIDDEN，需 Classic PAT `project` scope 或 GitHub App 安装令牌；条目映射表；GraphQL 读写操作；同步流程）；Classic PAT 验证通过后全量同步 44 条：P0–P8 交付物 + R1 退出标准全表 + R2 后续轨，Status（Todo/In progress/Done）与 Priority（P0/P1/P2）按 0.1.34 快照写入并回读验证 total=44；看板 <https://github.com/users/shark8848/projects/2>；后续随 PROGRESS.md 增量按契约 §5 流程同步；PROGRESS.md 0.1.34→0.1.35 |
 | 2026-08-08 | Codex | **OIDC 完整链路 R2+ DONE（R1 唯一剩余项勾选完成）**：`crates/ontolith-security/src/infrastructure/oidc.rs`（~760 行，无第三方 JWT 依赖）——RFC 7517 JWKS/JWK（kid+alg 选键、RSA/oct 可用、EC/OKP 解析期过滤 fail-fast）、RS256 自研无依赖大整数 RSA 验签（RFC 7515 A.2.1 官方向量背书；调试期发现样例 signing input 必须保留 JSON 换行缩进 `LA0K…`，Python cryptography 独立复核后修复）、HS256 复用树内 HMAC、`exp`/`nbf`/`iss`/`aud` 策略（`JwtClaims.not_before` + `ONTOLITH_JWT_LEEWAY_SECS`）、RFC 8414 发现文档 issuer 强制匹配、`JwksFetcher`/`CachingJwks`/`JwksVerifier` TTL 缓存刷新（坏响应保留旧钥）；server 接线 `ONTOLITH_OIDC_ISSUER`/`AUDIENCE`/`JWKS_URL`/`CACHE_TTL_SECS`（file:// 快照 + http:// 树内抓取，https 明确拒绝启动并文档化反向代理路径），`HeaderAuthenticator.jwt_oidc` 优先于共享密钥 HS256；`/health`（HTTP+管理面）与 gRPC `HealthResponse` 暴露 `oidc` 姿态；security 18→24、server 44→49 测，workspace 全量 20 套件全绿，clippy 零警告，`--no-default-features` 构建通过；[L5-ontolith-access-security.md](./L5-ontolith-access-security.md) §2 OIDC 小节 + env 契约 + 限制；PROGRESS.md 0.1.33→0.1.34 |
 | 2026-08-08 | Codex | **R1 正式验收包 DONE**：`docs/R1-acceptance-package.md`（ACC-R1-0001）+ `scripts/acceptance-r1.sh`（G1 fmt/clippy → G2 workspace 全量 → G3 w3c11 492/492 + shacl 97/98 → G4 内存 INSERT/SELECT 闭环 → G5 RocksDB reopen 持久闭环）首次执行 `=== ACCEPTANCE PASS ===`（20 个 test binary 全 ok 共 400 测、drift=0）。验收中发现并修复 HTTP 结果 JSON 缺陷：`/sparql` SELECT/CONSTRUCT 将存储的 IRI 主语渲染为 bnode（`bound_value_json`/CONSTRUCT 主语渲染未走 `DictionaryCodec::decode_node`，W3C 套件进程内比较有解码故未暴露）；`sparql_results_json`/`bound_value_json` 增字典参数按解码判定 uri/bnode（与引擎 `node_id_term` 同语义），gRPC 调用点同步，新增回归测试 `sparql_http_json_renders_stored_iri_subject_as_uri`（server 43→44 测）；另全仓对齐当前 stable rustfmt 1.9.0 规范格式（24 文件纯格式化）。R1 退出标准全表勾选完成（唯一剩余：OIDC 完整链路 R2+），R1 判定上修至 ~95%；PROGRESS.md 0.1.32→0.1.33 |
 | 2026-08-08 | Codex | **P7-03 实际发布回滚演练 DRILL PASS**：`scripts/release-rollback-drill.sh`（入库，staging 隔离，不触碰生产）——V_new=9fac343（含 L7 `shard_map_epoch` 指纹，count=2）→ 部署 + `INSERT DATA` 写入 + 备份 + 重启持久断言（`/health triples=1`）→ 代码级回滚 V_prev=ec1d539（`git archive` + touch 强制重编译，指纹 count=0；数据目录未动，triples 仍 1）→ 数据级回滚（`mv data data-sim-corrupt` 模拟损坏断言 0 → `rm -rf` + 干净 `cp -a` 恢复断言 1）→ 恢复 V_new（triples=1、指纹 2）→ 重建 HEAD 回 `target/release` 并指纹验证；踩坑固化：共享 CARGO_TARGET_DIR mtime 新鲜度陷阱（touch 强制重建）、`grep -q`+pipefail SIGPIPE 偶发误报（改 `grep -c` 计数）、数据恢复用 mv/rm/cp 避免 cp -a 嵌套；记录回填 [L7-release-rollback.md](./L7-release-rollback.md) §3.4，R1 判定上修至 ~90%（剩余：正式验收包、OIDC 完整链路 R2+）；PROGRESS.md 0.1.31→0.1.32 |
@@ -516,5 +517,6 @@
 - [L7 在线重平衡与灾备演练手册](./L7-ops-rebalance-dr.md) · [L7 发布/回滚手册](./L7-release-rollback.md)
 - [R1 SPARQL 烟雾符合性](./R1-sparql-smoke-compliance.md) · [R1 正式验收包](./R1-acceptance-package.md)
 - [CI workflow](../.github/workflows/ci.yml) · [ci-local](../scripts/ci-local.sh)
+- [GitHub Projects #2 同步契约](./github-projects-sync.md)（SYNC-PROJ-0001）
 - [ADR 模板](../adr/0000-template.md) · [RFC 模板](../rfc/0000-template.md)
 - [RFC-0001 确定性标识与规范化编码规则](../rfc/0001-canonical-encoding-and-disk-layout.md)
