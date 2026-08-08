@@ -103,7 +103,11 @@ TOKEN=$(cat /tmp/gh_token); PROJECT_ID="..."; FIELD_ID="..."; STATUS_DONE="已�
 
 ## 5. 同步流程
 
-1. 读取看板字段结构（§2），与 §3 映射表对齐。
-2. 逐条 upsert（存在按标题匹配则更新字段，缺失则新增）。
+1. 维护条目 TSV（标题 / 状态 / 优先级，格式见脚本头注释）。
+2. 执行入库脚本（幂等 upsert：按标题匹配，缺失创建、存在只更新字段）：
+   ```bash
+   bash scripts/sync-github-projects.sh /path/to/items.tsv
+   ```
+   前置：Classic PAT（`project` scope）写入 `/tmp/gh_token`（chmod 600）。
 3. 回填 PROGRESS.md 变更记录：`已同步到 GitHub Projects #2（SYNC-PROJ-0001）`。
 4. commit + push 同步记录（origin 推送契约见 AGENTS.md）。
