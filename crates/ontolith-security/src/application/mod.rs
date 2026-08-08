@@ -1,7 +1,9 @@
 //! Security application services (L5).
 
 use crate::domain::{AuditEvent, AuditOutcome, AuthContext, AuthMode, Permission, TenantId};
-use crate::infrastructure::FileAuditLog;
+use crate::infrastructure::{
+    FileAuditLog, JwtVerifyOptions, auth_context_from_claims, verify_hs256,
+};
 use ontolith_core::domain::TimestampMs;
 use ontolith_core::error::OntolithError;
 use std::sync::Mutex;
@@ -14,6 +16,19 @@ pub trait Authenticator: Send + Sync {
         user: Option<&str>,
         api_key: Option<&str>,
     ) -> Result<AuthContext, OntolithError>;
+
+    /// Authenticate with an optional `Authorization: Bearer <jwt>` token.
+    /// Defaults to the header/API-key path when no bearer token is handled.
+    fn authenticate_with_bearer(
+        &self,
+        tenant: Option<&str>,
+        user: Option<&str>,
+        api_key: Option<&str>,
+        bearer: Option<&str>,
+    ) -> Result<AuthContext, OntolithError> {
+        let _ = bearer;
+        self.authenticate(tenant, user, api_key)
+    }
 }
 
 /// Simple header/API-key authenticator for R1 baseline.
@@ -22,6 +37,13 @@ pub struct HeaderAuthenticator {
     pub mode: AuthMode,
     /// When set, `api_key` must match in Enforced mode (demo secret).
     pub api_key: Option<String>,
+    /// When set, `Authorization: Bearer <HS256 jwt>` is accepted in Enforced
+    /// mode as an alternative to API-key + tenant/user headers (P5-02).
+    pub jwt_secret: Option<String>,
+    /// Optional `iss` claim policy for JWT verification.
+    pub jwt_issuer: Option<String>,
+    /// Optional `aud` claim policy for JWT verification.
+    pub jwt_audience: Option<String>,
     /// Default permissions granted to authenticated tenants.
     pub default_permissions: Vec<Permission>,
 }
@@ -31,6 +53,9 @@ impl Default for HeaderAuthenticator {
         Self {
             mode: AuthMode::Disabled,
             api_key: None,
+            jwt_secret: None,
+            jwt_issuer: None,
+            jwt_audience: None,
             default_permissions: vec![
                 Permission::new("sparql", "query"),
                 Permission::new("sparql", "explain"),
@@ -76,6 +101,40 @@ impl Authenticator for HeaderAuthenticator {
                 ))
             }
         }
+    }
+
+    fn authenticate_with_bearer(
+        &self,
+        tenant: Option<&str>,
+        user: Option<&str>,
+        api_key: Option<&str>,
+        bearer: Option<&str>,
+    ) -> Result<AuthContext, OntolithError> {
+        if let Some(secret) = &self.jwt_secret
+            && let Some(bearer) = bearer
+        {
+            let token = bearer
+                .strip_prefix("Bearer ")
+                .or_else(|| bearer.strip_prefix("bearer "))
+                .filter(|t| !t.is_empty());
+            if let Some(token) = token {
+                let claims = verify_hs256(
+                    token,
+                    secret,
+                    &JwtVerifyOptions {
+                        issuer: self.jwt_issuer.clone(),
+                        audience: self.jwt_audience.clone(),
+                    },
+                )?;
+                return Ok(auth_context_from_claims(
+                    &claims,
+                    tenant,
+                    user,
+                    self.default_permissions.clone(),
+                ));
+            }
+        }
+        self.authenticate(tenant, user, api_key)
     }
 }
 
@@ -229,6 +288,35 @@ mod tests {
             .unwrap();
         assert_eq!(ctx.tenant, TenantId::new("acme"));
         assert!(ctx.can("sparql", "query"));
+    }
+
+    #[test]
+    fn bearer_jwt_authenticates_and_rejects_forged_tokens() {
+        use crate::infrastructure::{sign_hs256, sign_tenant_token};
+        let auth = HeaderAuthenticator {
+            mode: AuthMode::Enforced,
+            jwt_secret: Some("s3cret".into()),
+            jwt_issuer: Some("ontolith".into()),
+            jwt_audience: Some("ontolith-server".into()),
+            ..Default::default()
+        };
+        let token = sign_tenant_token("acme", "alice", "s3cret", "ontolith", "ontolith-server", 300)
+            .unwrap();
+        let ctx = auth
+            .authenticate_with_bearer(None, None, None, Some(&format!("Bearer {token}")))
+            .unwrap();
+        assert_eq!(ctx.tenant, TenantId::new("acme"));
+        assert_eq!(ctx.user, UserId::new("alice"));
+        assert!(ctx.can("sparql", "query"));
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("sub".into(), serde_json::Value::from("alice"));
+        claims.insert("tenant".into(), serde_json::Value::from("acme"));
+        let forged = sign_hs256(&claims, "wrong", Some(300)).unwrap();
+        assert!(
+            auth.authenticate_with_bearer(None, None, None, Some(&format!("Bearer {forged}")))
+                .is_err()
+        );
     }
 
     #[test]

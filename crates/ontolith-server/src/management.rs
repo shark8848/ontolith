@@ -23,6 +23,9 @@ const DATA_DIR_ENV: &str = "ONTOLITH_DATA_DIR";
 const AUTH_MODE_ENV: &str = "ONTOLITH_AUTH_MODE";
 const TENANT_MODE_ENV: &str = "ONTOLITH_TENANT_MODE";
 const API_KEY_ENV: &str = "ONTOLITH_API_KEY";
+const JWT_SECRET_ENV: &str = "ONTOLITH_JWT_SECRET";
+const JWT_ISSUER_ENV: &str = "ONTOLITH_JWT_ISSUER";
+const JWT_AUDIENCE_ENV: &str = "ONTOLITH_JWT_AUDIENCE";
 const AUDIT_PATH_ENV: &str = "ONTOLITH_AUDIT_PATH";
 const CLUSTER_MODE_ENV: &str = "ONTOLITH_CLUSTER_MODE";
 const MGMT_READ_KEY_ENV: &str = "ONTOLITH_MANAGEMENT_READ_KEY";
@@ -552,6 +555,9 @@ fn load_authenticator() -> HeaderAuthenticator {
     HeaderAuthenticator {
         mode,
         api_key: env::var(API_KEY_ENV).ok(),
+        jwt_secret: env::var(JWT_SECRET_ENV).ok().filter(|v| !v.trim().is_empty()),
+        jwt_issuer: env::var(JWT_ISSUER_ENV).ok().filter(|v| !v.trim().is_empty()),
+        jwt_audience: env::var(JWT_AUDIENCE_ENV).ok().filter(|v| !v.trim().is_empty()),
         ..HeaderAuthenticator::default()
     }
 }

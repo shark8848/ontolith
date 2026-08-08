@@ -882,6 +882,7 @@ name = "ontolith-security"
 version = "0.1.0"
 dependencies = [
  "ontolith-core",
+ "serde_json",
 ]
 
 [[package]]

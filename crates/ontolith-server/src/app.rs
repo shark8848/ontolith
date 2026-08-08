@@ -316,10 +316,11 @@ impl AppState {
     }
 
     fn auth(&self, req: &HttpRequest) -> Result<AuthContext, OntolithError> {
-        self.authenticator.authenticate(
+        self.authenticator.authenticate_with_bearer(
             req.header("x-ontolith-tenant"),
             req.header("x-ontolith-user"),
             req.header("x-api-key"),
+            req.header("authorization"),
         )
     }
 
@@ -331,7 +332,7 @@ impl AppState {
             200,
             "OK",
             format!(
-                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"data_dir":{}}}"#,
+                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"jwt":{},"data_dir":{}}}"#,
                 json_string(&self.bind_address),
                 json_string(self.backend.as_str()),
                 stats.triple_count,
@@ -342,6 +343,10 @@ impl AppState {
                     AuthMode::Enforced => "enforced",
                 }),
                 json_string(self.tenant_mode.as_str()),
+                json_string(match &self.authenticator.jwt_secret {
+                    Some(_) => "on",
+                    None => "off",
+                }),
                 match &self.data_dir {
                     Some(p) => json_string(&p.display().to_string()),
                     None => "null".into(),
@@ -1735,6 +1740,100 @@ mod tests {
         );
         assert_eq!(resp.status, 200, "body={}", String::from_utf8_lossy(&resp.body));
         assert!(String::from_utf8_lossy(&resp.body).contains("urn:tenant:acme:sub"));
+    }
+
+    fn jwt_state() -> Arc<AppState> {
+        AppState::new_memory_with_audit(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator {
+                mode: AuthMode::Enforced,
+                jwt_secret: Some("s3cret".to_owned()),
+                jwt_issuer: Some("ontolith".to_owned()),
+                jwt_audience: Some("ontolith-server".to_owned()),
+                ..HeaderAuthenticator::default()
+            },
+            InMemoryAuditLog::new(),
+            TenantMode::Enforced,
+        )
+    }
+
+    fn jwt_req(method: &str, path: &str, body: &[u8], token: &str) -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_owned(), format!("Bearer {token}"));
+        HttpRequest {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            query: HashMap::new(),
+            headers,
+            body: body.to_vec(),
+        }
+    }
+
+    #[test]
+    fn jwt_bearer_token_authenticates_requests() {
+        use ontolith_security::infrastructure::sign_tenant_token;
+        let state = jwt_state();
+        let token =
+            sign_tenant_token("acme", "alice", "s3cret", "ontolith", "ontolith-server", 300)
+                .unwrap();
+
+        // The bearer token alone authenticates (no header credentials).
+        let resp = dispatch_for_test(&state, jwt_req("GET", "/health", b"", &token));
+        assert_eq!(resp.status, 200, "body={}", String::from_utf8_lossy(&resp.body));
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("\"auth_mode\":\"enforced\""), "body={body}");
+        assert!(body.contains("\"jwt\":\"on\""), "body={body}");
+    }
+
+    #[test]
+    fn jwt_rejects_forged_expired_and_misaligned_tokens() {
+        use ontolith_security::infrastructure::sign_tenant_token;
+        let state = jwt_state();
+
+        // Forged secret and expired tokens are rejected.
+        let forged =
+            sign_tenant_token("acme", "alice", "wrong", "ontolith", "ontolith-server", 300)
+                .unwrap();
+        let expired =
+            sign_tenant_token("acme", "alice", "s3cret", "ontolith", "ontolith-server", -10)
+                .unwrap();
+        for token in [forged, expired] {
+            let resp = dispatch_for_test(&state, jwt_req("GET", "/health", b"", &token));
+            assert_eq!(resp.status, 401, "body={}", String::from_utf8_lossy(&resp.body));
+        }
+
+        // JWT tenant claim wins over the transport header: a write issued
+        // with a conflicting header tenant is stamped into the JWT tenant.
+        let token =
+            sign_tenant_token("acme", "alice", "s3cret", "ontolith", "ontolith-server", 300)
+                .unwrap();
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_owned(), format!("Bearer {token}"));
+        headers.insert("x-ontolith-tenant".to_owned(), "other".to_owned());
+        headers.insert("x-ontolith-user".to_owned(), "mallory".to_owned());
+        let resp = dispatch_for_test(
+            &state,
+            HttpRequest {
+                method: "POST".to_owned(),
+                path: "/data/nt".to_owned(),
+                query: HashMap::new(),
+                headers,
+                body: b"<http://ex.org/j1> <http://ex.org/p> \"jwt-tenant-wins\" .".to_vec(),
+            },
+        );
+        assert_eq!(resp.status, 200, "body={}", String::from_utf8_lossy(&resp.body));
+
+        let read = dispatch_for_test(
+            &state,
+            jwt_req(
+                "POST",
+                "/sparql",
+                b"SELECT ?s ?o WHERE { ?s <http://ex.org/p> ?o }",
+                &token,
+            ),
+        );
+        let body = String::from_utf8_lossy(&read.body);
+        assert!(body.contains("jwt-tenant-wins"), "acme read: {body}");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.5.0  
-状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03)  
+版本: 2.6.0  
+状态: Implemented (HTTP + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC-ready JWT P5-02)  
 日期: 2026-07-23  
 对应 crate:
 
@@ -124,6 +124,21 @@ X-Ontolith-Tenant: acme
 | `X-API-Key` | 匹配 `ONTOLITH_API_KEY` |
 | `X-Ontolith-Tenant` | 租户（强制） |
 | `X-Ontolith-User` | 用户（强制） |
+| `Authorization: Bearer <jwt>` | HS256 JWT（P5-02，可选替代） |
+
+JWT Bearer 鉴权（P5-02，OIDC-ready 基线）：配置 `ONTOLITH_JWT_SECRET` 后，
+`Authorization: Bearer <token>` 优先于 Header/API-Key 路径（未提供 Bearer 时回退 Header 鉴权）。
+验证采用树内 HS256（RFC 7519 子集：base64url RFC 4648 §5 + SHA-256 FIPS 180-4 + HMAC-SHA256
+RFC 2104，常量时间比对，RFC 4231/FIPS 180-4 向量背书）；`exp` 强制过期校验，
+`ONTOLITH_JWT_ISSUER`/`ONTOLITH_JWT_AUDIENCE` 可选设置 `iss`/`aud` 精确匹配策略。
+自定义 `tenant` claim 解析为租户（优先于 `X-Ontolith-Tenant` 传输头），`scope` claim
+（空格分隔 `resource:action`）可覆盖默认权限，`sub` 为用户。`/health` 暴露 `jwt` 姿态（`on`/`off`）。
+
+```bash
+ONTOLITH_JWT_SECRET=...        # 启用 JWT Bearer 鉴权
+ONTOLITH_JWT_ISSUER=ontolith   # 可选：iss 精确匹配
+ONTOLITH_JWT_AUDIENCE=ontolith-server  # 可选：aud 精确匹配
+```
 
 ---
 
@@ -222,15 +237,15 @@ systemctl --user status ontolith-server
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
-| ontolith-security | 12 | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 |
-| ontolith-server | **24** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）** |
+| ontolith-security | **18** | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权） |
+| ontolith-server | **26** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）** |
 
 ---
 
 ## 7. 已知限制
 
 1. TLS 已落地（rustls 进程内终止 + R2 非 loopback 门禁）；仍无 HTTP/2 / 完整框架中间件链  
-2. 鉴权非 OIDC/JWT  
+2. 鉴权为 HS256 共享密钥基线（OIDC-ready：`Authorization: Bearer` + `exp`/`iss`/`aud`）；远程 JWKS/OIDC 发现仍为后续轨  
 3. 审计哈希链为完整性级（FNV-1a 64，非加密级；加密升级保持同 schema）  
 4. 租户隔离已升级为强制分库/行级（`ONTOLITH_TENANT_MODE=enforced`：命名图命名空间隔离 + 执行器租户视图）；分库物理隔离（每租户独立 RocksDB 实例）仍为后续增强  
 5. SPARQL Results JSON 为兼容子集（非完整 XML/CSV）  
@@ -269,3 +284,4 @@ ONTOLITH_API_KEY=...
 ## 9. 变更
 
 | 2026-08-08 | 2.5.0 | **P5-03 强制租户隔离**：`TenantMode`/`TenantNamespace`（`ONTOLITH_TENANT_MODE`，`urn:tenant:<t>` 命名空间 + `require_owned` 403）；`QueryRequest.tenant_scope` 下沉执行器（`TenantScopedRead/Write`：默认图重指向 + 命名图过滤 + 更新盖章），`FROM`/`GRAPH`/`USING`/图管理目标越权 403；server 写路径强制盖章、读路径注入作用域、`/health`+`/admin/config` 暴露 `tenant_mode`；security 9→12、query 83→86、server 22→24 测 |
+| 2026-08-08 | 2.6.0 | **P5-02 OIDC/JWT 鉴权基线**：树内 HS256 JWT 验证（RFC 7519 子集 + FIPS 180-4/RFC 4231 向量背书）+ `Authorization: Bearer` 接入（`ONTOLITH_JWT_SECRET`/`ISSUER`/`AUDIENCE`，`exp`/`iss`/`aud` 校验、JWT tenant claim 优先于传输头、`scope` 权限覆盖）；`/health` 暴露 `jwt` 姿态；security 12→18、server 24→26 测 |

@@ -11,7 +11,7 @@ Tier definitions: PLAN-0001 §8 / SAS-0001 §12.
 |-------|------|----------------|-------|---------|------|------------------------|
 | `rocksdb` | A | Pin exact in Cargo.lock; no `*` | storage | Durable LSM/WAL embedded store for L2 | Native build; FFI surface; disk corruption if misused | Feature-off → `InMemoryStorageEngine`; later alternate CF store |
 | openraft | A | Pin exact in Cargo.lock; features `raft-backend` + `serde` | cluster | Multi-node Raft for L4 data plane (see [ADR-0004](../adr/0004-multi-process-raft-data-plane.md)); `serde` enables JSON RPC/state serialization over the M2 in-tree HTTP transport | Async runtime surface; snapshot/GC ops | Keep `InMemoryClusterRuntime` simulator + traits; feature-off fallback |
-| `serde` / `serde_json` | B | Follow openraft's pin (serde 1.x in tree) | cluster | Serialize raft RPC messages, log entries, hard state, and snapshots (M2) | Ecosystem-stable | Revert to openraft-only serde if a lighter codec is adopted |
+| `serde` / `serde_json` | B | Follow openraft's pin (serde 1.x in tree) | cluster; security | cluster: serialize raft RPC messages, log entries, hard state, and snapshots (M2); security: JWT claim payload encoding/parsing (P5-02) | Ecosystem-stable | Revert to openraft-only serde if a lighter codec is adopted |
 | (workspace path crates) | A/B | path deps | platform | Internal modules | Low | N/A |
 
 ## Admission checklist (Tier A)

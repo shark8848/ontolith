@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 ontolith-core = { path = "../ontolith-core" }
+serde_json = "1"

@@ -385,7 +385,7 @@ sudo -v# Ontolith 开发计划
 - 启动 Phase 1，并执行周度架构与风险评审。
 - 管理平台 R1 SLO 基线与窗口化阈值已落地：local/CI smoke 现已包含 `runtime_probe` 可达性 + 延迟阈值 + 短窗口 success%/p95 检查。
 - 将窗口化 SLO 检查从短窗门禁扩展到天/周自动统计与告警（systemd timer 或 Prometheus 规则）。
-- 管理平台最小安全加固路径已形成并落地 ADR-0003（TLS-first / OIDC-ready，2026-08-06 转 Accepted）：rustls 进程内 TLS 终止 + 非 loopback 强制 TLS 门禁（R2）。OIDC/JWT 验证留 R2+ 后续轨。
+- 管理平台最小安全加固路径已形成并落地 ADR-0003（TLS-first / OIDC-ready，2026-08-06 转 Accepted）：rustls 进程内 TLS 终止 + 非 loopback 强制 TLS 门禁（R2）。JWT 验证 HS256 基线已落地（P5-02：`Authorization: Bearer` + `ONTOLITH_JWT_SECRET`/`ISSUER`/`AUDIENCE`，`exp`/`iss`/`aud` 校验）；远程 JWKS/OIDC 发现留 R2+ 后续轨。
 
 ### 未完成项清单（2026-08-06 同步自 PROGRESS §8）
 
