@@ -1,8 +1,8 @@
 # L8 — AI-Native 语义扩展立项
 
 文档 ID: AI-L8-0001  
-版本: 0.1.2  
-状态: Active（R4 立项完成；P8-01 M1 语义核心 + M2 server 接线 + M3 持久化与增量更新完成）  
+版本: 0.1.3  
+状态: Active（R4 立项完成；P8-01 M1 语义核心 + M2 server 接线 + M3 持久化与增量更新 + P8-02 检索 KPI 门禁完成）  
 日期: 2026-08-09  
 对应代码: `crates/ontolith-ai` + `crates/ontolith-storage`（`semantic` CF）  
 计划: [Ontolith_Development_Plan.zh-CN.md](./Ontolith_Development_Plan.zh-CN.md) §6 R4 / Phase 8
@@ -88,6 +88,7 @@ EmbeddingProvider (trait)
 | M1（完成 2026-08-09） | `ontolith-ai` crate：EmbeddingProvider 抽象 + FeatureHashEmbedding + 余弦相似度 + 内存语义索引 + top-k 检索 + 测试 | crate 8 测全绿 |
 | M2（完成 2026-08-09） | server 接线：`/semantic/search` + `/semantic/index` HTTP + 启动自动索引 + 鉴权/审计复用 + `/health`·`/admin/config` 姿态 | server 54 测（+5 语义） |
 | M3（完成 2026-08-09） | 持久化语义索引（RocksDB 独立 `semantic` CF + `RocksSemanticIndex`）+ 增量更新语义（删改回流：ingest 精确差异 + SPARQL Update 存储差异对账 + 位置无关引用检查）；另修复 `InMemoryDictionary::contains_value` 变更副作用（非破坏性成员探测） | storage 52→53 测（semantic CF 重启往返）、ai 8→13 测（Rocks 索引重启持久/批删）、server 54→57 测（ingest 回流 + SPARQL DELETE 驱逐 + 共享术语保留 + RocksDB 重启持久） |
+| P8-02（完成 2026-08-09） | 检索 KPI 门禁：扁平行主序矩阵重构 + const generic `dot_const::<256>` 向量化热路径 + `select_nth_unstable_by` 部分选择；`ontolith-compliance/p802_retrieval_gate`（确定性/相关命中/延迟预算）+ CI `retrieval-gates` 作业 + 语义 bench 阈值/趋势 | 10k 语料 `search_embedding` 实测 0.33–0.52ms < 1ms（原 1.57–2.26ms）；gate 3 测全绿（release profile） |
 | M4 | P8-03 代理集成扩展点：plugin-api `Retrieval` 能力 + AgentTool 抽象 | plugin-api + 示例工具 |
 | R4 | 检索 KPI 与扩展安全/兼容门禁全绿 | ACC-R4 验收包 |
 
@@ -119,6 +120,20 @@ RFC-0001 规范编码（`encode_term`），值为 `u32 BE 维度 ‖ f32 LE 向�
 - 相关命中：构造同义/相关语料，top-1 命中率 100%（受控语料门禁）。
 - 延迟预算：内存索引 top-10 检索 < 1ms（10k 项语料；CI bench 观测）。
 - 兼容：workspace 全量 + W3C 492/492 + SHACL 98/98 零漂移。
+
+P8-02 实测（2026-08-09，本机 Intel Core Ultra 7 155H / release）：
+
+| KPI | 预算 | 实测 | 状态 |
+|-----|------|------|------|
+| `search_embedding` top-10（10k 项 / 256 维） | < 1ms | **0.33–0.52ms**（优化前 1.57–2.26ms；裸扫描约 0.32ms，受 10MB 语料内存带宽约束） | ✅ 达标 |
+| 非 256 维回退路径（128 维） | < 1ms | 0.77ms | ✅ 达标 |
+
+实现要点：`InMemorySemanticIndex` 采用扁平行主序矩阵（`values: Vec<f32>`，行 = 256 个 f32）；
+默认维度走 `dot_const::<256>`——`try_into` 借出 `&[f32; 256]` 定长数组，LLVM 全展开并 SSE
+向量化（运行时边界下同一循环仅得标量，见 P8-02 提交说明）；top-k 用
+`select_nth_unstable_by` 部分选择 + 前 k 排序，替代全量 `sort_by`。门禁：
+`ontolith-compliance/tests/p802_retrieval_gate.rs`（CI `retrieval-gates` 作业，release profile）
++ `scripts/check-semantic-bench-thresholds.sh`（`semantic-bench` 阈值断言 + `benchmarks/trends/semantic-bench.jsonl` 趋势，仿 P7-02）。
 
 ## 6. 已识别风险与缓解
 

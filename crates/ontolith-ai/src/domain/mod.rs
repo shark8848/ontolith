@@ -50,16 +50,51 @@ impl Embedding {
                 "embedding dimension mismatch in cosine similarity",
             ));
         }
-        let mut dot = 0.0f32;
-        let mut na = 0.0f32;
-        let mut nb = 0.0f32;
-        for (a, b) in self.values.iter().zip(other.values.iter()) {
-            dot += a * b;
-            na += a * a;
-            nb += b * b;
-        }
-        let denom = (na * nb).sqrt();
+        let dot = self.dot(other)?;
+        // L2 norms (self is typically normalized; computed defensively).
+        let na = self.values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let nb = other.values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let denom = na * nb;
         Ok(if denom == 0.0 { 0.0 } else { dot / denom })
+    }
+
+    /// Dot product; dimension mismatch is an error. The hot path for
+    /// top-k retrieval over pre-normalized embeddings (P8-02 latency KPI).
+    #[inline]
+    pub fn dot(&self, other: &Self) -> Result<f32, OntolithError> {
+        if self.dim != other.dim {
+            return Err(OntolithError::InvalidArgument(
+                "embedding dimension mismatch in dot product",
+            ));
+        }
+        Ok(self.dot_values(&other.values))
+    }
+
+    /// Dot product against a raw vector slice (cache-friendly hot path for
+    /// the flat in-memory index layout; no per-row allocation).
+    #[inline]
+    pub fn dot_values(&self, other: &[f32]) -> f32 {
+        debug_assert_eq!(self.dim, other.len());
+        let a = &self.values;
+        let b = other;
+        let mut acc0 = 0.0f32;
+        let mut acc1 = 0.0f32;
+        let mut acc2 = 0.0f32;
+        let mut acc3 = 0.0f32;
+        let mut i = 0usize;
+        while i + 4 <= a.len() {
+            acc0 += a[i] * b[i];
+            acc1 += a[i + 1] * b[i + 1];
+            acc2 += a[i + 2] * b[i + 2];
+            acc3 += a[i + 3] * b[i + 3];
+            i += 4;
+        }
+        let mut tail = 0.0f32;
+        while i < a.len() {
+            tail += a[i] * b[i];
+            i += 1;
+        }
+        acc0 + acc1 + acc2 + acc3 + tail
     }
 }
 

@@ -1070,6 +1070,7 @@ dependencies = [
 name = "ontolith-compliance"
 version = "0.1.0"
 dependencies = [
+ "ontolith-ai",
  "ontolith-core",
  "ontolith-parser",
  "ontolith-query",

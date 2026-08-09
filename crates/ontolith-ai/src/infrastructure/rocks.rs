@@ -160,12 +160,14 @@ impl SemanticIndex for RocksSemanticIndex {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
+        // Stored embeddings are L2-normalized; cosine reduces to one dot.
+        let q = query.normalized()?;
         let mut scored = Vec::with_capacity(entries.len());
         for (key, value) in entries {
             let mut off = 0usize;
             let term = decode_term(&key, &mut off)?;
             let embedding = decode_embedding(&value)?;
-            let score = query.cosine_similarity(&embedding)?;
+            let score = q.dot(&embedding)?;
             scored.push(SemanticHit { term, score });
         }
         scored.sort_by(|a, b| b.score.total_cmp(&a.score));

@@ -1,0 +1,3 @@
+{"run_id":"dafeacc","case":"semantic search top-10 (10k)","iterations":1000,"per_op_ns":356939,"total_ms":356.939947}
+{"run_id":"dafeacc","case":"semantic index upsert (1)","iterations":1000,"per_op_ns":21187,"total_ms":21.187185}
+{"run_id":"dafeacc","case":"semantic search embed-only top-10 (10k)","iterations":1000,"per_op_ns":459217,"total_ms":459.217926}

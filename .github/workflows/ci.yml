@@ -223,6 +223,33 @@ jobs:
       - name: Reasoner gate (OWL 2 RL correctness + guardrails)
         run: cargo test -p ontolith-compliance --test r2_reasoner_gate -- --nocapture
 
+  # P8-02 exit-criteria gate: retrieval KPI (determinism + relevance + <1ms
+  # latency over the 10k-term in-memory index) and bench threshold trend.
+  retrieval-gates:
+    name: retrieval gates (KPI + bench thresholds)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+
+      - name: Retrieval KPI gate (determinism + relevance + latency, release profile)
+        run: cargo test --release -p ontolith-compliance --test p802_retrieval_gate -- --nocapture
+
+      - name: Semantic bench thresholds + trend
+        run: |
+          ONTOLITH_BENCH_TREND_PATH="benchmarks/trends/semantic-bench.jsonl" \
+          bash scripts/check-semantic-bench-thresholds.sh
+
   # Required-lite gate: block regressions in must-pass subset without requiring
   # zero known-gap / zero unsupported yet.
   w3c-subset:

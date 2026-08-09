@@ -120,7 +120,17 @@ impl SemanticSearchService {
     /// `k` is clamped into `[1, MAX_TOP_K]`.
     pub fn search_text(&self, text: &str, k: usize) -> Result<Vec<SemanticHit>, OntolithError> {
         let query = self.provider.embed_text(text)?;
-        self.index.search(&query, k)
+        self.search_embedding(&query, k)
+    }
+
+    /// Semantic retrieval from an already-embedded query (P8-02 latency KPI
+    /// isolates index cost from query embedding).
+    pub fn search_embedding(
+        &self,
+        query: &Embedding,
+        k: usize,
+    ) -> Result<Vec<SemanticHit>, OntolithError> {
+        self.index.search(query, k)
     }
 }
 

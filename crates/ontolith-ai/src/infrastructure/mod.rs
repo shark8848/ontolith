@@ -148,20 +148,74 @@ fn literal_text(lit: &LiteralValue) -> String {
     }
 }
 
+/// Dot product between a normalized query vector and one flat row of the
+/// index matrix when the dimension is a compile-time constant. Borrowing the
+/// rows as fixed-size arrays removes all per-element bounds checks and lets
+/// LLVM fully unroll + vectorize the reduction (P8-02 latency KPI hot path).
+#[inline]
+fn dot_const<const D: usize>(qv: &[f32], row: &[f32]) -> f32 {
+    let qa: &[f32; D] = qv[..D].try_into().expect("embedding dimension contract");
+    let ra: &[f32; D] = row[..D].try_into().expect("embedding dimension contract");
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut acc3 = 0.0f32;
+    let mut i = 0usize;
+    while i + 4 <= D {
+        acc0 += qa[i] * ra[i];
+        acc1 += qa[i + 1] * ra[i + 1];
+        acc2 += qa[i + 2] * ra[i + 2];
+        acc3 += qa[i + 3] * ra[i + 3];
+        i += 4;
+    }
+    let mut tail = 0.0f32;
+    while i < D {
+        tail += qa[i] * ra[i];
+        i += 1;
+    }
+    acc0 + acc1 + acc2 + acc3 + tail
+}
+
+/// Runtime-dimension fallback dot product for non-default embedding sizes.
+/// Four-wide chunking keeps two independent chains of FMAs for ILP even when
+/// LLVM cannot unroll with constant bounds.
+#[inline]
+fn dot_runtime(qv: &[f32], row: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    for (a, b) in qv.chunks_exact(4).zip(row.chunks_exact(4)) {
+        acc += a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    }
+    let mut tail = 0.0f32;
+    let rem = qv.len() % 4;
+    for i in (qv.len() - rem)..qv.len() {
+        tail += qv[i] * row[i];
+    }
+    acc + tail
+}
+
 /// In-memory semantic index (P8-01 M1): linear `term -> embedding` store.
 ///
 /// M1 deliberately avoids coupling to the storage layer; persistence lands in
-/// M3 (RocksDB 独立 CF). Upsert dedups by term equality (linear scan).
+/// M3 (RocksDB 独立 CF). Embeddings live in one contiguous row-major matrix
+/// (`values`), which keeps the top-k scan cache-friendly — the P8-02 latency
+/// KPI hot path. Upsert dedups by term equality (linear scan).
 pub struct InMemorySemanticIndex {
     provider: Arc<dyn EmbeddingProvider>,
-    entries: Vec<(Term, Embedding)>,
+    entries: Vec<Term>,
+    /// Flat row-major embedding matrix: `entries.len() * dim` f32 values,
+    /// row `i` at `values[i * dim .. (i + 1) * dim]`.
+    values: Vec<f32>,
+    dim: usize,
 }
 
 impl InMemorySemanticIndex {
     pub fn new(provider: Arc<dyn EmbeddingProvider>) -> Self {
+        let dim = provider.dim();
         Self {
             provider,
             entries: Vec::new(),
+            values: Vec::new(),
+            dim,
         }
     }
 
@@ -172,25 +226,38 @@ impl InMemorySemanticIndex {
 
 impl SemanticIndex for InMemorySemanticIndex {
     fn upsert(&mut self, term: &Term) -> Result<(), OntolithError> {
-        if self.entries.iter().any(|(t, _)| t == term) {
+        if self.entries.iter().any(|t| t == term) {
             return Ok(());
         }
         let embedding = self.provider.embed_term(term)?;
-        self.entries.push((term.clone(), embedding));
+        if embedding.dim != self.dim {
+            return Err(OntolithError::InvalidArgument(
+                "embedding dimension mismatch in semantic index upsert",
+            ));
+        }
+        self.entries.push(term.clone());
+        self.values.extend_from_slice(&embedding.values);
         Ok(())
     }
 
     fn remove(&mut self, term: &Term) -> Result<(), OntolithError> {
-        self.entries.retain(|(t, _)| t != term);
+        if let Some(idx) = self.entries.iter().position(|t| t == term) {
+            self.entries.swap_remove(idx);
+            let start = idx * self.dim;
+            // Replace the removed row with the last row, then drop the tail.
+            let len = self.values.len();
+            self.values.copy_within((len - self.dim).., start);
+            self.values.truncate(len - self.dim);
+        }
         Ok(())
     }
 
     fn contains(&self, term: &Term) -> bool {
-        self.entries.iter().any(|(t, _)| t == term)
+        self.entries.iter().any(|t| t == term)
     }
 
     fn all_terms(&self) -> Vec<Term> {
-        self.entries.iter().map(|(t, _)| t.clone()).collect()
+        self.entries.clone()
     }
 
     fn len(&self) -> usize {
@@ -206,17 +273,45 @@ impl SemanticIndex for InMemorySemanticIndex {
         if self.entries.is_empty() {
             return Ok(Vec::new());
         }
-        let mut scored: Vec<SemanticHit> = Vec::with_capacity(self.entries.len());
-        for (term, emb) in &self.entries {
-            let score = query.cosine_similarity(emb)?;
-            scored.push(SemanticHit {
-                term: term.clone(),
-                score,
-            });
+        if query.dim != self.dim {
+            return Err(OntolithError::InvalidArgument(
+                "embedding dimension mismatch in semantic index search",
+            ));
         }
-        scored.sort_by(|a, b| b.score.total_cmp(&a.score));
-        scored.truncate(k);
-        Ok(scored)
+        // Stored embeddings are L2-normalized at embed time, so cosine
+        // similarity reduces to one dot product per entry (P8-02 KPI).
+        let q = query.normalized()?;
+        // Score by index first: the top-k materialization clones only the
+        // winning terms instead of every candidate (latency KPI hot path).
+        let dim = self.dim;
+        let values = &self.values[..];
+        let qv = &q.values;
+        let mut scored: Vec<(f32, usize)> = Vec::with_capacity(values.len() / dim);
+        if dim == crate::domain::DEFAULT_EMBEDDING_DIM {
+            for (idx, row) in values.chunks_exact(dim).enumerate() {
+                scored.push((
+                    dot_const::<{ crate::domain::DEFAULT_EMBEDDING_DIM }>(qv, row),
+                    idx,
+                ));
+            }
+        } else {
+            for (idx, row) in values.chunks_exact(dim).enumerate() {
+                scored.push((dot_runtime(qv, row), idx));
+            }
+        }
+        // Partial selection instead of a full sort: O(n) partition then a
+        // tiny sort of the k winners (P8-02 latency KPI).
+        let take = k.min(scored.len());
+        scored.select_nth_unstable_by(take - 1, |a, b| b.0.total_cmp(&a.0));
+        scored[..take].sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        scored.truncate(take);
+        Ok(scored
+            .into_iter()
+            .map(|(score, idx)| SemanticHit {
+                term: self.entries[idx].clone(),
+                score,
+            })
+            .collect())
     }
 }
 

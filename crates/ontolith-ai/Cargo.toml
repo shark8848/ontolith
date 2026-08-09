@@ -14,3 +14,7 @@ ontolith-storage = { path = "../ontolith-storage", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.14.0"
+
+[[bench]]
+name = "semantic_bench"
+harness = false
