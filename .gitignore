@@ -4,3 +4,6 @@ target/
 # Cargo.lock is retained/committed by default in workspaces to lock dependencies
 # but can optionally be ignored by uncommenting:
 # Cargo.lock
+
+# Local production deployment (secrets; never commit)
+prod/

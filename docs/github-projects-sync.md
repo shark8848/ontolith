@@ -2,7 +2,7 @@
 
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
-数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.40，2026-08-09）
+数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.47，2026-08-09）
 状态: Active（Classic PAT 已配置，随增量同步）
 
 ## 1. 认证要求（重要，勿重复探索）
@@ -78,7 +78,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P7-02 阈值断言/趋势记录 | 已完成 | storage_bench + check-bench-thresholds.sh |
 | P7-03 发布/回滚手册 + 实际演练 | 已完成 | release-rollback-drill.sh DRILL PASS 2026-08-08 |
 | P7-04 灾备运维手册 | 已完成 | L7-ops-rebalance-dr.md |
-| 首次真实发布（生产） | 未开始 | P7-03 手册就绪，待首次发布 |
+| 首次真实发布（生产） | 已完成 | REL-PROD-0001（2026-08-09 单节点生产部署：RocksDB 持久 + AUTH enforced + 审计落盘，验证全绿；真机 systemd 指引见 L7 §1.2） |
 | L8 AI-Native 扩展 | 已完成 | 100%（P8-01 M1–M3 + P8-02 KPI 门禁 + P8-03 扩展点 + ACC-R4 验收包 `=== ACCEPTANCE PASS ===`，2026-08-09） |
 | P8-01 语义-向量桥接 | 已完成 | 100%（M1–M3：语义核心 + server 接线 + RocksDB 持久化与增量更新，2026-08-09） |
 | P8-01 M3 语义索引持久化 + 增量更新 | 已完成 | RocksDB `semantic` CF + `RocksSemanticIndex` + 删改回流，2026-08-09 |

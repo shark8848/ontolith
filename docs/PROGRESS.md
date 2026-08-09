@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.46
+版本: 0.1.47
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -47,7 +47,7 @@
 | Phase 4 集群与一致性 MVP | 部分完成 | ~82% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API + 数据面同步接口（快照迁移入队/回执）；无多进程 Raft |
 | Phase 5 接入层与安全基线 | 部分完成 | ~90% | HTTP 全路由 + 文件审计（含哈希链）+ cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
 | Phase 6 推理与验证 | 已完成 | ~100% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key、prp-spo2 属性链、cls-hv1/2 hasValue、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2/3（AllDifferent）+ prp-irp/cax-adc（bnode 感知 + 同迭代检测），迭代上限 + 墙钟超时护栏）可用；**SHACL 基线校验引擎落地（目标/核心约束组件全齐 + 属性路径表达式全量 + W3C SHACL 核心套件 98/98 全绿——uniqueLang-002 缺口经 RDF 1.1 布尔项区分修复闭合，reasoner 4→80 测）** |
-| Phase 7 企业运维与发布 | 部分完成 | ~72% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业，**已接阈值断言 + 趋势记录硬门禁**）+ license 审计 CI 作业 + **依赖登记审计（P0-03 硬门禁）+ cargo-audit CVE 观测（CI 新作业）** + **在线重平衡与灾备演练脚本（P7-01/04，真实 3 进程 raft，DRILL PASS）** + **发布/回滚手册（P7-03）** |
+| Phase 7 企业运维与发布 | 部分完成 | ~75% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业，**已接阈值断言 + 趋势记录硬门禁**）+ license 审计 CI 作业 + **依赖登记审计（P0-03 硬门禁）+ cargo-audit CVE 观测（CI 新作业）** + **在线重平衡与灾备演练脚本（P7-01/04，真实 3 进程 raft，DRILL PASS）** + **发布/回滚手册（P7-03）** + **首次真实发布（2026-08-09：REL-PROD-0001 单节点生产部署，RocksDB 持久 + AUTH enforced + 审计落盘，证据齐备）** |
 | Phase 8 AI-Native 扩展 | 进行中 | ~35% | 立项 + P8-01 M1–M3（语义核心/server 接线/RocksDB 持久化与增量更新）+ **P8-02 检索 KPI 门禁**（热路径优化实测 top-10 < 1ms、`ontolith-compliance` 门禁 + CI `retrieval-gates` 作业 + 语义 bench 阈值/趋势）+ **P8-03 代理集成扩展点**（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具） |
 | **分层内核 L0–L3** | **部分完成** | **~92–96%** | 语义+存储+查询主路径可用，完整聚合/Update/子查询/属性路径最小集（含 `?`）已纳入回归保护 |
 | **相对 R1 退出标准** | **已完成** | **~100%** | 内核+HTTP+集群数据面（多进程 raft M1–M3 + P4-01–P4-04）+ CI/烟雾合规 + W3C 子集 required-lite（30/30）+ 完整 W3C 套件 492/492 全绿 + 核心 SLO 实测达标（success 100%、p95=0ms）+ 恢复/灾备演练 DRILL PASS + 实际发布回滚演练 DRILL PASS + **R1 正式验收包全 PASS + OIDC 完整链路（R2+）**；全表勾选完成 |
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-09 | Codex | **首次真实发布（生产）DONE（REL-PROD-0001，PROG-0001 0.1.46→0.1.47）**：commit `607083c` release 构建（sha256 指纹见发布记录）→ 生产目录 `/home/ontolith/prod/`（已入 `.gitignore`，密钥不入库）→ 守护进程部署（本容器无 systemd/sudo，`scripts/ontolith-prod-ctl.sh` setsid 模式；真机按 [L7 §1.2](./L7-release-rollback.md) 用随仓 systemd unit）→ 发布后验证全绿：网关/管理面健康、无凭据 401、Turtle 写入 6 triples、SPARQL 查询 2 绑定、重启后 `triples=6`（RocksDB 持久）、管理面 monitoring（cluster epoch=1/leader=n0/healthy=1）、审计 `audit.jsonl` 哈希链落盘、`/admin/config` 密钥脱敏无泄漏；[RELEASE-2026-08-09.md](./RELEASE-2026-08-09.md) 发布记录 + 回滚指引；看板「首次真实发布（生产）」→ **Done** |
 | 2026-08-09 | Codex | **看板同步 DONE（SYNC-PROJ-0001，PROG-0001 0.1.45→0.1.46）**：GitHub Projects #2 全量同步 **56 条（51 更新 + 5 新建，0 失败）**——新增 R3 GeoSPARQL 范围能力 / R3 企业级安全加固 / R3 HA/故障转移门禁 / R3 租户隔离与审计加固门禁 / R4 验收包 ACC-R4 五卡（全部 Done/P1）；状态回写：L8 AI-Native 扩展、P8-01 语义-向量桥接、R2 查询代价模型与高级 Update、R2 OWL 2 RL 推理、R2 Explain 门禁、R2 推理护栏 → **Done**；回读验证 total=56，唯一未开始卡「首次真实发布（生产）」；`docs/github-projects-sync.md` 映射表更新至 2026-08-09 快照（56 行） |
 | 2026-08-09 | Codex | **R3+R4 收尾 DONE（PROG-0001 0.1.44→0.1.45）**：① **R3 GeoSPARQL 范围能力**——新 crate `ontolith-geo`（零外部依赖）：Point/Rect 范围几何 + WKT/GeoJSON 解析与序列化 + `geof:distance`（haversine，米/千米）/`envelope`/`getSRID`/`isSimple`/`isValid` + `geof:sf{Equals,Disjoint,Intersects,Touches,Crosses,Within,Contains,Overlaps}` 八拓扑 + `geo:asWKT`/`asGeoJSON`/`hasGeometry` 属性函数（`eval_bgp` 重写，存储三元组回退不干扰），确定性错误（非 CRS84/非范围形状/unbound 传播）；[L9-geosparql.md](./L9-geosparql.md) 1.0.0 + [ADR-0005](../adr/0005-geosparql-scoped-capability.md)；`ontolith-compliance` `r3_geo_gate` 5 测（距离/拓扑表/属性函数/确定性/错误语义）；② **R3 企业级安全加固**——`/admin/config` 与启动横幅密钥脱敏（server 测试固化）+ 审计链完整性/防篡改（篡改定位条目）+ 强制租户隔离端到端（读隔离/跨租户拒绝/写盖章不泄漏），`r3_security_gate` 3 测；③ **R3 门禁**——CI `r3-gates` 作业（geo + security + 真实 3 进程 `drill-rebalance-dr.sh` HA/故障转移 DRILL PASS + transcript 断言）；④ **R4 验收包**——[R4-acceptance-package.md](./R4-acceptance-package.md)（ACC-R4-0001，G1–G6）+ `scripts/acceptance-r4.sh` 复验 **`=== ACCEPTANCE PASS ===`**（G2 workspace 全量、G3 W3C 492/492 + SHACL 98/98 零漂移、G4 语义 HTTP 闭环、G5 p802 KPI + bench 阈值/趋势、G6 compliance 全门禁）；相对 R1–R4 全计划 ~85%→**~100%** |
 | 2026-08-09 | Codex | **看板同步 DONE（SYNC-PROJ-0001）**：GitHub Projects #2 全量同步 51 条（51 更新 0 失败）——P0-01 已批准范围基线签批 → **Done**（PLAN-0001 1.0.2 Approved，2026-08-09 签批）、P0-04 RFC 流程落地 → **Done**（RFC-0001 评审回填，转正式 Accepted）；L8 AI-Native 保持进行中/P2；回读验证 total=51；`docs/github-projects-sync.md` 映射表更新至 2026-08-09 快照（P0-01/P0-04 备注回填）；PROGRESS.md 0.1.43→0.1.44 |
