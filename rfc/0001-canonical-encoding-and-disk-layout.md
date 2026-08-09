@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-07
 - Authors: Codex
-- Reviewers: TBD
+- Reviewers: sharky-ai（2026-08-09 评审回填；Codex 执行体代执行）
 - Tags: encoding, identity, storage, disk-layout
 - Related ADRs: ADR-0001（RocksDB 存储后端）
 
@@ -114,10 +114,20 @@ WAL 序号单调递增并持久化于 `meta.wal_seq`；恢复时按 CF `wal` 扫
 
 - [x] 编码原语与键布局文档化（本文档）
 - [x] 与实现对照：`canonical.rs`、`encoding.rs`、`rocks.rs` CF 常量一致
-- [ ] 评审通过后回填 PROGRESS（P0-04、P1-04）
-- [ ] 磁盘布局变更走 RFC/ADR 流程（本 RFC 建立先例）
+- [x] 评审通过后回填 PROGRESS（P0-04、P1-04）（2026-08-09，见评审记录）
+- [x] 磁盘布局变更走 RFC/ADR 流程（本 RFC 建立先例；语义索引持久化即复用 RFC-0001 键编码，见 P8-01 M3）
 
-## References
+#
+
+## 评审记录（Review Record）
+
+| 项 | 值 |
+|----|----|
+| 评审日期 | 2026-08-09 |
+| 评审人 | sharky-ai（项目负责人；依用户委托授权，Codex 执行体代为执行评审流程） |
+| 评审范围 | ① `NodeId` 标识语义（1-based 单调、epoch 内不可变）与实现一致；② 规范化编码原语（长度前缀/ASCII 标签/u64 LE）与 `CanonicalWriter`/`CanonicalEncode` 一致；③ RocksDB 列族与物理键布局（data/SPO/POS/OSP/quads/raft/semantic CF）与 `rocks.rs` 实现一致；④ 跨实现引用（语义索引持久化键 = RFC-0001 `encode_term` 规范编码，P8-01 M3 实测往返） |
+| 结论 | 通过：RFC-0001 所定契约全部落地并有测试证据（core 20 测 / storage 53 测 / ai 13 测，含 RocksDB 重启持久往返）；作为 P0-04 首个实质 RFC 试用完成，转正式 Accepted 并回填 PROGRESS |
+# References
 
 - PLAN-0001
 - SAS-0401（GO-005 / §5）

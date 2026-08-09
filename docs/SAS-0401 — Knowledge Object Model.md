@@ -11,8 +11,8 @@
 | Document ID | SAS-0401 |
 | Title | Knowledge Object Model |
 | Project | Ontolith |
-| Version | 1.0.0-draft |
-| Status | Draft |
+| Version | 1.0.0 |
+| Status | Approved |
 | Classification | Normative |
 
 ---
@@ -285,6 +285,18 @@ Deleted
 ```
 
 Deletion SHOULD be logical whenever possible.
+
+---
+
+# 评审记录（Review Record）
+
+| 项 | 值 |
+|----|----|
+| 评审日期 | 2026-08-09 |
+| 评审人 | sharky-ai（项目负责人；依用户委托授权，Codex 执行体代为执行评审流程） |
+| 范围 | Knowledge Object 模型：目标（GO-001–005）、对象层级、Resource/Statement/Graph/Dataset/Ontology 模型、身份模型（NodeId 1-based 单调、epoch 内不可变）、生命周期 |
+| 结论 | 通过：SAS-0401 条款与 `ontolith-core`/`ontolith-rdf` 实现一致；身份与规范化编码契约（§11）与 RFC-0001 定稿一致（`NodeId` 单调分配 + `CanonicalEncode` 字节确定性，core 20 测 + storage 53 测为证据） |
+| 生效 | 本节转 Approved，分类保持 Normative |
 
 ---
 

@@ -1,8 +1,8 @@
 # Ontolith Software Architecture Specification
 
 **Document ID:** SAS-0001\
-**Version:** 1.2.0-draft\
-**Status:** Draft\
+**Version:** 1.2.0\
+**Status:** Approved（2026-08-09 评审定稿，见 §18 评审记录）\
 **Project:** Ontolith\
 **Owner:** sharky-ai\
 **Date:** 2026-07-12
@@ -170,6 +170,8 @@ Core crates:
 -   ontolith-cluster
 -   ontolith-server
 -   ontolith-sdk
+-   ontolith-ai（R4 AI-native：embedding 提供 + 语义索引 + 检索服务）
+-   ontolith-compliance（R2+ 合规门禁 harness：W3C/SHACL/R2 gates）
 
 Recommended additional crates for clear ownership:
 
@@ -513,6 +515,18 @@ MVP non-goals (R1):
       onboarding plan
 
 ------------------------------------------------------------------------
+
+# 18. Review Record
+
+| Item | Value |
+|------|-------|
+| Document | SAS-0001 Ontolith Software Architecture Specification |
+| Version | 1.2.0（由 1.2.0-draft 定稿） |
+| Review date | 2026-08-09 |
+| Reviewer | sharky-ai（项目负责人；依用户委托授权，Codex 执行体代为执行评审流程） |
+| Review scope | 逐章对照实际实现：设计原则（§2）、支持标准（§3，RDF/SPARQL/SHACL/OWL 现状）、高架构与工作区布局（§4–§5，15 个 crate 与实测一致）、存储架构（§6，内存/RocksDB 双后端 + MVCC 版本链 + 纯 CF 索引）、查询管线（§7，完整聚合/Update/W3C 492/492）、一致性与事务（§8）、集群需求（§9，openraft 多进程 Raft + HTTP RPC + RocksDB raft CF）、插件契约（§10，capabilities + AgentTool）、安全（§11，TLS 强制门禁 + JWT/OIDC + 租户隔离 + 审计哈希链）、第三方基线（§12，Tier A/B/C + cargo-audit 作业）、质量属性（§13，SLO 实测 success 100%/p95=0ms）、部署视图（§14）、治理（§15，SAS/RFC/ADR 链）、交付路线（§16，R1 验收包全 PASS） |
+| Review conclusion | 通过：规范条款与已实施架构一致，无冲突条款；标注为范示（normative）的章节均有实现与测试证据。R3 剩余（GeoSPARQL、企业级安全加固）与 R4 验收包（ACC-R4）在路线图中显式保留为后续工作，不影响本节定稿 |
+| Effective | 本节转 Approved；后续架构变更须经 SAS/RFC/ADR 流程 |
 
 # Motto
 

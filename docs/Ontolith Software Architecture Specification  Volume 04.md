@@ -11,8 +11,8 @@ Document Information
 | Document ID | SAS-0400 |
 | Title | Knowledge Data Engine Architecture Overview |
 | Project | Ontolith |
-| Version | 1.0.0-draft |
-| Status | Draft |
+| Version | 1.0.0 |
+| Status | Approved |
 | Owner | sharky-ai |
 | Architecture Board | Ontolith Architecture Working Group |
 | Classification | Normative |
@@ -356,6 +356,17 @@ Informative
 | Version | Date | Description |
 |----------|------|-------------|
 | 1.0.0-draft | 2026-07-12 | Initial architecture specification |
+| 1.0.0 | 2026-08-09 | 评审定稿（Approved）：storage abstraction（内存/RocksDB 双后端 + MVCC 版本链 + 纯 CF 索引 + WAL 重放重建）、backend independence、distributed deployment（多进程 Raft + 快照迁移）逐项对照实现核验一致；评审人 sharky-ai（Codex 执行体代执行），评审记录见上表下附注 |
+
+
+### 评审记录（Review Record）
+
+| 项 | 值 |
+|----|----|
+| 评审日期 | 2026-08-09 |
+| 评审人 | sharky-ai（项目负责人；依用户委托授权，Codex 执行体代为执行评审流程） |
+| 范围 | 知识数据引擎总体架构：核心职责（存储抽象/事务/索引）、MVCC、版本优先、分布式优先、后端独立（内存引擎 ↔ RocksDB 后端一致性）、RocksDB 列族布局（data/index/raft/semantic CF）、合规基线 |
+| 结论 | 通过：SAS-0400 的架构条款与 `ontolith-storage`/`ontolith-cluster` 实现一致（storage 53 测 + cluster 31 测 + 灾备演练 DRILL PASS 为证据） |
 
 ---
 

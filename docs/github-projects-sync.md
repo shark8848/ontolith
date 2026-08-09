@@ -36,16 +36,16 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 字段名与选项以看板实际为准；本契约的映射表按 PROGRESS.md 维护，标题/状态
 不一致时以 PROGRESS.md 为准并回写看板。
 
-## 3. 条目映射（2026-08-08 快照，随 PROGRESS.md 更新）
+## 3. 条目映射（2026-08-09 快照，随 PROGRESS.md 更新）
 
 状态取值：`未开始` / `进行中` / `已完成`。完成度百分比进备注。
 
 | 看板条目标题 | 状态 | 备注 |
 |--------------|------|------|
-| P0-01 已批准范围基线签批 | 未开始 | PLAN-0001 仍 Draft，阻塞项 |
+| P0-01 已批准范围基线签批 | 已完成 | PLAN-0001 1.0.2 Approved（2026-08-09 签批，§12 签批记录） |
 | P0-02 架构例外审批模板 | 已完成 | adr/0000-template + ADR-0001/0002 |
 | P0-03 依赖登记模板与评审规则 | 进行中 | 70%，DEPENDENCY_REGISTER.md |
-| P0-04 RFC 流程落地 | 进行中 | 70%，RFC-0001 评审待回填 |
+| P0-04 RFC 流程落地 | 已完成 | RFC-0001 评审回填完成（2026-08-09：Reviewers=sharky-ai，契约与实现逐项核验，转正式 Accepted） |
 | P0-05 进度台账 | 已完成 | PROG-0001 |
 | P1-01 Knowledge Object 领域模型 | 进行中 | 80%，L0+L1+序列化 Part II |
 | P1-02 Node 标识与字典管理器 | 进行中 | 90% |
@@ -79,7 +79,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P7-03 发布/回滚手册 + 实际演练 | 已完成 | release-rollback-drill.sh DRILL PASS 2026-08-08 |
 | P7-04 灾备运维手册 | 已完成 | L7-ops-rebalance-dr.md |
 | 首次真实发布（生产） | 未开始 | P7-03 手册就绪，待首次发布 |
-| L8 AI-Native 扩展 | 进行中 | Phase 8 整体 ~35%（2026-08-09：P8-01 M1–M3 + P8-02 检索 KPI 门禁 + P8-03 代理集成扩展点） |
+| L8 AI-Native 扩展 | 进行中 | Phase 8 整体 ~35%（P8-01–P8-03 + 治理收尾，2026-08-09） |
 | P8-01 语义-向量桥接 | 进行中 | 80%（M3 持久化 + 增量更新完成，2026-08-09） |
 | P8-01 M3 语义索引持久化 + 增量更新 | 已完成 | RocksDB `semantic` CF + `RocksSemanticIndex` + 删改回流，2026-08-09 |
 | P8-02 检索增强接口 | 已完成 | 80%（检索 KPI 门禁：热路径优化 <1ms + compliance 门禁 + CI 作业，2026-08-09） |

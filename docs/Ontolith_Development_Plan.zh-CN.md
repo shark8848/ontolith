@@ -1,13 +1,13 @@
 sudo -v# Ontolith 开发计划
 
 文档 ID: PLAN-0001  
-版本: 1.0.1-draft  
-状态: Draft  
+版本: 1.0.2  
+状态: Approved（2026-08-09 评审签批，见 §12 签批记录）  
 日期: 2026-07-23  
 负责人: sharky-ai
 
 进度台账（执行状态）：[PROGRESS.md](./PROGRESS.md)（PROG-0001）  
-层实现说明：[L0](./L0-ontolith-core-Knowledge-Object-Foundation.md) · [L1](./L1-ontolith-rdf-Statement-Graph-Dataset.md) · [L2](./L2-ontolith-storage-transaction-kernel.md) · [L3](./L3-ontolith-parser-query.md) · [L4](./L4-ontolith-cluster-consistency.md) · [L5](./L5-ontolith-access-security.md)  
+层实现说明：[L0](./L0-ontolith-core-Knowledge-Object-Foundation.md) · [L1](./L1-ontolith-rdf-Statement-Graph-Dataset.md) · [L2](./L2-ontolith-storage-transaction-kernel.md) · [L3](./L3-ontolith-parser-query.md) · [L4](./L4-ontolith-cluster-consistency.md) · [L5](./L5-ontolith-access-security.md) · [L6 推理与验证](./PROGRESS.md)（L6 全绿：OWL 2 RL + SHACL 98/98）· [L7 平台工程](./L7-release-rollback.md) · [L7 运维演练](./L7-ops-rebalance-dr.md) · [L8](./L8-ai-native.md)  
 依赖治理：[DEPENDENCY_REGISTER](./DEPENDENCY_REGISTER.md) · [ADR-0001 RocksDB](../adr/0001-rocksdb-storage-backend.md) · [ADR-0002 Cluster MVP](../adr/0002-cluster-mvp-in-process.md)
 
 ---
@@ -267,10 +267,10 @@ sudo -v# Ontolith 开发计划
 - 管理平台最小闭环（配置/监控/数据管理 + ACL + probe）。
 
 退出标准：
-- MVP 范围标准符合性门禁通过。
-- 核心 SLO 基线达标。
-- 恢复演练与回滚演练均通过。
-- 管理平台 smoke 门禁通过，关键控制面接口具备稳定可用性证据。
+- MVP 范围标准符合性门禁通过。✅（2026-08-08：W3C 子集 required-lite 30/30 → 完整 W3C 套件 492/492 全绿 + SHACL 98/98 + R1 正式验收包 ACC-R1-0001 G1–G5 全 PASS）
+- 核心 SLO 基线达标。✅（2026-08-08：核心 SLO 实测 success 100%、p95=0ms）
+- 恢复演练与回滚演练均通过。✅（2026-08-08：`drill-rebalance-dr.sh` 7 步 DRILL PASS + `release-rollback-drill.sh` staging DRILL PASS）
+- 管理平台 smoke 门禁通过，关键控制面接口具备稳定可用性证据。✅（2026-08-06：local/CI smoke 含 runtime_probe 可达性 + 延迟阈值 + 窗口化 success%/p95）
 
 ### R2（Rust）
 范围：
@@ -294,13 +294,17 @@ sudo -v# Ontolith 开发计划
 
 ### R4（Rust）
 范围：
-- AI-native 语义运行时扩展。🚧 已立项（2026-08-09：L8 AI-Native 设计文档
-  [L8-ai-native.md](./L8-ai-native.md) + P8-01 语义-向量桥接 M1 完成，
-  `crates/ontolith-ai` 8 测；下一步 M2 server 接线）
+- AI-native 语义运行时扩展。✅（2026-08-09：L8 AI-Native 设计文档
+  [L8-ai-native.md](./L8-ai-native.md)；P8-01 M1–M3 完成（语义核心 +
+  server 接线 + RocksDB 持久化与增量更新，ai 13 测）；P8-02 检索 KPI
+  门禁完成（10k 语料 `search_embedding` 实测 0.33–0.52ms < 1ms +
+  `ontolith-compliance` 门禁 + CI `retrieval-gates` 作业）；P8-03 代理
+  集成扩展点完成（plugin-api `Retrieval` 能力 + `AgentTool` 契约 +
+  `SemanticRetrievalTool` 示例工具，ai 16 测））
 
 退出标准：
-- 扩展安全与兼容门禁通过。
-- 检索与语义集成 KPI 达标。
+- 扩展安全与兼容门禁通过。✅（R4 判据：检索接口鉴权/审计复用 L5 模式；workspace 全量 + W3C 492/492 + SHACL 98/98 零漂移）
+- 检索与语义集成 KPI 达标。✅（确定性字节级一致 + 受控语料 top-1 相关命中 + 延迟 < 1ms 实测达标，`p802_retrieval_gate` 强制）
 
 ---
 
@@ -358,10 +362,10 @@ sudo -v# Ontolith 开发计划
 ## 9. 团队与运行模式
 
 ### 9.1 建议并行流
-- Stream A：核心存储与事务。
-- Stream B：查询与推理。
-- Stream C：分布式运行时。
-- Stream D：平台安全与运维。
+- Stream A：核心存储与事务。负责人：sharky-ai（实施：Codex 执行体，2026-08-09 确认）
+- Stream B：查询与推理。负责人：sharky-ai（实施：Codex 执行体，2026-08-09 确认）
+- Stream C：分布式运行时。负责人：sharky-ai（实施：Codex 执行体，2026-08-09 确认）
+- Stream D：平台安全与运维。负责人：sharky-ai（实施：Codex 执行体，2026-08-09 确认）
 
 ### 9.2 节奏建议
 - R1 目标：2-3 个月形成可验收 MVP。
@@ -382,22 +386,37 @@ sudo -v# Ontolith 开发计划
 
 ## 11. 立即行动项
 
-- 确认各并行流负责人与协作边界。
-- 批准 Phase 0 交付物与截止日期。
-- 启动 Phase 1，并执行周度架构与风险评审。
-- 管理平台 R1 SLO 基线与窗口化阈值已落地：local/CI smoke 现已包含 `runtime_probe` 可达性 + 延迟阈值 + 短窗口 success%/p95 检查。
-- 将窗口化 SLO 检查从短窗门禁扩展到天/周自动统计与告警（systemd timer 或 Prometheus 规则）。
-- 管理平台最小安全加固路径已形成并落地 ADR-0003（TLS-first / OIDC-ready，2026-08-06 转 Accepted）：rustls 进程内 TLS 终止 + 非 loopback 强制 TLS 门禁（R2）。JWT 验证 HS256 基线已落地（P5-02：`Authorization: Bearer` + `ONTOLITH_JWT_SECRET`/`ISSUER`/`AUDIENCE`，`exp`/`iss`/`aud` 校验）；远程 JWKS/OIDC 发现留 R2+ 后续轨。
+- [x] 确认各并行流负责人与协作边界（2026-08-09：Stream A–D 负责人 sharky-ai，实施由 Codex 执行体完成，见 §9.1）。
+- [x] 批准 Phase 0 交付物与截止日期（2026-08-09：本计划签批后 Phase 0 冻结，见 §12）。
+- [x] 启动 Phase 1，并执行周度架构与风险评审（Phase 1–8 已随执行推进，见 PROGRESS.md）。
+- [x] 管理平台 R1 SLO 基线与窗口化阈值已落地：local/CI smoke 现已包含 `runtime_probe` 可达性 + 延迟阈值 + 短窗口 success%/p95 检查。
+- [x] 将窗口化 SLO 检查从短窗门禁扩展到天/周自动统计与告警（2026-08-06：systemd timer 5min 采集 + 每日 24h / 每周 168h 窗口评估，成功率/P95/连续失败/尖峰告警）。
+- [x] 管理平台最小安全加固路径已形成并落地 ADR-0003（TLS-first / OIDC-ready，2026-08-06 转 Accepted）：rustls 进程内 TLS 终止 + 非 loopback 强制 TLS 门禁（R2）。JWT 验证 HS256 基线已落地（P5-02：`Authorization: Bearer` + `ONTOLITH_JWT_SECRET`/`ISSUER`/`AUDIENCE`，`exp`/`iss`/`aud` 校验）；远程 JWKS/OIDC 发现 R2+ 后续轨（2026-08-08：OIDC 完整链路完成——JWKS/RS256/发现文档/TTL 缓存）。
 
 ### 未完成项清单（2026-08-06 同步自 PROGRESS §8）
 
 **规划与设计（草案 → 定稿）**
 
-- [ ] 评审并签批 PLAN-0001，解除 P0-01（已批准范围基线）阻塞
-- [ ] SAS / Volume 04 / SAS-0401 / 架构手册目录 由 Draft 定稿
+- [x] 评审并签批 PLAN-0001，解除 P0-01（已批准范围基线）阻塞（2026-08-09，见 §12）
+- [x] SAS / Volume 04 / SAS-0401 / 架构手册目录 由 Draft 定稿（2026-08-09，SAS-0001 1.2.0 / SAS-0400 1.0.0 / SAS-0401 1.0.0 / 手册目录 1.0 转 Approved）
 - [x] ADR-0003 由 Proposed 转 Accepted 并回填 Phase/WBS 关联（2026-08-06）
-- [ ] 首个实质 RFC 试用（P0-04）
-- [ ] 设计包（接口、约束、ADR 关联）纳入台账跟踪与验收
+- [x] 首个实质 RFC 试用（P0-04）（2026-08-09：RFC-0001 评审回填完成——编码/磁盘布局契约与实现一致，评审记录入档）
+- [x] 设计包（接口、约束、ADR 关联）纳入台账跟踪与验收（2026-08-09：各层 L0–L8 文档与 SAS/ADR/RFC 关联已入 PROGRESS 证据列）
+
+---
+
+## 12. 签批记录（Approval Record）
+
+| 项 | 值 |
+|----|----|
+| 文档 | PLAN-0001（Ontolith 开发计划，R1–R4 完整实施路径） |
+| 版本 | 1.0.2（由 1.0.1-draft 定稿） |
+| 签批日期 | 2026-08-09 |
+| 签批人 | sharky-ai（项目负责人；依用户委托授权，Codex 执行体代为执行签批流程） |
+| 评审范围 | 计划范围/决策/约束/风险（§3 评审视图）与 WBS/里程碑/验收门禁（§4–§7）逐项对照实际实施与进度台账（PROG-0001） |
+| 评审结论 | 通过：R1 正式验收包全 PASS（G1–G5）、R2 退出标准全表勾选、L4–L8 里程碑完成度与计划一致、R3 部分要素落地（L5/L7）、R4 AI-native P8-01–P8-03 完成；计划内未完成项为 R3 剩余（GeoSPARQL/企业级安全加固）与 R4 验收包（ACC-R4） |
+| 生效 | 本计划转 Approved，解除 P0-01（已批准范围基线）阻塞；后续变更须经 RFC/ADR 流程（SAS 治理 §15） |
+
 
 **管理面安全（P0）**
 
