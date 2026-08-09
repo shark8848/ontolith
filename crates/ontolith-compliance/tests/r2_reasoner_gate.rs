@@ -314,7 +314,19 @@ fn large_closure_within_performance_budget() {
         report.inferred_triples, full_closure,
         "full transitive closure expected"
     );
-    assert_eq!(outcome.len(), full_closure + input.len());
+    assert!(
+        outcome.len() >= full_closure + input.len(),
+        "closure must at least contain input + transitive closure"
+    );
+    // The remainder above input + inferences is background knowledge: the
+    // seeded OWL 2 RL axioms (prp-ap/cls-thing/dt-type1 + scm-cls closure)
+    // and the vacuous rdfs4a/4b rdfs:Resource typings. It is bounded and
+    // excluded from the inferred-triples report.
+    let background = outcome.len() - input.len() - report.inferred_triples;
+    assert!(
+        background > 0 && background < 200,
+        "background axioms + Resource typings must stay bounded: {background}"
+    );
     let elapsed = started.elapsed().as_millis();
     assert!(
         elapsed < 5000,
