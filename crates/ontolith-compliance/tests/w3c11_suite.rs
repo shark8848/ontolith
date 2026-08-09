@@ -700,17 +700,11 @@ fn norm_from_engine(value: &BoundValue, dict: Option<&InMemoryDictionary>) -> No
                 lang: Some(lang.as_str().to_owned()),
             },
             LiteralValue::Typed { value, datatype } => {
-                // RDF 1.1: xsd:string typed literals equal simple literals.
-                let dt = if datatype.as_str() == XSD_STRING {
-                    NormDt::Plain
-                } else {
-                    NormDt::Other(datatype.as_str().to_owned())
-                };
-                NormTerm::Literal {
-                    lex: value.clone(),
-                    dt,
-                    lang: None,
-                }
+                // RDF 1.1: xsd:string typed literals equal simple literals;
+                // other typed literals follow the same value normalization as
+                // expected results (`norm_literal`), so non-canonical
+                // lexemes such as `"0"^^xsd:boolean` compare by value.
+                norm_literal(value, Some(datatype.as_str()), None)
             }
             LiteralValue::Boolean(b) => NormTerm::Literal {
                 lex: b.to_string(),

@@ -382,8 +382,9 @@ fn coerce_typed_literal(content: String, datatype: &str) -> LiteralValue {
             .map(LiteralValue::Double)
             .unwrap_or_else(|_| typed(content, datatype)),
         "http://www.w3.org/2001/XMLSchema#boolean" => match content.as_str() {
-            "true" | "1" => LiteralValue::Boolean(true),
-            "false" | "0" => LiteralValue::Boolean(false),
+            // RDF 1.1 term distinctness: `"1"^^xsd:boolean` != `true^^xsd:boolean`.
+            "true" => LiteralValue::Boolean(true),
+            "false" => LiteralValue::Boolean(false),
             _ => typed(content, datatype),
         },
         _ => typed(content, datatype),

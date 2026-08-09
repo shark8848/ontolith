@@ -67,7 +67,10 @@ fn seed_repo() -> (Arc<dyn TripleRepository>, Arc<dyn StorageEngine>) {
 }
 
 const CORPUS: &[(&str, QueryKind)] = &[
-    ("SELECT * WHERE { ?s <http://ex.org/knows> ?o }", QueryKind::Select),
+    (
+        "SELECT * WHERE { ?s <http://ex.org/knows> ?o }",
+        QueryKind::Select,
+    ),
     (
         "SELECT * WHERE { ?s <http://ex.org/knows> ?o . ?o <http://ex.org/knows> ?z }",
         QueryKind::Select,
@@ -119,13 +122,21 @@ fn assert_same_result(q: &str, standard: &QueryResult, cost: &QueryResult) {
                 .iter()
                 .map(|t| format!("{t:?}"))
                 .collect();
-            let mut b: Vec<String> = cost.construct_triples.iter().map(|t| format!("{t:?}")).collect();
+            let mut b: Vec<String> = cost
+                .construct_triples
+                .iter()
+                .map(|t| format!("{t:?}"))
+                .collect();
             a.sort();
             b.sort();
             assert_eq!(a, b, "{q}: CONSTRUCT mismatch");
         }
         QueryKind::Select => {
-            assert_eq!(canonical_solutions(standard), canonical_solutions(cost), "{q}: SELECT mismatch");
+            assert_eq!(
+                canonical_solutions(standard),
+                canonical_solutions(cost),
+                "{q}: SELECT mismatch"
+            );
         }
         QueryKind::Describe | QueryKind::Update => {
             panic!("corpus must not contain describe/update queries")
@@ -141,18 +152,34 @@ fn explain_completeness_across_query_classes() {
         let explain = pipeline
             .explain(&QueryRequest::new(*query))
             .unwrap_or_else(|e| panic!("{query}: explain failed: {e}"));
-        assert!(!explain.logical_steps.is_empty(), "{query}: logical steps empty");
-        assert!(!explain.physical_steps.is_empty(), "{query}: physical steps empty");
-        assert!(!explain.algebra_summary.is_empty(), "{query}: algebra summary empty");
+        assert!(
+            !explain.logical_steps.is_empty(),
+            "{query}: logical steps empty"
+        );
+        assert!(
+            !explain.physical_steps.is_empty(),
+            "{query}: physical steps empty"
+        );
+        assert!(
+            !explain.algebra_summary.is_empty(),
+            "{query}: algebra summary empty"
+        );
         assert_eq!(explain.kind, *kind, "{query}: kind mismatch");
-        assert!(explain.estimated_rows.is_some(), "{query}: estimated_rows missing");
+        assert!(
+            explain.estimated_rows.is_some(),
+            "{query}: estimated_rows missing"
+        );
         for cost in &explain.pattern_costs {
             assert!(
                 cost.selectivity > 0.0 && cost.selectivity <= 1.0,
                 "{query}: selectivity {} out of range",
                 cost.selectivity
             );
-            assert!(cost.estimated_rows >= 1, "{query}: estimated_rows {} < 1", cost.estimated_rows);
+            assert!(
+                cost.estimated_rows >= 1,
+                "{query}: estimated_rows {} < 1",
+                cost.estimated_rows
+            );
             assert!(!cost.pattern.is_empty(), "{query}: empty pattern signature");
         }
     }
@@ -163,11 +190,23 @@ fn path_explain_carries_uniform_worst_case_cost() {
     let (repo, engine) = seed_repo();
     let pipeline = cost_pipeline(repo, engine);
     let explain = pipeline
-        .explain(&QueryRequest::new("SELECT * WHERE { ?s <http://ex.org/knows>+ ?o }"))
+        .explain(&QueryRequest::new(
+            "SELECT * WHERE { ?s <http://ex.org/knows>+ ?o }",
+        ))
         .expect("path explain must succeed");
-    assert_eq!(explain.pattern_costs.len(), 1, "path must carry exactly one cost estimate");
-    assert_eq!(explain.pattern_costs[0].selectivity, 1.0, "path = uniform worst case");
-    assert_eq!(explain.pattern_costs[0].estimated_rows, 102, "path rows = total triples");
+    assert_eq!(
+        explain.pattern_costs.len(),
+        1,
+        "path must carry exactly one cost estimate"
+    );
+    assert_eq!(
+        explain.pattern_costs[0].selectivity, 1.0,
+        "path = uniform worst case"
+    );
+    assert_eq!(
+        explain.pattern_costs[0].estimated_rows, 102,
+        "path rows = total triples"
+    );
     assert_eq!(explain.estimated_rows, Some(102));
 }
 
@@ -183,8 +222,16 @@ fn cost_optimizer_orders_most_selective_pattern_first() {
     assert_eq!(explain.pattern_costs.len(), 2);
     let age = &explain.pattern_costs[0];
     let knows = &explain.pattern_costs[1];
-    assert!(age.pattern.contains("age"), "first pattern should be age, got {}", age.pattern);
-    assert!(knows.pattern.contains("knows"), "second pattern should be knows, got {}", knows.pattern);
+    assert!(
+        age.pattern.contains("age"),
+        "first pattern should be age, got {}",
+        age.pattern
+    );
+    assert!(
+        knows.pattern.contains("knows"),
+        "second pattern should be knows, got {}",
+        knows.pattern
+    );
     assert!(
         age.estimated_rows <= knows.estimated_rows,
         "age rows {} should be <= knows rows {}",
@@ -200,8 +247,12 @@ fn cost_optimization_preserves_semantics() {
     let standard = standard_pipeline(repo);
     for (query, _) in CORPUS {
         let req = QueryRequest::new(*query);
-        let std_res = standard.execute(&req).unwrap_or_else(|e| panic!("{query}: standard failed: {e}"));
-        let cost_res = cost.execute(&req).unwrap_or_else(|e| panic!("{query}: cost failed: {e}"));
+        let std_res = standard
+            .execute(&req)
+            .unwrap_or_else(|e| panic!("{query}: standard failed: {e}"));
+        let cost_res = cost
+            .execute(&req)
+            .unwrap_or_else(|e| panic!("{query}: cost failed: {e}"));
         assert_same_result(query, &std_res, &cost_res);
     }
 }
@@ -212,13 +263,32 @@ fn explain_is_stable_across_calls() {
     let pipeline = cost_pipeline(repo, engine);
     for (query, _) in CORPUS {
         let req = QueryRequest::new(*query);
-        let a = pipeline.explain(&req).unwrap_or_else(|e| panic!("{query}: explain failed: {e}"));
-        let b = pipeline.explain(&req).unwrap_or_else(|e| panic!("{query}: explain failed: {e}"));
+        let a = pipeline
+            .explain(&req)
+            .unwrap_or_else(|e| panic!("{query}: explain failed: {e}"));
+        let b = pipeline
+            .explain(&req)
+            .unwrap_or_else(|e| panic!("{query}: explain failed: {e}"));
         assert_eq!(a.kind, b.kind, "{query}: kind drift");
-        assert_eq!(a.logical_steps, b.logical_steps, "{query}: logical steps drift");
-        assert_eq!(a.physical_steps, b.physical_steps, "{query}: physical steps drift");
-        assert_eq!(a.algebra_summary, b.algebra_summary, "{query}: algebra drift");
-        assert_eq!(a.estimated_rows, b.estimated_rows, "{query}: estimated_rows drift");
-        assert_eq!(a.pattern_costs, b.pattern_costs, "{query}: pattern_costs drift");
+        assert_eq!(
+            a.logical_steps, b.logical_steps,
+            "{query}: logical steps drift"
+        );
+        assert_eq!(
+            a.physical_steps, b.physical_steps,
+            "{query}: physical steps drift"
+        );
+        assert_eq!(
+            a.algebra_summary, b.algebra_summary,
+            "{query}: algebra drift"
+        );
+        assert_eq!(
+            a.estimated_rows, b.estimated_rows,
+            "{query}: estimated_rows drift"
+        );
+        assert_eq!(
+            a.pattern_costs, b.pattern_costs,
+            "{query}: pattern_costs drift"
+        );
     }
 }

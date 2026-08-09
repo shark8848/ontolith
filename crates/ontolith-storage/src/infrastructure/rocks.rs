@@ -20,8 +20,9 @@ use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_transaction::domain::TxnId;
 use rocksdb::{
-    ColumnFamilyDescriptor, DB, Direction, Env, IteratorMode, Options, WriteBatch as RocksBatch,
-    WriteOptions, backup::BackupEngine, backup::BackupEngineOptions, backup::RestoreOptions,
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompressionType, Direction, Env,
+    IteratorMode, Options, WriteBatch as RocksBatch, WriteOptions, backup::BackupEngine,
+    backup::BackupEngineOptions, backup::RestoreOptions,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -52,7 +53,27 @@ const META_WAL_SEQ: &[u8] = b"wal_seq";
 const META_DICT_EPOCH: &[u8] = b"dict_epoch";
 const META_NEXT_VERSION: &[u8] = b"next_version";
 
-/// Durability tuning for the RocksDB engine.
+/// Compression codec for the index column families (RocksDB backend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexCompression {
+    None,
+    Snappy,
+    Lz4,
+    Zstd,
+}
+
+impl IndexCompression {
+    fn to_rocks(self) -> DBCompressionType {
+        match self {
+            Self::None => DBCompressionType::None,
+            Self::Snappy => DBCompressionType::Snappy,
+            Self::Lz4 => DBCompressionType::Lz4,
+            Self::Zstd => DBCompressionType::Zstd,
+        }
+    }
+}
+
+/// Durability + index-CF tuning for the RocksDB engine.
 #[derive(Debug, Clone)]
 pub struct RocksDbOptions {
     /// fsync the WAL on commits, deletes, dictionary writes and WAL appends
@@ -60,6 +81,15 @@ pub struct RocksDbOptions {
     pub sync_writes: bool,
     /// MVCC version retention applied after each commit/delete (default 16).
     pub version_retention: usize,
+    /// Bloom filter bits per key on the six index CFs (default 10; 0 =
+    /// disabled). Filters never miss a matching key, so this is safe for
+    /// point/prefix lookups on SPO/POS/OSP + GSPO/GPOS/GOSP.
+    pub index_bloom_bits_per_key: i32,
+    /// Shared LRU block cache size in MB for the index CFs (default 64;
+    /// 0 = RocksDB default cache).
+    pub index_block_cache_mb: usize,
+    /// Compression codec for the index CFs (default LZ4).
+    pub index_compression: IndexCompression,
 }
 
 impl Default for RocksDbOptions {
@@ -67,9 +97,39 @@ impl Default for RocksDbOptions {
         Self {
             sync_writes: true,
             version_retention: 16,
+            index_bloom_bits_per_key: 10,
+            index_block_cache_mb: 64,
+            index_compression: IndexCompression::Lz4,
         }
     }
 }
+
+/// Build the RocksDB options for the index column families from tuning
+/// settings: compression + optional shared LRU block cache + bloom filter.
+fn build_index_cf_options(options: &RocksDbOptions) -> Options {
+    let mut cf_opts = Options::default();
+    cf_opts.set_compression_type(options.index_compression.to_rocks());
+    let mut block_opts = BlockBasedOptions::default();
+    if options.index_block_cache_mb > 0 {
+        block_opts.set_block_cache(&Cache::new_lru_cache(
+            options.index_block_cache_mb * 1024 * 1024,
+        ));
+    }
+    if options.index_bloom_bits_per_key > 0 {
+        block_opts.set_bloom_filter(options.index_bloom_bits_per_key as f64, true);
+    }
+    cf_opts.set_block_based_table_factory(&block_opts);
+    cf_opts
+}
+
+const INDEX_CF_NAMES: &[&str] = &[
+    CF_SPO_INDEX,
+    CF_POS_INDEX,
+    CF_OSP_INDEX,
+    CF_GSPO_INDEX,
+    CF_GPOS_INDEX,
+    CF_GOSP_INDEX,
+];
 
 struct EngineState {
     pending_writes: HashMap<TxnId, Vec<WriteOperation>>,
@@ -107,6 +167,12 @@ pub struct RocksDbStorageEngine {
     version_retention: usize,
     /// fsync WAL on durability-critical writes.
     sync_writes: bool,
+    /// Index-CF bloom filter bits per key (applied at open; P2-01).
+    index_bloom_bits_per_key: i32,
+    /// Index-CF shared LRU block cache size in MB (applied at open; P2-01).
+    index_block_cache_mb: usize,
+    /// Index-CF compression codec (applied at open; P2-01).
+    index_compression: IndexCompression,
     staged_batches_count: AtomicU64,
     failed_stage_batches_count: AtomicU64,
     committed_txn_count: AtomicU64,
@@ -132,6 +198,7 @@ impl RocksDbStorageEngine {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
+        let index_cf_options = build_index_cf_options(&options);
         let cfs = [
             CF_META,
             CF_DICT_FWD,
@@ -150,7 +217,14 @@ impl RocksDbStorageEngine {
             CF_RAFT,
         ]
         .into_iter()
-        .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
+        .map(|name| {
+            let cf_opts = if INDEX_CF_NAMES.contains(&name) {
+                index_cf_options.clone()
+            } else {
+                Options::default()
+            };
+            ColumnFamilyDescriptor::new(name, cf_opts)
+        })
         .collect::<Vec<_>>();
 
         let db = DB::open_cf_descriptors(&opts, &path, cfs).map_err(rocks_err)?;
@@ -173,6 +247,9 @@ impl RocksDbStorageEngine {
             pinned_snapshots: Mutex::new(HashMap::new()),
             version_retention: options.version_retention,
             sync_writes: options.sync_writes,
+            index_bloom_bits_per_key: options.index_bloom_bits_per_key,
+            index_block_cache_mb: options.index_block_cache_mb,
+            index_compression: options.index_compression,
             staged_batches_count: AtomicU64::new(0),
             failed_stage_batches_count: AtomicU64::new(0),
             committed_txn_count: AtomicU64::new(0),
@@ -189,6 +266,15 @@ impl RocksDbStorageEngine {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Applied index-CF tuning (P2-01), e.g. for `/admin/config`-style
+    /// observability and gate assertions.
+    pub fn tuning(&self) -> String {
+        format!(
+            "index_bloom={}bits index_cache={}MB index_compression={:?}",
+            self.index_bloom_bits_per_key, self.index_block_cache_mb, self.index_compression
+        )
     }
 
     /// Create a full backup of the current database into `backup_dir`
@@ -2339,6 +2425,9 @@ mod tests {
         let options = RocksDbOptions {
             sync_writes: false,
             version_retention: 4,
+            index_bloom_bits_per_key: 10,
+            index_block_cache_mb: 16,
+            index_compression: IndexCompression::Lz4,
         };
         {
             let engine = RocksDbStorageEngine::open_with_options(path, options).unwrap();
@@ -2359,6 +2448,87 @@ mod tests {
         }
         let engine = RocksDbStorageEngine::open(path).unwrap();
         assert_eq!(engine.stats().triple_count, 1);
+    }
+
+    /// P2-01 gate: index-CF tuning (bloom filter + LRU block cache + LZ4) is
+    /// applied at open, survives reopen, and keeps point/prefix scans correct.
+    #[test]
+    fn rocksdb_index_cf_tuning_applied_and_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let options = RocksDbOptions {
+            sync_writes: true,
+            version_retention: 4,
+            index_bloom_bits_per_key: 10,
+            index_block_cache_mb: 16,
+            index_compression: IndexCompression::Lz4,
+        };
+        {
+            let engine = RocksDbStorageEngine::open_with_options(path, options).unwrap();
+            let txn = TxnId::new(911);
+            let mut ops = Vec::new();
+            for i in 0..50 {
+                ops.push(WriteOperation::PutTriple(Triple::new(
+                    NodeId::new(i),
+                    Iri::new("urn:p"),
+                    Term::Iri(Iri::new(format!("urn:o{i}"))),
+                )));
+            }
+            for i in 0..10 {
+                ops.push(WriteOperation::PutQuad(Quad::in_named_graph(
+                    Triple::new(
+                        NodeId::new(100 + i),
+                        Iri::new("urn:q"),
+                        Term::Iri(Iri::new(format!("urn:gv{i}"))),
+                    ),
+                    Iri::new("urn:g"),
+                )));
+            }
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: txn,
+                    operations: ops,
+                })
+                .unwrap();
+            engine.commit_transaction(txn).unwrap();
+            let tuning = engine.tuning();
+            assert!(tuning.contains("index_bloom=10bits"), "tuning={tuning}");
+            assert!(tuning.contains("index_cache=16MB"), "tuning={tuning}");
+            assert!(tuning.contains("index_compression=Lz4"), "tuning={tuning}");
+            // Point/prefix scans on the tuned index CFs stay correct.
+            let pos = engine
+                .scan_triples_with_prefix(
+                    CF_POS_INDEX,
+                    Some(&encode_pos_predicate_prefix(&Iri::new("urn:p"))),
+                )
+                .unwrap();
+            assert_eq!(pos.len(), 50);
+            let gspo = engine
+                .scan_quads_with_prefix(
+                    CF_GSPO_INDEX,
+                    Some(&encode_gspo_graph_prefix(&Iri::new("urn:g"))),
+                )
+                .unwrap();
+            assert_eq!(gspo.len(), 10);
+        }
+        // Reopen with default tuning: data + index CFs remain intact.
+        let engine = RocksDbStorageEngine::open(path).unwrap();
+        assert_eq!(engine.stats().triple_count, 50);
+        assert_eq!(engine.stats().quad_count, 10);
+        let pos = engine
+            .scan_triples_with_prefix(
+                CF_POS_INDEX,
+                Some(&encode_pos_predicate_prefix(&Iri::new("urn:p"))),
+            )
+            .unwrap();
+        assert_eq!(pos.len(), 50);
+        let gspo = engine
+            .scan_quads_with_prefix(
+                CF_GSPO_INDEX,
+                Some(&encode_gspo_graph_prefix(&Iri::new("urn:g"))),
+            )
+            .unwrap();
+        assert_eq!(gspo.len(), 10);
     }
 
     /// R1 gate: idempotent-write verification on the RocksDB backend.

@@ -276,7 +276,7 @@ sudo -v# Ontolith 开发计划
 范围：
 - 代价优化。✅（`CostBasedOptimizer` + `EngineQueryStatistics`，P3-02）
 - OWL 2 RL 核心。✅（`ForwardChainReasoner`，P6-01）
-- SHACL 基线。✅（W3C SHACL 核心套件 97/98，唯一缺口 uniqueLang-002 词法差异 profile 锁定）
+- SHACL 基线。✅（W3C SHACL 核心套件 98/98 全绿——2026-08-09 RDF 1.1 布尔项区分修复闭合 uniqueLang-002）
 
 退出标准：
 - Explain 质量与优化稳定性门禁通过。✅（2026-08-08：`ontolith-compliance` `r2_explain_gate` 5 测 + CI `r2-gates` 作业）

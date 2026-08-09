@@ -110,14 +110,24 @@ fn ow2_rl_correctness_core() {
         t("urn:x", "urn:p", "urn:y", &dict),
         // symmetric + transitive property r
         t("urn:r", RDF_TYPE, &format!("{OWL}SymmetricProperty"), &dict),
-        t("urn:r", RDF_TYPE, &format!("{OWL}TransitiveProperty"), &dict),
+        t(
+            "urn:r",
+            RDF_TYPE,
+            &format!("{OWL}TransitiveProperty"),
+            &dict,
+        ),
         t("urn:a", "urn:r", "urn:b", &dict),
         t("urn:b", "urn:r", "urn:c", &dict),
         // inverseOf
         t("urn:p", &format!("{OWL}inverseOf"), "urn:q", &dict),
         t("urn:m", "urn:p", "urn:n", &dict),
         // functional property → same values
-        t("urn:f", RDF_TYPE, &format!("{OWL}FunctionalProperty"), &dict),
+        t(
+            "urn:f",
+            RDF_TYPE,
+            &format!("{OWL}FunctionalProperty"),
+            &dict,
+        ),
         t("urn:s", "urn:f", "urn:v1", &dict),
         t("urn:s", "urn:f", "urn:v2", &dict),
     ];
@@ -126,7 +136,11 @@ fn ow2_rl_correctness_core() {
     input.push(t("urn:Restr", &format!("{OWL}hasValue"), "urn:y", &dict));
     input.push(t("urn:x", RDF_TYPE, "urn:Restr", &dict));
 
-    let (outcome, report) = materialize(&dict, &input, task(InferenceMode::ForwardChaining, 64, None));
+    let (outcome, report) = materialize(
+        &dict,
+        &input,
+        task(InferenceMode::ForwardChaining, 64, None),
+    );
     assert!(!report.timed_out, "materialization must converge");
     assert!(!report.inconsistent, "input is consistent");
     assert!(
@@ -136,9 +150,27 @@ fn ow2_rl_correctness_core() {
     );
 
     // transitive subclass closure
-    assert_has(&outcome, &dict, "urn:A", &format!("{RDFS}subClassOf"), "urn:C");
-    assert_has(&outcome, &dict, "urn:A", &format!("{RDFS}subClassOf"), "urn:D");
-    assert_has(&outcome, &dict, "urn:B", &format!("{RDFS}subClassOf"), "urn:D");
+    assert_has(
+        &outcome,
+        &dict,
+        "urn:A",
+        &format!("{RDFS}subClassOf"),
+        "urn:C",
+    );
+    assert_has(
+        &outcome,
+        &dict,
+        "urn:A",
+        &format!("{RDFS}subClassOf"),
+        "urn:D",
+    );
+    assert_has(
+        &outcome,
+        &dict,
+        "urn:B",
+        &format!("{RDFS}subClassOf"),
+        "urn:D",
+    );
     // domain/range typing
     assert_has(&outcome, &dict, "urn:x", RDF_TYPE, "urn:C");
     assert_has(&outcome, &dict, "urn:y", RDF_TYPE, "urn:D");
@@ -168,15 +200,27 @@ fn inconsistency_detection_disjoint_and_alldifferent() {
         t("urn:a", &format!("{OWL}sameAs"), "urn:b", &dict),
     ];
     input.extend(rdf_list(&dict, "_:l", &["urn:a", "urn:b"]));
-    let (_, report) = materialize(&dict, &input, task(InferenceMode::ForwardChaining, 64, None));
-    assert!(report.inconsistent, "disjoint + AllDifferent input must be inconsistent");
+    let (_, report) = materialize(
+        &dict,
+        &input,
+        task(InferenceMode::ForwardChaining, 64, None),
+    );
+    assert!(
+        report.inconsistent,
+        "disjoint + AllDifferent input must be inconsistent"
+    );
 }
 
 #[test]
 fn property_chain_and_has_key() {
     let dict = InMemoryDictionary::new();
     let mut input = vec![
-        t("urn:uncleOf", &format!("{OWL}propertyChainAxiom"), "_:u", &dict),
+        t(
+            "urn:uncleOf",
+            &format!("{OWL}propertyChainAxiom"),
+            "_:u",
+            &dict,
+        ),
         t("urn:Person", &format!("{OWL}hasKey"), "_:k", &dict),
         t("urn:alice", RDF_TYPE, "urn:Person", &dict),
         t("urn:bob", RDF_TYPE, "urn:Person", &dict),
@@ -187,10 +231,20 @@ fn property_chain_and_has_key() {
     ];
     input.extend(rdf_list(&dict, "_:u", &["urn:siblingOf", "urn:parentOf"]));
     input.extend(rdf_list(&dict, "_:k", &["urn:ssn"]));
-    let (outcome, report) = materialize(&dict, &input, task(InferenceMode::ForwardChaining, 64, None));
+    let (outcome, report) = materialize(
+        &dict,
+        &input,
+        task(InferenceMode::ForwardChaining, 64, None),
+    );
     assert!(!report.timed_out);
     assert_has(&outcome, &dict, "urn:alice", "urn:uncleOf", "urn:carol");
-    assert_has(&outcome, &dict, "urn:alice", &format!("{OWL}sameAs"), "urn:bob");
+    assert_has(
+        &outcome,
+        &dict,
+        "urn:alice",
+        &format!("{OWL}sameAs"),
+        "urn:bob",
+    );
 }
 
 #[test]
@@ -204,8 +258,15 @@ fn iteration_cap_bounds_closure() {
         "2-iteration cap should bound the closure below {full_closure}: got {}",
         bounded.inferred_triples
     );
-    assert!(!bounded.timed_out, "iteration cap is not a wall-clock timeout");
-    let (_, complete) = materialize(&dict, &input, task(InferenceMode::ForwardChaining, 64, None));
+    assert!(
+        !bounded.timed_out,
+        "iteration cap is not a wall-clock timeout"
+    );
+    let (_, complete) = materialize(
+        &dict,
+        &input,
+        task(InferenceMode::ForwardChaining, 64, None),
+    );
     assert_eq!(complete.inferred_triples, full_closure);
     assert!(!complete.timed_out);
 }
@@ -214,8 +275,15 @@ fn iteration_cap_bounds_closure() {
 fn wall_clock_guardrail_times_out() {
     let (dict, input, full_closure) = subclass_chain(500);
     let started = Instant::now();
-    let (_, report) = materialize(&dict, &input, task(InferenceMode::ForwardChaining, 4096, Some(1)));
-    assert!(report.timed_out, "1ms budget must trip the wall-clock guardrail");
+    let (_, report) = materialize(
+        &dict,
+        &input,
+        task(InferenceMode::ForwardChaining, 4096, Some(1)),
+    );
+    assert!(
+        report.timed_out,
+        "1ms budget must trip the wall-clock guardrail"
+    );
     assert!(
         report.inferred_triples < full_closure,
         "timed-out run must be partial: got {}",
@@ -233,9 +301,15 @@ fn large_closure_within_performance_budget() {
     // rule set must converge comfortably inside the wall-clock budget.
     let (dict, input, full_closure) = subclass_chain(40);
     let started = Instant::now();
-    let (outcome, report) =
-        materialize(&dict, &input, task(InferenceMode::ForwardChaining, 512, Some(5000)));
-    assert!(!report.timed_out, "40-node chain must converge within budget");
+    let (outcome, report) = materialize(
+        &dict,
+        &input,
+        task(InferenceMode::ForwardChaining, 512, Some(5000)),
+    );
+    assert!(
+        !report.timed_out,
+        "40-node chain must converge within budget"
+    );
     assert_eq!(
         report.inferred_triples, full_closure,
         "full transitive closure expected"

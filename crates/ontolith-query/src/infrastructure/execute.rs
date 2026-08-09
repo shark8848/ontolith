@@ -3789,6 +3789,23 @@ fn value_equal(a: &BoundValue, b: &BoundValue) -> Option<bool> {
     }
 }
 
+/// XSD boolean value of a literal: canonical `Boolean`, or a preserved
+/// `Typed` boolean (`"1"`/`"0"^^xsd:boolean`, RDF 1.1 non-canonical terms)
+/// evaluated by XSD value semantics.
+fn literal_boolean_value(l: &LiteralValue) -> Option<bool> {
+    match l {
+        LiteralValue::Boolean(b) => Some(*b),
+        LiteralValue::Typed { value, datatype } if datatype.as_str() == XSD_BOOLEAN_IRI => {
+            match value.as_str() {
+                "true" | "1" => Some(true),
+                "false" | "0" => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// RDFterm-equal with dictionary resolution: a subject bound as
 /// `Node(NodeId)` compares equal to its IRI (`FILTER (?s = :iri)`).
 fn value_equal_ctx(a: &BoundValue, b: &BoundValue, ctx: &ExecCtx<'_>) -> Option<bool> {
@@ -3813,6 +3830,9 @@ fn literal_equal(a: &LiteralValue, b: &LiteralValue) -> Option<bool> {
     if Numeric::from_literal(a).is_some() || Numeric::from_literal(b).is_some() {
         // Numeric vs non-numeric: unequal (SPARQL: no error).
         return Some(false);
+    }
+    if let (Some(x), Some(y)) = (literal_boolean_value(a), literal_boolean_value(b)) {
+        return Some(x == y);
     }
     match (a, b) {
         (LiteralValue::Lang { value: x, lang: lx }, LiteralValue::Lang { value: y, lang: ly }) => {
@@ -3906,6 +3926,17 @@ fn cast_value(
     match dt {
         XSD_STRING_IRI => {
             let s = match bv {
+                // RDF 1.1: non-canonical boolean lexemes cast to the
+                // canonical lexical form (`"0"^^xsd:boolean` -> "false").
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if datatype.as_str() == XSD_BOOLEAN_IRI =>
+                {
+                    match value.as_str() {
+                        "true" | "1" => "true".to_owned(),
+                        "false" | "0" => "false".to_owned(),
+                        _ => return None,
+                    }
+                }
                 BoundValue::Literal(l) => l.lexical_form(),
                 BoundValue::Iri(i) => i.as_str().to_owned(),
                 _ => return None,
@@ -3915,6 +3946,15 @@ fn cast_value(
         XSD_BOOLEAN_IRI => {
             let b = match bv {
                 BoundValue::Literal(LiteralValue::Boolean(b)) => *b,
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if datatype.as_str() == XSD_BOOLEAN_IRI =>
+                {
+                    match value.as_str() {
+                        "true" | "1" => true,
+                        "false" | "0" => false,
+                        _ => return None,
+                    }
+                }
                 BoundValue::Literal(LiteralValue::Integer(n)) => *n != 0,
                 BoundValue::Literal(LiteralValue::Decimal(f)) => *f != 0.0,
                 BoundValue::Literal(LiteralValue::Float(f)) => *f != 0.0,
@@ -3948,6 +3988,15 @@ fn cast_value(
                 BoundValue::Literal(LiteralValue::Float(f)) => f.trunc() as i64,
                 BoundValue::Literal(LiteralValue::Double(f)) => f.trunc() as i64,
                 BoundValue::Literal(LiteralValue::Boolean(b)) => *b as i64,
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if datatype.as_str() == XSD_BOOLEAN_IRI =>
+                {
+                    match value.as_str() {
+                        "true" | "1" => 1,
+                        "false" | "0" => 0,
+                        _ => return None,
+                    }
+                }
                 BoundValue::Literal(LiteralValue::String(s)) if valid_integer_lex(s.trim()) => {
                     s.trim().parse::<i64>().ok()?
                 }
@@ -3983,6 +4032,15 @@ fn cast_value(
                         0.0
                     }
                 }
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if datatype.as_str() == XSD_BOOLEAN_IRI =>
+                {
+                    match value.as_str() {
+                        "true" | "1" => 1.0,
+                        "false" | "0" => 0.0,
+                        _ => return None,
+                    }
+                }
                 BoundValue::Literal(LiteralValue::String(s)) if valid_decimal_lex(s.trim()) => {
                     s.trim().parse::<f64>().ok()?
                 }
@@ -4015,6 +4073,15 @@ fn cast_value(
                         0.0
                     }
                 }
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if datatype.as_str() == XSD_BOOLEAN_IRI =>
+                {
+                    match value.as_str() {
+                        "true" | "1" => 1.0,
+                        "false" | "0" => 0.0,
+                        _ => return None,
+                    }
+                }
                 BoundValue::Literal(LiteralValue::String(s)) if valid_double_lex(s.trim()) => {
                     s.trim().parse::<f64>().ok()?
                 }
@@ -4045,6 +4112,15 @@ fn cast_value(
                         1.0
                     } else {
                         0.0
+                    }
+                }
+                BoundValue::Literal(LiteralValue::Typed { value, datatype })
+                    if datatype.as_str() == XSD_BOOLEAN_IRI =>
+                {
+                    match value.as_str() {
+                        "true" | "1" => 1.0,
+                        "false" | "0" => 0.0,
+                        _ => return None,
                     }
                 }
                 BoundValue::Literal(LiteralValue::String(s)) if valid_double_lex(s.trim()) => {

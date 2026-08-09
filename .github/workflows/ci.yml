@@ -404,3 +404,22 @@ jobs:
         run: cargo install cargo-license --locked
       - name: Enumerate third-party licenses
         run: cargo license
+
+  dependency-audit:
+    name: dependency register audit + CVE observer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+      - name: Dependency register consistency (P0-03 hard gate)
+        run: bash scripts/audit-dependency-register.sh
+      - name: cargo-audit (CVE observer, non-blocking)
+        continue-on-error: true
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit

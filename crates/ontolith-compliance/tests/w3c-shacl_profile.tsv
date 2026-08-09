@@ -89,7 +89,7 @@ property	qualifiedMinCountDisjoint-001	PASS
 property	qualifiedValueShape-001	PASS	
 property	qualifiedValueShapesDisjoint-001	PASS	
 property	uniqueLang-001	PASS	
-property	uniqueLang-002	FAIL	semantic
+property	uniqueLang-002	PASS	
 targets	multipleTargets-001	PASS	
 targets	targetClass-001	PASS	
 targets	targetClassImplicit-001	PASS	

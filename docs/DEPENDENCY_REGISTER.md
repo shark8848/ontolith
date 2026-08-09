@@ -15,6 +15,12 @@ Tier definitions: PLAN-0001 §8 / SAS-0001 §12.
 | tokio | A | Pin exact in Cargo.lock (tonic's async runtime, features `rt-multi-thread`/`macros`/`net`/`time`/`sync`/`io-util`) | server | Dedicated multi-thread runtime for the gRPC server thread (`serve_grpc`) | Async runtime surface; task starvation under load | Keep the dedicated-thread model; swap to hyper/axum later |
 | `protoc-bin-vendored` | B | Pin exact in Cargo.lock (build-dep of `grpc-backend`) | server | Vendors protoc 3 for `tonic-build` so `build.rs` needs no system protoc | Version skew with protoc/genproto | Use system protoc via `PROTOC` env if vendoring breaks |
 | `serde` / `serde_json` | B | Follow openraft's pin (serde 1.x in tree) | cluster; security | cluster: serialize raft RPC messages, log entries, hard state, and snapshots (M2); security: JWT claim payload encoding/parsing (P5-02) | Ecosystem-stable | Revert to openraft-only serde if a lighter codec is adopted |
+| `rustls` / `rustls-pemfile` | A | Pin rustls 0.23 with `ring` provider (ADR-0003) | server | Management-plane TLS termination (rustls in-process) + R2 non-loopback TLS gate; PEM cert/key loading | Crypto/version churn; feature surface | Feature-off → plaintext loopback only (R2 gate rejects non-loopback without TLS) |
+| `tonic-build` | B | Pin exact in Cargo.lock (build-dep of `grpc-backend`) | server | Compiles `proto/ontolith/v1/sparql.proto` (P5-01); companion to tonic/prost | Generated-code churn on proto change | Feature-off → HTTP gateway only |
+| `regex` | B | Pin exact in Cargo.lock | query | SPARQL `regex`/`FILTER` regex function subset + SHACL `sh:pattern` small-regex support | ReDoS surface (engine-side size guards) | Restrict to engine-side guardrails; fallback literal prefix match |
+| `rcgen` | B | Pin exact in Cargo.lock | server | Self-signed cert generation for TLS smoke/tests (gen-self-signed-cert) | Cert formats | Use openssl CLI in ops scripts |
+| `quick-xml` | B | Pin exact in Cargo.lock (dev-dep of `ontolith-compliance`) | compliance | RDF/XML result parsing for the W3C suite harness | Format churn | Keep vendored fixtures |
+| `tempfile` | C | Pin exact in Cargo.lock (dev-dep) | all | Temporary dirs for tests/drills | Low | Use mktemp in shell drills |
 | (workspace path crates) | A/B | path deps | platform | Internal modules | Low | N/A |
 
 ## Admission checklist (Tier A)
@@ -22,7 +28,7 @@ Tier definitions: PLAN-0001 §8 / SAS-0001 §12.
 - [x] RFC/ADR: [ADR-0001](../adr/0001-rocksdb-storage-backend.md)
 - [x] Trait isolation: only `ontolith-storage::infrastructure::rocksdb`
 - [x] License: Apache-2.0 / BSD-style stack via `rocksdb` crate (verify on upgrade)
-- [ ] CI CVE audit job (Phase 7)
+- [x] CI dependency-register audit job（P0-03，2026-08-09：`scripts/audit-dependency-register.sh` 校验全部直接依赖已登记）+ CI CVE audit（`cargo-audit` non-blocking 观测轨，Phase 7）
 - [x] Fallback: in-memory engine always available
 
 ## Feature flags
