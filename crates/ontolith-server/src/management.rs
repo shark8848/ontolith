@@ -259,7 +259,7 @@ impl ManagementState {
             200,
             "OK",
             format!(
-                r#"{{"management_bind":{},"runtime_bind":{},"storage_backend":{},"data_dir":{},"auth_mode":{},"tenant_mode":{},"audit_path":{},"tls":{},"tracing":"on","started_at_ms":{}}}"#,
+                r#"{{"management_bind":{},"runtime_bind":{},"storage_backend":{},"data_dir":{},"auth_mode":{},"tenant_mode":{},"audit_path":{},"tls":{},"semantic":{},"tracing":"on","started_at_ms":{}}}"#,
                 json_string(&self.management_bind),
                 json_string(&self.app.bind_address),
                 json_string(self.app.backend.as_str()),
@@ -283,6 +283,11 @@ impl ManagementState {
                 } else {
                     "\"off\""
                 },
+                json_string(if self.app.semantic.is_some() {
+                    "on"
+                } else {
+                    "off"
+                }),
                 self.started_at_ms,
             ),
         ))
@@ -900,6 +905,7 @@ fn build_managed_app_state(
                 tenant_mode,
                 cluster,
                 InferenceConfig::from_env(),
+                crate::app::SemanticConfig::from_env(),
             )
             .map_err(|e| e.message().to_owned());
         }
@@ -919,6 +925,7 @@ fn build_managed_app_state(
         tenant_mode,
         cluster,
         InferenceConfig::from_env(),
+        crate::app::SemanticConfig::from_env(),
     ))
 }
 

@@ -1,8 +1,8 @@
 # L8 — AI-Native 语义扩展立项
 
 文档 ID: AI-L8-0001  
-版本: 0.1.0  
-状态: Draft（R4 启动立项，P8-01 第一步已开工）  
+版本: 0.1.1  
+状态: Active（R4 立项完成；P8-01 M1 语义核心 + M2 server 接线完成）  
 日期: 2026-08-09  
 对应代码: `crates/ontolith-ai`（新建）  
 计划: [Ontolith_Development_Plan.zh-CN.md](./Ontolith_Development_Plan.zh-CN.md) §6 R4 / Phase 8
@@ -71,11 +71,27 @@ EmbeddingProvider (trait)
 
 | 里程碑 | 内容 | 证据 |
 |--------|------|------|
-| M1（本波次） | `ontolith-ai` crate：EmbeddingProvider 抽象 + FeatureHashEmbedding + 余弦相似度 + 内存语义索引 + top-k 检索 + 测试 | crate 测试全绿；本文档 + PROGRESS 回填 |
-| M2 | server 接线：`/semantic/search` HTTP + 管理面姿态 + 鉴权复用 + smoke | server 测试 + 烟雾脚本 |
+| M1（完成 2026-08-09） | `ontolith-ai` crate：EmbeddingProvider 抽象 + FeatureHashEmbedding + 余弦相似度 + 内存语义索引 + top-k 检索 + 测试 | crate 8 测全绿 |
+| M2（完成 2026-08-09） | server 接线：`/semantic/search` + `/semantic/index` HTTP + 启动自动索引 + 鉴权/审计复用 + `/health`·`/admin/config` 姿态 | server 54 测（+5 语义） |
 | M3 | 持久化语义索引（RocksDB 独立 CF）+ 增量更新语义 | storage 复用 + 重启持久测试 |
 | M4 | P8-03 代理集成扩展点：plugin-api `Retrieval` 能力 + AgentTool 抽象 | plugin-api + 示例工具 |
 | R4 | 检索 KPI 与扩展安全/兼容门禁全绿 | ACC-R4 验收包 |
+
+## 7. 环境契约与 API（P8-01 M2）
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `ONTOLITH_SEMANTIC_ENABLED` | 关 | `1/true/on` 开启语义检索（默认关闭，保持网关行为不变） |
+| `ONTOLITH_SEMANTIC_DIM` | 256 | 特征哈希 embedding 维度 |
+| `ONTOLITH_SEMANTIC_AUTO_INDEX_CAP` | 100000 | 启动时自动索引的存储项上限（主语+谓词+宾语，bnode 主语跳过） |
+
+API（鉴权/审计复用 L5 模式，`semantic:read` / `semantic:write`）：
+
+- `GET /semantic/search?q=<text>&k=<n>` → `{"dim":256,"indexed":N,"query":...,"hits":[{"term":{"type":"uri|literal|bnode","value":...},"score":0.xxxxxx}]}`；`k∈[1,100]` 自动截断；未启用返回 501。
+- `POST /semantic/index?term=<iri>` 或 `?terms=<iri1>,<iri2>`（URL 编码）→ `{"indexed":n,"total":m}`；幂等去重。
+- `/health` 与 `/admin/config` 暴露 `semantic: on|off` 姿态。
+
+已知限制（M2）：增量索引仅限显式 `POST /semantic/index` 与启动自动索引；删除/更新不回流索引（M3 持久化 + 增量更新语义解决）。
 
 ## 5. KPI（R4 检索与语义集成）
 

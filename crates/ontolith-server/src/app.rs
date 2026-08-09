@@ -2,6 +2,9 @@
 
 use crate::http::{HttpRequest, HttpResponse, now_ms};
 use crate::reasoning::{InferenceConfig, ReasoningReadService, base_read_service, reasoning_input};
+use ontolith_ai::application::SemanticSearchService;
+use ontolith_ai::domain::MAX_TOP_K;
+use ontolith_ai::infrastructure::FeatureHashEmbedding;
 use ontolith_cluster::application::ClusterRuntime;
 use ontolith_cluster::domain::{ClusterNodeId, LogPayload, SessionId};
 #[cfg(feature = "raft-backend")]
@@ -24,7 +27,7 @@ use ontolith_query::domain::{
     BoundValue, PatternCost, QueryExplain, QueryKind, QueryRequest, QueryResult,
 };
 use ontolith_query::infrastructure::{update_pipeline, update_pipeline_with_read};
-use ontolith_rdf::domain::Triple;
+use ontolith_rdf::domain::{Term, Triple};
 use ontolith_reasoner::application::Reasoner;
 use ontolith_reasoner::domain::{InferenceMode, ReasoningReport};
 use ontolith_reasoner::infrastructure::ForwardChainReasoner;
@@ -45,6 +48,96 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+/// Semantic (AI-native, P8-01/P8-02) runtime configuration.
+///
+/// Off by default: enabling is an explicit operator decision
+/// (`ONTOLITH_SEMANTIC_ENABLED`), keeping the default gateway behavior
+/// unchanged (R4 扩展安全与兼容门禁).
+#[derive(Debug, Clone)]
+pub struct SemanticConfig {
+    pub enabled: bool,
+    pub dim: usize,
+    /// Auto-index cap: number of store terms (subjects + predicates +
+    /// objects) indexed at startup.
+    pub auto_index_cap: usize,
+}
+
+impl Default for SemanticConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dim: ontolith_ai::domain::DEFAULT_EMBEDDING_DIM,
+            auto_index_cap: 100_000,
+        }
+    }
+}
+
+impl SemanticConfig {
+    pub fn from_env() -> Self {
+        let enabled = match std::env::var("ONTOLITH_SEMANTIC_ENABLED") {
+            Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"),
+            Err(_) => false,
+        };
+        let dim = std::env::var("ONTOLITH_SEMANTIC_DIM")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(ontolith_ai::domain::DEFAULT_EMBEDDING_DIM);
+        let auto_index_cap = std::env::var("ONTOLITH_SEMANTIC_AUTO_INDEX_CAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(100_000);
+        Self {
+            enabled,
+            dim,
+            auto_index_cap,
+        }
+    }
+}
+
+/// Build the semantic search service (P8-01 M2): deterministic
+/// feature-hash embeddings + auto-index of store terms (subjects/predicates/
+/// objects, capped). Returns `None` when semantic is disabled.
+pub(crate) fn build_semantic_service(
+    triples: &dyn TripleRepository,
+    dictionary: &dyn DictionaryCodec,
+    config: &SemanticConfig,
+) -> Option<SemanticSearchService> {
+    if !config.enabled {
+        return None;
+    }
+    let provider = Arc::new(
+        FeatureHashEmbedding::new(config.dim)
+            .expect("semantic embedding dimension must be non-zero"),
+    ) as Arc<dyn ontolith_ai::domain::EmbeddingProvider>;
+    let mut svc = SemanticSearchService::new(provider);
+    let mut indexed = 0usize;
+    for triple in triples.all() {
+        if indexed >= config.auto_index_cap {
+            break;
+        }
+        // Predicate and object terms are directly indexable.
+        svc.index(&Term::Iri(triple.predicate.clone())).ok();
+        indexed += 1;
+        if indexed >= config.auto_index_cap {
+            break;
+        }
+        svc.index(&triple.object).ok();
+        indexed += 1;
+        if indexed >= config.auto_index_cap {
+            break;
+        }
+        // Subject: decode the dictionary id; blank nodes are ephemeral and
+        // not stable search targets, so they are skipped.
+        if let Some(s) = dictionary.decode_node(triple.subject)
+            && !s.starts_with("_:")
+        {
+            svc.index(&Term::iri(s)).ok();
+            indexed += 1;
+        }
+    }
+    Some(svc)
+}
 
 /// Storage backend kind selected at bootstrap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +182,9 @@ pub struct AppState {
     pub inference: InferenceConfig,
     pub cluster: Arc<dyn ClusterRuntime>,
     pub cluster_tick: AtomicU64,
+    /// L8 semantic search service (P8-01/P8-02). `None` when disabled
+    /// (`ONTOLITH_SEMANTIC_ENABLED` unset): routes answer 503.
+    pub semantic: Option<std::sync::Mutex<SemanticSearchService>>,
 }
 
 impl AppState {
@@ -123,6 +219,7 @@ impl AppState {
             audit,
             tenant_mode,
             InferenceConfig::default(),
+            SemanticConfig::default(),
         )
     }
 
@@ -136,6 +233,7 @@ impl AppState {
         tenant_mode: TenantMode,
         cluster: Arc<dyn ClusterRuntime>,
         inference: InferenceConfig,
+        semantic_config: SemanticConfig,
     ) -> Arc<Self> {
         let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
         let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
@@ -153,6 +251,7 @@ impl AppState {
             audit,
             tenant_mode,
             inference,
+            semantic_config,
         )
     }
 
@@ -196,11 +295,13 @@ impl AppState {
             audit,
             tenant_mode,
             InferenceConfig::default(),
+            SemanticConfig::default(),
         ))
     }
 
     /// RocksDB-storage variant with an explicit cluster runtime (raft mode).
     #[cfg(feature = "rocksdb-backend")]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_rocksdb_with_cluster(
         bind_address: String,
         auth: HeaderAuthenticator,
@@ -209,6 +310,7 @@ impl AppState {
         tenant_mode: TenantMode,
         cluster: Arc<dyn ClusterRuntime>,
         inference: InferenceConfig,
+        semantic_config: SemanticConfig,
     ) -> Result<Arc<Self>, OntolithError> {
         let engine = Arc::new(ontolith_storage::open_durable_engine(&path)?);
         let dictionary: Arc<dyn DictionaryCodec> = Arc::clone(&engine) as Arc<dyn DictionaryCodec>;
@@ -227,6 +329,7 @@ impl AppState {
             audit,
             tenant_mode,
             inference,
+            semantic_config,
         ))
     }
 
@@ -243,7 +346,10 @@ impl AppState {
         audit: InMemoryAuditLog,
         tenant_mode: TenantMode,
         inference: InferenceConfig,
+        semantic_config: SemanticConfig,
     ) -> Arc<Self> {
+        let semantic = build_semantic_service(&*triples, &*dictionary, &semantic_config)
+            .map(std::sync::Mutex::new);
         Arc::new(Self {
             storage,
             dictionary,
@@ -267,7 +373,35 @@ impl AppState {
             inference,
             cluster,
             cluster_tick: AtomicU64::new(0),
+            semantic,
         })
+    }
+
+    /// Memory-storage state with semantic search explicitly enabled
+    /// (P8-01 M2 tests; production toggles `ONTOLITH_SEMANTIC_ENABLED`).
+    pub fn new_memory_with_semantic(
+        bind_address: String,
+        auth: HeaderAuthenticator,
+        config: SemanticConfig,
+    ) -> Arc<Self> {
+        let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
+        let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
+        let triples: Arc<dyn TripleRepository> =
+            Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        Self::from_parts(
+            storage,
+            dictionary,
+            triples,
+            bind_address,
+            auth,
+            StorageBackendKind::Memory,
+            None,
+            default_cluster(),
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+            InferenceConfig::default(),
+            config,
+        )
     }
 
     pub fn handle(self: &Arc<Self>, req: HttpRequest) -> HttpResponse {
@@ -319,6 +453,8 @@ impl AppState {
             ("POST", "/cluster/partition") => self.cluster_partition(&req),
             ("POST", "/cluster/heal") => self.cluster_heal(&req),
             ("GET", "/cluster/failover") => self.cluster_failover_history(&req),
+            ("GET", "/semantic/search") => self.semantic_search(&req),
+            ("POST", "/semantic/index") => self.semantic_index(&req),
             _ => Ok(HttpResponse::json(
                 404,
                 "Not Found",
@@ -406,6 +542,109 @@ impl AppState {
         result
     }
 
+    /// L8 semantic retrieval (P8-02 interface): `GET /semantic/search?q=&k=`
+    /// returns top-k store terms by cosine similarity to the query text.
+    fn semantic_search(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let ctx = self.auth(req)?;
+        authorize(&self.audit, &ctx, "semantic", "read", now_ms())?;
+        let svc = self
+            .semantic
+            .as_ref()
+            .ok_or(OntolithError::Unsupported(
+                "semantic search disabled (set ONTOLITH_SEMANTIC_ENABLED=1)",
+            ))?
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("semantic index lock poisoned"))?;
+        let q = req
+            .query
+            .get("q")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or(OntolithError::InvalidArgument(
+                "missing semantic query parameter 'q'",
+            ))?;
+        let k = req
+            .query
+            .get("k")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(ontolith_ai::domain::DEFAULT_TOP_K)
+            .clamp(1, MAX_TOP_K);
+        let hits = svc.search_text(q, k)?;
+        let mut parts = Vec::with_capacity(hits.len());
+        for hit in &hits {
+            parts.push(format!(
+                r#"{{"term":{},"score":{}}}"#,
+                semantic_term_json(&hit.term),
+                format_score(hit.score)
+            ));
+        }
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"dim":{},"indexed":{},"query":{},"hits":[{}]}}"#,
+                svc.provider_dim(),
+                svc.indexed_terms(),
+                json_string(q),
+                parts.join(",")
+            ),
+        ))
+    }
+
+    /// L8 semantic index write (P8-01 M2): `POST /semantic/index`
+    /// with `?term=<iri>` or `?terms=<iri1>,<iri2>` (URL-encoded).
+    fn semantic_index(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let ctx = self.auth(req)?;
+        authorize(&self.audit, &ctx, "semantic", "write", now_ms())?;
+        let mut svc = self
+            .semantic
+            .as_ref()
+            .ok_or(OntolithError::Unsupported(
+                "semantic index disabled (set ONTOLITH_SEMANTIC_ENABLED=1)",
+            ))?
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("semantic index lock poisoned"))?;
+        let mut terms: Vec<String> = Vec::new();
+        if let Some(t) = req
+            .query
+            .get("term")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            terms.push(t.to_owned());
+        }
+        if let Some(ts) = req
+            .query
+            .get("terms")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            for t in ts.split(',') {
+                if !t.is_empty() {
+                    terms.push(t.to_owned());
+                }
+            }
+        }
+        if terms.is_empty() {
+            return Err(OntolithError::InvalidArgument(
+                "missing 'term' or 'terms' query parameter",
+            ));
+        }
+        let before = svc.indexed_terms();
+        for t in &terms {
+            svc.index(&Term::iri(t.clone()))?;
+        }
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"indexed":{},"total":{}}}"#,
+                svc.indexed_terms().saturating_sub(before),
+                svc.indexed_terms()
+            ),
+        ))
+    }
+
     fn health(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
         let ctx = self.auth(req)?;
         authorize(&self.audit, &ctx, "health", "read", now_ms())?;
@@ -414,7 +653,7 @@ impl AppState {
             200,
             "OK",
             format!(
-                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"jwt":{},"oidc":{},"tracing":"on","data_dir":{}}}"#,
+                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"jwt":{},"oidc":{},"semantic":{},"tracing":"on","data_dir":{}}}"#,
                 json_string(&self.bind_address),
                 json_string(self.backend.as_str()),
                 stats.triple_count,
@@ -434,6 +673,7 @@ impl AppState {
                 } else {
                     "off"
                 }),
+                json_string(if self.semantic.is_some() { "on" } else { "off" }),
                 match &self.data_dir {
                     Some(p) => json_string(&p.display().to_string()),
                     None => "null".into(),
@@ -1628,6 +1868,43 @@ fn term_json(term: &ontolith_rdf::domain::Term) -> String {
     }
 }
 
+/// Render a semantic hit term in SPARQL-results-JSON style so clients can
+/// round-trip it back into the store (`{"type":...,"value":...}`).
+fn semantic_term_json(term: &ontolith_rdf::domain::Term) -> String {
+    match term {
+        ontolith_rdf::domain::Term::Iri(i) => {
+            format!(r#"{{"type":"uri","value":{}}}"#, json_string(i.as_str()))
+        }
+        ontolith_rdf::domain::Term::BlankNode(n) => {
+            format!(r#"{{"type":"bnode","value":"n{}"}}"#, n.get())
+        }
+        ontolith_rdf::domain::Term::Literal(l) => {
+            let s = l.lexical_form();
+            if let Some(lang) = l.language_tag() {
+                format!(
+                    r#"{{"type":"literal","value":{},"xml:lang":{}}}"#,
+                    json_string(&s),
+                    json_string(lang.as_str())
+                )
+            } else if l.xsd_datatype_iri().as_str() == "http://www.w3.org/2001/XMLSchema#string" {
+                format!(r#"{{"type":"literal","value":{}}}"#, json_string(&s))
+            } else {
+                format!(
+                    r#"{{"type":"literal","value":{},"datatype":{}}}"#,
+                    json_string(&s),
+                    json_string(l.xsd_datatype_iri().as_str())
+                )
+            }
+        }
+    }
+}
+
+/// Deterministic score rendering (fixed decimals) so repeated searches are
+/// byte-identical (P8-01 KPI: 确定性).
+fn format_score(score: f32) -> String {
+    format!("{:.6}", score)
+}
+
 fn extract_sparql_query(req: &HttpRequest) -> Result<String, OntolithError> {
     if let Some(q) = req.query.get("query") {
         return Ok(q.clone());
@@ -1881,6 +2158,7 @@ mod tests {
             InMemoryAuditLog::new(),
             TenantMode::Disabled,
             inference,
+            SemanticConfig::default(),
         )
     }
 
@@ -1905,6 +2183,7 @@ mod tests {
             InMemoryAuditLog::new(),
             TenantMode::Enforced,
             inference,
+            SemanticConfig::default(),
         )
     }
 
@@ -2768,5 +3047,198 @@ mod tests {
             foreign_body.contains("\"row_count\":0"),
             "acme must not see other tenant's inferred D typing: {foreign_body}"
         );
+    }
+
+    #[cfg(test)]
+    mod semantic_tests {
+        use super::*;
+        use ontolith_core::domain::Iri;
+        use ontolith_transaction::domain::TxnId;
+        use std::collections::HashMap;
+
+        fn get(path: &str) -> HttpRequest {
+            HttpRequest {
+                method: "GET".to_owned(),
+                path: path.to_owned(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: Vec::new(),
+            }
+        }
+
+        fn semantic_config() -> SemanticConfig {
+            SemanticConfig {
+                enabled: true,
+                dim: 256,
+                auto_index_cap: 100_000,
+            }
+        }
+
+        #[test]
+        fn semantic_disabled_returns_501() {
+            let state =
+                AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+            let mut q = HashMap::new();
+            q.insert("q".to_owned(), "sparql".to_owned());
+            let resp = dispatch_for_test(
+                &state,
+                HttpRequest {
+                    method: "GET".to_owned(),
+                    path: "/semantic/search".to_owned(),
+                    query: q,
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                },
+            );
+            assert_eq!(resp.status, 501);
+            let body = String::from_utf8_lossy(&resp.body);
+            assert!(body.contains("disabled"), "body={body}");
+        }
+
+        #[test]
+        fn semantic_index_requires_terms() {
+            let state = AppState::new_memory_with_semantic(
+                "127.0.0.1:8080".to_owned(),
+                HeaderAuthenticator::default(),
+                semantic_config(),
+            );
+            let resp = dispatch_for_test(
+                &state,
+                HttpRequest {
+                    method: "POST".to_owned(),
+                    path: "/semantic/index".to_owned(),
+                    query: HashMap::new(),
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                },
+            );
+            assert_eq!(resp.status, 400);
+            assert!(String::from_utf8_lossy(&resp.body).contains("term"));
+        }
+
+        #[test]
+        fn semantic_index_and_search_roundtrip() {
+            let state = AppState::new_memory_with_semantic(
+                "127.0.0.1:8080".to_owned(),
+                HeaderAuthenticator::default(),
+                semantic_config(),
+            );
+            let mut q = HashMap::new();
+            q.insert(
+                "terms".to_owned(),
+                "urn:ex:sparql_query,urn:ex:rdf_graph,urn:ex:unrelated_thing".to_owned(),
+            );
+            let idx = dispatch_for_test(
+                &state,
+                HttpRequest {
+                    method: "POST".to_owned(),
+                    path: "/semantic/index".to_owned(),
+                    query: q,
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                },
+            );
+            assert_eq!(idx.status, 200);
+            let idx_body = String::from_utf8_lossy(&idx.body);
+            assert!(idx_body.contains("\"indexed\":3"), "body={idx_body}");
+
+            let mut q2 = HashMap::new();
+            q2.insert("q".to_owned(), "sparql".to_owned());
+            let resp = dispatch_for_test(
+                &state,
+                HttpRequest {
+                    method: "GET".to_owned(),
+                    path: "/semantic/search".to_owned(),
+                    query: q2.clone(),
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                },
+            );
+            assert_eq!(resp.status, 200);
+            let body = String::from_utf8_lossy(&resp.body);
+            assert!(body.contains("\"dim\":256"), "body={body}");
+            assert!(body.contains("\"indexed\":3"), "body={body}");
+            assert!(body.contains("\"query\":\"sparql\""), "body={body}");
+            // Top hit must be the sparql-related term with a deterministic score.
+            assert!(
+                body.contains("\"term\":{\"type\":\"uri\",\"value\":\"urn:ex:sparql_query\"}"),
+                "body={body}"
+            );
+            // Determinism: same query twice is byte-identical.
+            let resp2 = dispatch_for_test(
+                &state,
+                HttpRequest {
+                    method: "GET".to_owned(),
+                    path: "/semantic/search".to_owned(),
+                    query: q2,
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                },
+            );
+            assert_eq!(body, String::from_utf8_lossy(&resp2.body));
+        }
+
+        #[test]
+        fn semantic_search_requires_query() {
+            let state = AppState::new_memory_with_semantic(
+                "127.0.0.1:8080".to_owned(),
+                HeaderAuthenticator::default(),
+                semantic_config(),
+            );
+            let resp = dispatch_for_test(&state, get("/semantic/search"));
+            assert_eq!(resp.status, 400);
+        }
+
+        #[test]
+        fn semantic_auto_indexes_store_terms_at_startup() {
+            let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
+            let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
+            let triples: Arc<dyn TripleRepository> =
+                Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+            let txn_id = TxnId::new(1);
+            triples
+                .insert(
+                    txn_id,
+                    Triple::new(
+                        NodeId::new(1),
+                        Iri::new("urn:ex:knows"),
+                        Term::iri("urn:ex:alice"),
+                    ),
+                )
+                .unwrap();
+            storage.commit_transaction(txn_id).unwrap();
+            let state = AppState::from_parts(
+                storage,
+                dictionary,
+                triples,
+                "127.0.0.1:8080".to_owned(),
+                HeaderAuthenticator::default(),
+                StorageBackendKind::Memory,
+                None,
+                default_cluster(),
+                InMemoryAuditLog::new(),
+                TenantMode::Disabled,
+                InferenceConfig::default(),
+                semantic_config(),
+            );
+            let mut q = HashMap::new();
+            q.insert("q".to_owned(), "alice".to_owned());
+            let resp = dispatch_for_test(
+                &state,
+                HttpRequest {
+                    method: "GET".to_owned(),
+                    path: "/semantic/search".to_owned(),
+                    query: q,
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                },
+            );
+            assert_eq!(resp.status, 200);
+            let body = String::from_utf8_lossy(&resp.body);
+            assert!(
+                body.contains("urn:ex:alice"),
+                "auto-indexed object term should be searchable: {body}"
+            );
+        }
     }
 }

@@ -34,6 +34,7 @@ ontolith-reasoner = { path = "../ontolith-reasoner" }
 ontolith-sdk = { path = "../ontolith-sdk" }
 ontolith-rdf = { path = "../ontolith-rdf" }
 ontolith-parser = { path = "../ontolith-parser" }
+ontolith-ai = { path = "../ontolith-ai" }
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

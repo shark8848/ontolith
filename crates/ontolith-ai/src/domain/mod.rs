@@ -64,7 +64,7 @@ impl Embedding {
 }
 
 /// Embedding provider abstraction (P8-01): RDF terms / query text -> vectors.
-pub trait EmbeddingProvider {
+pub trait EmbeddingProvider: Send + Sync {
     fn dim(&self) -> usize;
     fn embed_text(&self, text: &str) -> Result<Embedding, OntolithError>;
     fn embed_term(&self, term: &Term) -> Result<Embedding, OntolithError>;
@@ -78,7 +78,7 @@ pub struct SemanticHit {
 }
 
 /// Semantic term index (P8-01): upsert terms, top-k nearest by cosine.
-pub trait SemanticIndex {
+pub trait SemanticIndex: Send + Sync {
     fn upsert(&mut self, term: &Term) -> Result<(), OntolithError>;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool;

@@ -1160,6 +1160,7 @@ dependencies = [
 name = "ontolith-server"
 version = "0.1.0"
 dependencies = [
+ "ontolith-ai",
  "ontolith-cluster",
  "ontolith-core",
  "ontolith-observability",

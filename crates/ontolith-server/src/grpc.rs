@@ -336,6 +336,7 @@ mod tests {
             InMemoryAuditLog::new(),
             TenantMode::Disabled,
             InferenceConfig::new(InferenceMode::ForwardChaining, 64, None),
+            crate::app::SemanticConfig::default(),
         )
     }
 
