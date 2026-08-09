@@ -294,7 +294,9 @@ sudo -v# Ontolith 开发计划
 
 ### R4（Rust）
 范围：
-- AI-native 语义运行时扩展。
+- AI-native 语义运行时扩展。🚧 已立项（2026-08-09：L8 AI-Native 设计文档
+  [L8-ai-native.md](./L8-ai-native.md) + P8-01 语义-向量桥接 M1 完成，
+  `crates/ontolith-ai` 8 测；下一步 M2 server 接线）
 
 退出标准：
 - 扩展安全与兼容门禁通过。

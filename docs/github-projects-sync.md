@@ -2,7 +2,7 @@
 
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
-数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.34，2026-08-08）
+数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.38，2026-08-09）
 状态: Active（待有效令牌执行首次同步）
 
 ## 1. 认证要求（重要，勿重复探索）
@@ -72,7 +72,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P5-05 Tracing 全链路 | 已完成 | traceparent 延续 + /admin/traces |
 | 管理面 TLS 终止 + R2 门禁 | 已完成 | rustls + 非 loopback 强制 |
 | P6-01 规则扩展 | 已完成 | 前向链推理引擎 |
-| P6-02 SHACL 核心组件 + W3C 套件 | 已完成 | 97/98（uniqueLang-002 词法缺口锁定） |
+| P6-02 SHACL 核心组件 + W3C 套件 | 已完成 | 98/98 全绿（2026-08-09 闭合 uniqueLang-002） |
 | P6-03 server 查询/推理管线 | 已完成 | |
 | P7-01 在线重平衡演练手册 | 已完成 | drill-rebalance-dr.sh DRILL PASS |
 | P7-02 阈值断言/趋势记录 | 已完成 | storage_bench + check-bench-thresholds.sh |
@@ -85,7 +85,9 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | R2 OWL 2 RL 推理 | 未开始 | |
 | R2 Explain 门禁 | 未开始 | |
 | R2 推理护栏 | 未开始 | |
-| R2 SHACL 97/98 缺口收尾 | 进行中 | uniqueLang-002 词法差异 |
+| R2 SHACL 97/98 缺口收尾 | 已完成 | 2026-08-09 闭合，98/98 全绿 |
+| R2 退出标准全表勾选 | 已完成 | 2026-08-08 R2 全项（Explain 门禁 + 推理护栏） |
+| RDF 1.1 布尔项区分（uniqueLang-002 闭合） | 已完成 | 2026-08-09 |
 
 ## 4. 写入操作（GraphQL）
 
