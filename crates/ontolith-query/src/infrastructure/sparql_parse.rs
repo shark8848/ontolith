@@ -2523,7 +2523,12 @@ impl<'a> SparqlParser<'a> {
         if rest.len() < kw.len() {
             return false;
         }
-        if !rest[..kw.len()].eq_ignore_ascii_case(kw) {
+        let Some(head) = rest.get(..kw.len()) else {
+            // kw.len() lands inside a multi-byte char; keywords are ASCII so
+            // the prefix cannot match.
+            return false;
+        };
+        if !head.eq_ignore_ascii_case(kw) {
             return false;
         }
         let after = rest[kw.len()..].chars().next();
@@ -3526,5 +3531,37 @@ fn invert_path(path: PathExpression) -> PathExpression {
                 reverse: forward,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::QueryText;
+    use ontolith_core::domain::ConsistencyLevel;
+
+    fn req(query: &str) -> QueryRequest {
+        QueryRequest {
+            query: QueryText(query.to_string()),
+            txn_id: None,
+            tenant: None,
+            tenant_scope: None,
+            timeout_ms: None,
+            cancel: None,
+            consistency: ConsistencyLevel::Strong,
+        }
+    }
+
+    #[test]
+    fn parses_non_ascii_literal_in_filter() {
+        // Regression: keyword lookahead must not byte-slice across a
+        // multi-byte char, e.g. CONTAINS(STR(?o), "中文").
+        let plan = plan_query(&req(
+            "PREFIX ex: <http://e/> \
+             SELECT ?s WHERE { ?s ex:label ?o . \
+             FILTER(CONTAINS(STR(?o), \"中文\")) }",
+        ))
+        .expect("parse should not panic");
+        assert_eq!(plan.kind, QueryKind::Select);
     }
 }

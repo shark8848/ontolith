@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Ontolith console — zero-dependency management server.
-// Serves the SPA from ./public and proxies whitelisted ontolith endpoints,
-// injecting per-cluster credentials. Features: multi-cluster, history sampler,
-// zero-dep gRPC channel, optional TLS + access token.
+// Serves the Vite-built SPA from ./dist (falling back to ./src in dev) and
+// proxies whitelisted ontolith endpoints, injecting per-cluster credentials.
+// Features: multi-cluster, history sampler, zero-dep gRPC channel, optional
+// TLS + access token.
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { readFileSync, existsSync, statSync } from 'node:fs';
@@ -11,7 +12,9 @@ import { fileURLToPath } from 'node:url';
 import { callGrpc, PATHS, encode, decode } from './grpc.js';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
-const PUBLIC = join(ROOT, 'public');
+const PUBLIC = process.env.CONSOLE_STATIC_DIR
+  ? join(ROOT, process.env.CONSOLE_STATIC_DIR)
+  : join(ROOT, existsSync(join(ROOT, 'dist')) ? 'dist' : 'src');
 
 // ---- .env loader (no dependencies) ----
 function loadEnv() {
@@ -80,12 +83,14 @@ const GW_ROUTES = new Map([
   ['cluster', ['GET']], ['cluster/status', ['GET']], ['cluster/membership', ['GET']],
   ['cluster/shards', ['GET']], ['cluster/route', ['GET']], ['cluster/failover', ['GET']],
   ['semantic/search', ['GET']], ['semantic/index', ['POST']],
+  ['inference', ['GET']], ['validate/shacl', ['POST']], ['materialize', ['POST']],
   ['data', ['POST']], ['data/nt', ['POST']], ['data/turtle', ['POST']],
   ['data/trig', ['POST']], ['data/nq', ['POST']],
 ]);
 const MG_ROUTES = new Map([
   ['admin/health', ['GET']], ['admin/config', ['GET']], ['admin/layers', ['GET']],
   ['admin/monitoring', ['GET']], ['admin/traces', ['GET']], ['admin/data/stats', ['GET']],
+  ['admin/plugins', ['GET']],
   ['admin/data/audit', ['GET']],
   ['admin/data/replicate', ['POST']], ['admin/data/rebalance', ['POST']],
 ]);
@@ -203,7 +208,11 @@ async function route(req, res) {
   const url = new URL(req.url, `http://${cfg.bind}`);
   const method = req.method.toUpperCase();
   const pathname = decodeURIComponent(url.pathname);
-  if (!authorized(req)) return sendJson(res, 401, { error: 'unauthorized: missing/invalid console token' });
+  // Static assets stay public so the SPA can render its login overlay; the
+  // access token guards the API surface only.
+  if (pathname.startsWith('/api/') && !authorized(req)) {
+    return sendJson(res, 401, { error: 'unauthorized: missing/invalid console token' });
+  }
 
   if (pathname === '/api/clusters') {
     return sendJson(res, 200, clusters.map(({ id, name, gateway, management, grpc, tenant, user }) => ({ id, name, gateway, management, grpc, tenant, user })));

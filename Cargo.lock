@@ -1175,6 +1175,7 @@ dependencies = [
  "ontolith-core",
  "ontolith-observability",
  "ontolith-parser",
+ "ontolith-plugin-api",
  "ontolith-query",
  "ontolith-rdf",
  "ontolith-reasoner",

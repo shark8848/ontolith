@@ -6,6 +6,9 @@ use crate::reasoning::InferenceConfig;
 use ontolith_cluster::domain::LogPayload;
 use ontolith_core::error::OntolithError;
 use ontolith_observability::infrastructure::render_traces_json;
+use ontolith_plugin_api::domain::{
+    PluginCapability, PluginId, PluginManifest, ToolDefinition, ToolParam,
+};
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
@@ -126,6 +129,7 @@ impl ManagementState {
             }
             ("GET", "/admin/config") => self.admin_config(&req),
             ("GET", "/admin/layers") => self.admin_layers(&req),
+            ("GET", "/admin/plugins") => self.admin_plugins(&req),
             ("GET", "/admin/monitoring") => self.admin_monitoring(&req),
             ("GET", "/admin/traces") => self.admin_traces(&req),
             ("GET", "/admin/data/stats") => self.admin_data_stats(&req),
@@ -321,26 +325,73 @@ impl ManagementState {
         ))
     }
 
+    /// L8: plugin contract surface — built-in plugin manifests, agent tool
+    /// definitions, and the capability set exposed by `ontolith-plugin-api`
+    /// (P8-03). Dynamic plugin loading is not wired yet; this endpoint
+    /// reports the registered built-in surface so consoles can render the
+    /// plugin list, tool contracts, and contract status.
+    fn admin_plugins(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_read(req, "metrics", "read")?;
+        Ok(HttpResponse::json(200, "OK", plugins_surface_json()))
+    }
+
     fn admin_monitoring(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
         let _ = self.authorize_read(req, "metrics", "read")?;
 
-        let requests_total = self.app.requests_total.load(Ordering::Relaxed);
-        let sparql_total = self.app.sparql_total.load(Ordering::Relaxed);
-        let sparql_errors = self.app.sparql_errors.load(Ordering::Relaxed);
-        let ingest_total = self.app.ingest_total.load(Ordering::Relaxed);
-        let latency_count = self.app.latency_count.load(Ordering::Relaxed);
-        let latency_sum_ms = self.app.latency_sum_ms.load(Ordering::Relaxed);
-        let latency_avg_ms = if latency_count > 0 {
-            latency_sum_ms as f64 / latency_count as f64
-        } else {
-            0.0
-        };
+        // Live request counters live on the gateway process; in split
+        // deployments the management process serves no traffic. Pull them
+        // from the runtime /metrics (same API key) and fall back to local
+        // state when the gateway is unreachable or no key is configured.
+        let live = self.fetch_runtime_counters();
+        let requests_total = live
+            .as_ref()
+            .map(|c| c.requests_total)
+            .unwrap_or_else(|| self.app.requests_total.load(Ordering::Relaxed));
+        let sparql_total = live
+            .as_ref()
+            .map(|c| c.sparql_total)
+            .unwrap_or_else(|| self.app.sparql_total.load(Ordering::Relaxed));
+        let sparql_errors = live
+            .as_ref()
+            .map(|c| c.sparql_errors)
+            .unwrap_or_else(|| self.app.sparql_errors.load(Ordering::Relaxed));
+        let ingest_total = live
+            .as_ref()
+            .map(|c| c.ingest_total)
+            .unwrap_or_else(|| self.app.ingest_total.load(Ordering::Relaxed));
+        let latency_avg_ms = live
+            .as_ref()
+            .map(RuntimeCounters::latency_avg_ms)
+            .unwrap_or_else(|| {
+                let latency_count = self.app.latency_count.load(Ordering::Relaxed);
+                let latency_sum_ms = self.app.latency_sum_ms.load(Ordering::Relaxed);
+                if latency_count > 0 {
+                    latency_sum_ms as f64 / latency_count as f64
+                } else {
+                    0.0
+                }
+            });
 
         let mut status_pairs = Vec::new();
-        if let Ok(statuses) = self.app.status_counts.lock() {
-            for (code, count) in statuses.iter() {
-                status_pairs.push(format!(r#"{}:{}"#, json_string(&code.to_string()), count));
-            }
+        let statuses: Vec<(String, u64)> = match &live {
+            Some(c) => c
+                .status_counts
+                .iter()
+                .map(|(code, count)| (code.to_string(), *count))
+                .collect(),
+            None => self
+                .app
+                .status_counts
+                .lock()
+                .map(|map| {
+                    map.iter()
+                        .map(|(code, count)| (code.to_string(), *count))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        for (code, count) in statuses {
+            status_pairs.push(format!(r#"{}:{}"#, json_string(&code), count));
         }
         status_pairs.sort();
         let status_map = format!("{{{}}}", status_pairs.join(","));
@@ -387,21 +438,82 @@ impl ManagementState {
         ))
     }
 
+    fn fetch_runtime_counters(&self) -> Option<RuntimeCounters> {
+        let api_key = self.app.authenticator.api_key.as_deref()?;
+        let url = format!("http://{}/metrics", self.app.bind_address);
+        let headers = [
+            ("x-api-key", api_key),
+            ("x-ontolith-tenant", "system"),
+            ("x-ontolith-user", "management"),
+        ];
+        let text = fetch_http_get_with_headers(&url, &headers).ok()?;
+        Some(parse_prometheus_counters(&text))
+    }
+
     fn admin_data_stats(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
         let _ = self.authorize_read(req, "health", "read")?;
-        let stats = self.app.storage.stats();
+
+        // Data lives on the gateway process (rocksdb); the management process
+        // keeps only memory-backed bookkeeping state. Report the runtime's
+        // storage stats, falling back to local state when unreachable.
+        let (triples, quads, pending_txns, audit_events, backend) = match self.fetch_runtime_stats()
+        {
+            Some(s) => (
+                s.triples,
+                s.quads,
+                s.pending_txns,
+                s.audit_events,
+                s.backend,
+            ),
+            None => {
+                let stats = self.app.storage.stats();
+                (
+                    stats.triple_count,
+                    stats.quad_count,
+                    stats.pending_transactions,
+                    self.app.audit.len() as u64,
+                    self.app.backend.as_str().to_owned(),
+                )
+            }
+        };
         Ok(HttpResponse::json(
             200,
             "OK",
             format!(
                 r#"{{"triples":{},"quads":{},"pending_txns":{},"audit_events":{},"storage_backend":{}}}"#,
-                stats.triple_count,
-                stats.quad_count,
-                stats.pending_transactions,
-                self.app.audit.len(),
-                json_string(self.app.backend.as_str()),
+                triples,
+                quads,
+                pending_txns,
+                audit_events,
+                json_string(&backend),
             ),
         ))
+    }
+
+    fn fetch_runtime_stats(&self) -> Option<RuntimeStats> {
+        let api_key = self.app.authenticator.api_key.as_deref()?;
+        let headers = [
+            ("x-api-key", api_key),
+            ("x-ontolith-tenant", "system"),
+            ("x-ontolith-user", "management"),
+        ];
+        let bind = &self.app.bind_address;
+        let health =
+            fetch_http_get_with_headers(&format!("http://{bind}/health"), &headers).ok()?;
+        let triples = parse_json_u64(&health, "triples")?;
+        let quads = parse_json_u64(&health, "quads")?;
+        let pending_txns = parse_json_u64(&health, "pending_txns")?;
+        let backend = parse_backend_from_health(&health)?;
+        let audit_events = fetch_http_get_with_headers(&format!("http://{bind}/metrics"), &headers)
+            .map(|text| parse_prometheus_counters(&text).audit_events)
+            .unwrap_or_else(|_| self.app.audit.len() as u64);
+        Some(RuntimeStats {
+            triples,
+            quads,
+            pending_txns,
+            audit_events,
+            backend,
+        })
     }
 
     fn admin_data_audit(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
@@ -703,9 +815,15 @@ fn load_jwks_from_env() -> Result<Option<JwksVerifier>, String> {
 /// transport): resolves host:port, sends `GET`, and parses status +
 /// Content-Length into the response body.
 fn fetch_http_get(url: &str) -> Result<String, String> {
+    fetch_http_get_with_headers(url, &[])
+}
+
+/// [`fetch_http_get`] with extra request headers (e.g. API-key auth for the
+/// runtime `/metrics` pull).
+fn fetch_http_get_with_headers(url: &str, headers: &[(&str, &str)]) -> Result<String, String> {
     let rest = url
         .strip_prefix("http://")
-        .ok_or_else(|| format!("unsupported jwks scheme in {url:?}"))?;
+        .ok_or_else(|| format!("unsupported scheme in {url:?}"))?;
     let (host_port, path) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),
         None => (rest, "/"),
@@ -719,9 +837,13 @@ fn fetch_http_get(url: &str) -> Result<String, String> {
         .map_err(|e| format!("connect jwks host {host_port}: {e}"))?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-    let head = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host_port}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    let mut head = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host_port}\r\nAccept: text/plain\r\nConnection: close\r\n"
     );
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
     stream
         .write_all(head.as_bytes())
         .and_then(|_| stream.flush())
@@ -776,6 +898,110 @@ fn fetch_http_get(url: &str) -> Result<String, String> {
     }
     body.truncate(content_length);
     String::from_utf8(body).map_err(|e| format!("jwks body not utf8: {e}"))
+}
+
+/// Live gateway counters snapshot, parsed from the runtime `/metrics`
+/// (Prometheus text format) so split deployments report real traffic.
+#[derive(Debug, Default)]
+struct RuntimeCounters {
+    requests_total: u64,
+    sparql_total: u64,
+    sparql_errors: u64,
+    ingest_total: u64,
+    latency_sum_ms: u64,
+    latency_count: u64,
+    status_counts: Vec<(u16, u64)>,
+    storage_triples: u64,
+    storage_quads: u64,
+    storage_pending_txns: u64,
+    audit_events: u64,
+}
+
+impl RuntimeCounters {
+    fn latency_avg_ms(&self) -> f64 {
+        if self.latency_count > 0 {
+            self.latency_sum_ms as f64 / self.latency_count as f64
+        } else {
+            0.0
+        }
+    }
+}
+
+fn parse_prometheus_counters(text: &str) -> RuntimeCounters {
+    let mut out = RuntimeCounters::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        let Some(value) = parts.next().and_then(|v| v.parse::<u64>().ok()) else {
+            continue;
+        };
+        match name {
+            "ontolith_http_requests_total" => out.requests_total = value,
+            "ontolith_sparql_requests_total" => out.sparql_total = value,
+            "ontolith_sparql_errors_total" => out.sparql_errors = value,
+            "ontolith_ingest_requests_total" => out.ingest_total = value,
+            "ontolith_http_request_latency_ms_sum" => out.latency_sum_ms = value,
+            "ontolith_http_request_latency_ms_count" => out.latency_count = value,
+            "ontolith_storage_triples" => out.storage_triples = value,
+            "ontolith_storage_quads" => out.storage_quads = value,
+            "ontolith_storage_pending_txns" => out.storage_pending_txns = value,
+            "ontolith_audit_events" => out.audit_events = value,
+            _ => {}
+        }
+        if let Some(labels) = name.strip_prefix("ontolith_http_responses_total")
+            && let Some(status) = parse_status_label(labels)
+        {
+            out.status_counts.push((status, value));
+        }
+    }
+    out
+}
+
+fn parse_status_label(labels: &str) -> Option<u16> {
+    let labels = labels.strip_prefix('{')?.strip_suffix('}')?;
+    for part in labels.split(',') {
+        let (key, value) = part.split_once('=')?;
+        if key.trim() == "status" {
+            return value.trim().trim_matches('"').parse().ok();
+        }
+    }
+    None
+}
+
+/// Runtime storage snapshot for split deployments, parsed from the gateway
+/// `/health` (counts + backend) and `/metrics` (audit events).
+#[derive(Debug)]
+struct RuntimeStats {
+    triples: u64,
+    quads: u64,
+    pending_txns: u64,
+    audit_events: u64,
+    backend: String,
+}
+
+fn parse_json_u64(text: &str, key: &str) -> Option<u64> {
+    let pat = format!(r#""{key}":"#);
+    let start = text.find(&pat)? + pat.len();
+    let rest = &text[start..];
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    rest[..digits].parse().ok()
+}
+
+fn parse_backend_from_health(text: &str) -> Option<String> {
+    let key = r#""backend":"#;
+    let start = text.find(key)? + key.len();
+    let rest = text[start..].strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -1035,6 +1261,109 @@ fn json_string(s: &str) -> String {
     format!("\"{}\"", escape_json(s))
 }
 
+fn capability_json(c: &PluginCapability) -> String {
+    let name = match c {
+        PluginCapability::StorageBackend => "storage_backend",
+        PluginCapability::Parser => "parser",
+        PluginCapability::Optimizer => "optimizer",
+        PluginCapability::Reasoner => "reasoner",
+        PluginCapability::SecurityProvider => "security_provider",
+        PluginCapability::Retrieval => "retrieval",
+    };
+    json_string(name)
+}
+
+fn capabilities_json(caps: &[PluginCapability]) -> String {
+    let items: Vec<String> = caps.iter().map(capability_json).collect();
+    format!("[{}]", items.join(","))
+}
+
+fn tools_json(tools: &[ToolDefinition]) -> String {
+    let mut out = Vec::with_capacity(tools.len());
+    for t in tools {
+        let params: Vec<String> = t
+            .parameters
+            .iter()
+            .map(|p| {
+                format!(
+                    r#"{{"name":{},"description":{},"required":{}}}"#,
+                    json_string(&p.name),
+                    json_string(&p.description),
+                    p.required,
+                )
+            })
+            .collect();
+        out.push(format!(
+            r#"{{"name":{},"description":{},"parameters":[{}],"capabilities":{}}}"#,
+            json_string(&t.name),
+            json_string(&t.description),
+            params.join(","),
+            capabilities_json(&t.capabilities),
+        ));
+    }
+    format!("[{}]", out.join(","))
+}
+
+fn plugin_manifest_json(m: &PluginManifest, tools: &[ToolDefinition]) -> String {
+    format!(
+        r#"{{"id":{},"version":{},"api_version":{},"capabilities":{},"tools":{}}}"#,
+        json_string(&m.id.0),
+        json_string(&m.version),
+        json_string(&m.api_version),
+        capabilities_json(&m.capabilities),
+        tools_json(tools),
+    )
+}
+
+fn plugins_surface_json() -> String {
+    // Built-in platform plugins registered against the P8-03 contract. The
+    // reference `SemanticRetrievalTool` (ontolith-ai) backs the retrieval
+    // capability; manifests stay in sync with `ontolith-plugin-api` types.
+    let semantic_retrieval_manifest = PluginManifest {
+        id: PluginId("ontolith.semantic-retrieval".to_owned()),
+        version: "0.1.0".to_owned(),
+        api_version: "0.1.0".to_owned(),
+        capabilities: vec![PluginCapability::Retrieval],
+    };
+    let semantic_retrieval_tool = ToolDefinition {
+        name: "semantic_retrieval".to_owned(),
+        description: "Semantic term retrieval over the RDF store: returns top-k terms ".to_owned()
+            + "related to a natural-language query; verification still goes through "
+            + "SPARQL/SHACL.",
+        parameters: vec![
+            ToolParam {
+                name: "q".to_owned(),
+                description: "query text".to_owned(),
+                required: true,
+            },
+            ToolParam {
+                name: "k".to_owned(),
+                description: "max hits [1,100]".to_owned(),
+                required: false,
+            },
+        ],
+        capabilities: vec![PluginCapability::Retrieval],
+    };
+    let plugins = plugin_manifest_json(&semantic_retrieval_manifest, &[semantic_retrieval_tool]);
+    let capabilities = [
+        PluginCapability::StorageBackend,
+        PluginCapability::Parser,
+        PluginCapability::Optimizer,
+        PluginCapability::Reasoner,
+        PluginCapability::SecurityProvider,
+        PluginCapability::Retrieval,
+    ];
+    format!(
+        r#"{{"status":{},"api_version":{},"plugins":[{}],"capabilities":{},"contracts":{{"manifest":{},"agent_tool":{}}}}}"#,
+        json_string("ready"),
+        json_string("0.1.0"),
+        plugins,
+        capabilities_json(&capabilities),
+        json_string("PluginManifest (id/version/api_version/capabilities)"),
+        json_string("AgentTool::definition (ToolDefinition/ToolParam, deterministic call)"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1199,6 +1528,31 @@ mod tests {
         let resp = dispatch_for_test(&state, req("GET", "/admin/config"));
         let body = String::from_utf8(resp.body).expect("valid utf8");
         assert!(body.contains("\"tracing\":\"on\""), "body={body}");
+    }
+
+    #[test]
+    fn plugins_endpoint_reports_contract_surface() {
+        let state = test_state(HeaderAuthenticator::default());
+        let resp = dispatch_for_test(&state, req("GET", "/admin/plugins"));
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8(resp.body).expect("valid utf8");
+        assert!(body.contains("\"status\":\"ready\""), "body={body}");
+        assert!(body.contains("\"api_version\":\"0.1.0\""), "body={body}");
+        assert!(body.contains("ontolith.semantic-retrieval"), "body={body}");
+        assert!(
+            body.contains("\"name\":\"semantic_retrieval\""),
+            "body={body}"
+        );
+        assert!(
+            body.contains("\"capabilities\":[\"retrieval\"]"),
+            "body={body}"
+        );
+        assert!(
+            !body.contains("[["),
+            "no double-wrapped arrays: body={body}"
+        );
+        assert!(body.contains("\"storage_backend\""), "body={body}");
+        assert!(body.contains("\"agent_tool\""), "body={body}");
     }
 
     #[test]
@@ -1399,5 +1753,48 @@ mod tests {
         let body = String::from_utf8(resp.body).expect("valid utf8");
         assert!(body.contains("\"jwt\":\"on\""), "body={body}");
         assert!(body.contains("\"oidc\":\"on\""), "body={body}");
+    }
+
+    #[test]
+    fn parses_runtime_counters_from_prometheus_text() {
+        let text = "# TYPE ontolith_http_requests_total counter\n\
+            ontolith_http_requests_total 42 1000\n\
+            ontolith_sparql_requests_total 7 1000\n\
+            ontolith_sparql_errors_total 2 1000\n\
+            ontolith_ingest_requests_total 3 1000\n\
+            ontolith_http_request_latency_ms_sum 560 1000\n\
+            ontolith_http_request_latency_ms_count 10 1000\n\
+            ontolith_storage_triples 10008 1000\n\
+            ontolith_storage_quads 0 1000\n\
+            ontolith_storage_pending_txns 0 1000\n\
+            ontolith_audit_events 21 1000\n\
+            ontolith_http_responses_total{status=\"200\"} 9 1000\n\
+            ontolith_http_responses_total{status=\"500\"} 1 1000\n";
+        let counters = parse_prometheus_counters(text);
+        assert_eq!(counters.requests_total, 42);
+        assert_eq!(counters.sparql_total, 7);
+        assert_eq!(counters.sparql_errors, 2);
+        assert_eq!(counters.ingest_total, 3);
+        assert_eq!(counters.latency_sum_ms, 560);
+        assert_eq!(counters.latency_count, 10);
+        assert_eq!(counters.latency_avg_ms(), 56.0);
+        assert_eq!(counters.storage_triples, 10008);
+        assert_eq!(counters.storage_quads, 0);
+        assert_eq!(counters.storage_pending_txns, 0);
+        assert_eq!(counters.audit_events, 21);
+        assert_eq!(counters.status_counts, vec![(200, 9), (500, 1)]);
+    }
+
+    #[test]
+    fn parses_runtime_stats_from_health_json() {
+        let health = r#"{"status":"ok","layer":"L5","bind":"127.0.0.1:8080","backend":"rocksdb","triples":10009,"quads":0,"pending_txns":0,"auth_mode":"enforced","tenant_mode":"disabled","jwt":"off","oidc":"off","semantic":"off","tracing":"on","data_dir":"/home/ontolith/prod/data"}"#;
+        assert_eq!(parse_json_u64(health, "triples"), Some(10009));
+        assert_eq!(parse_json_u64(health, "quads"), Some(0));
+        assert_eq!(parse_json_u64(health, "pending_txns"), Some(0));
+        assert_eq!(parse_json_u64(health, "missing"), None);
+        assert_eq!(
+            parse_backend_from_health(health).as_deref(),
+            Some("rocksdb")
+        );
     }
 }

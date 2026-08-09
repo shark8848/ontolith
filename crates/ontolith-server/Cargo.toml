@@ -31,6 +31,7 @@ ontolith-cluster = { path = "../ontolith-cluster" }
 ontolith-security = { path = "../ontolith-security" }
 ontolith-observability = { path = "../ontolith-observability" }
 ontolith-reasoner = { path = "../ontolith-reasoner" }
+ontolith-plugin-api = { path = "../ontolith-plugin-api" }
 ontolith-sdk = { path = "../ontolith-sdk" }
 ontolith-rdf = { path = "../ontolith-rdf" }
 ontolith-parser = { path = "../ontolith-parser" }

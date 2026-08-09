@@ -28,9 +28,9 @@ use ontolith_query::domain::{
 };
 use ontolith_query::infrastructure::{update_pipeline, update_pipeline_with_read};
 use ontolith_rdf::domain::{Term, Triple};
-use ontolith_reasoner::application::Reasoner;
-use ontolith_reasoner::domain::{InferenceMode, ReasoningReport};
-use ontolith_reasoner::infrastructure::ForwardChainReasoner;
+use ontolith_reasoner::application::{Reasoner, ShaclValidator};
+use ontolith_reasoner::domain::{InferenceMode, ReasoningReport, ReasoningTask};
+use ontolith_reasoner::infrastructure::{ForwardChainReasoner, ShaclEngine};
 use ontolith_security::application::{
     Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
 };
@@ -498,6 +498,9 @@ impl AppState {
             ("GET", "/cluster/failover") => self.cluster_failover_history(&req),
             ("GET", "/semantic/search") => self.semantic_search(&req),
             ("POST", "/semantic/index") => self.semantic_index(&req),
+            ("GET", "/inference") => self.inference(&req),
+            ("POST", "/validate/shacl") => self.validate_shacl(&req),
+            ("POST", "/materialize") => self.materialize(&req),
             _ => Ok(HttpResponse::json(
                 404,
                 "Not Found",
@@ -1368,6 +1371,141 @@ impl AppState {
 
     // ---- L4 cluster control plane HTTP ----
 
+    /// L6: reasoning posture — inference mode, materialization guards, and the
+    /// rule set supported by the forward-chaining engine (P6-03).
+    fn inference(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let ctx = self.auth(req)?;
+        authorize(&self.audit, &ctx, "health", "read", now_ms())?;
+        let rules: Vec<String> = ForwardChainReasoner::new()
+            .supported_rules()
+            .iter()
+            .map(|r| r.as_str().to_owned())
+            .collect();
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"mode":{},"max_iterations":{},"max_elapsed_ms":{},"rules":{}}}"#,
+                json_string(self.inference.mode.as_str()),
+                self.inference.max_iterations,
+                match self.inference.max_elapsed_ms {
+                    Some(v) => v.to_string(),
+                    None => "null".to_owned(),
+                },
+                json_string_array(&rules),
+            ),
+        ))
+    }
+
+    /// L6: SHACL validation workbench — request body is a Turtle shapes graph
+    /// validated against the stored default-graph data (`?limit` caps the
+    /// sampled data triples, default 5000, max 50000).
+    fn validate_shacl(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let ctx = self.auth(req)?;
+        authorize(&self.audit, &ctx, "sparql", "query", now_ms())?;
+        let text = req.body_str();
+        if text.trim().is_empty() {
+            return Err(OntolithError::InvalidArgument("empty shacl shapes body"));
+        }
+        let limit = req
+            .query
+            .get("limit")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5000)
+            .min(50_000);
+        let dict = self.dictionary.as_ref();
+        let parsed = parse_turtle_doc(text, dict)?;
+        let shapes = parsed.dataset.default_graph;
+        let data: Vec<Triple> = self
+            .triples
+            .all_in_txn(None)
+            .into_iter()
+            .take(limit)
+            .collect();
+        let report = ShaclEngine::new().validate(dict, &shapes, &data)?;
+        let mut results = Vec::with_capacity(report.results.len());
+        for r in &report.results {
+            results.push(format!(
+                r#"{{"severity":{},"focus_node":{},"path":{},"value":{},"source_shape":{},"component":{},"message":{}}}"#,
+                json_string(r.severity.clone().as_str()),
+                json_string(&r.focus_node),
+                opt_json(&r.path),
+                opt_json(&r.value),
+                opt_json(&r.source_shape),
+                json_string(&r.component),
+                opt_json(&r.message),
+            ));
+        }
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"conforms":{},"result_count":{},"results":[{}],"shapes":{},"data":{}}}"#,
+                report.conforms,
+                report.results.len(),
+                results.join(","),
+                shapes.len(),
+                data.len(),
+            ),
+        ))
+    }
+
+    /// L6: forward-chaining materialization over the stored default graph.
+    /// Computes the inference closure without persisting derived triples and
+    /// reports counts plus a decoded sample (`?limit` caps the input).
+    fn materialize(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let ctx = self.auth(req)?;
+        authorize(&self.audit, &ctx, "data", "write", now_ms())?;
+        let limit = req
+            .query
+            .get("limit")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(20_000)
+            .min(100_000);
+        let dict = self.dictionary.as_ref();
+        let input: Vec<Triple> = self
+            .triples
+            .all_in_txn(None)
+            .into_iter()
+            .take(limit)
+            .collect();
+        let task = ReasoningTask {
+            mode: InferenceMode::ForwardChaining,
+            ..self.inference.reasoning_task(None)
+        };
+        let started = std::time::Instant::now();
+        let outcome = ForwardChainReasoner::new().materialize(dict, &task, &input)?;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let sample: Vec<String> = outcome
+            .triples
+            .iter()
+            .take(50)
+            .map(|t| {
+                format!(
+                    r#"{{"s":{},"p":{},"o":{}}}"#,
+                    json_string(&decode_node(dict, t.subject)),
+                    json_string(t.predicate.as_str()),
+                    json_string(&render_term(&t.object, dict)),
+                )
+            })
+            .collect();
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"mode":{},"input_triples":{},"derived_triples":{},"inferred_triples":{},"elapsed_ms":{},"timed_out":{},"inconsistent":{},"sample":[{}]}}"#,
+                json_string("forward"),
+                input.len(),
+                outcome.triples.len(),
+                outcome.report.inferred_triples,
+                elapsed_ms,
+                outcome.report.timed_out,
+                outcome.report.inconsistent,
+                sample.join(","),
+            ),
+        ))
+    }
+
     fn cluster_status(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
         let ctx = self.auth(req)?;
         authorize(&self.audit, &ctx, "health", "read", now_ms())?;
@@ -2196,6 +2334,35 @@ fn json_string_array(items: &[String]) -> String {
     }
     out.push(']');
     out
+}
+
+fn opt_json(v: &Option<String>) -> String {
+    match v {
+        Some(s) => json_string(s),
+        None => "null".into(),
+    }
+}
+
+/// Decode a stored subject node id back to its dictionary string (IRI or
+/// `_:` blank label), falling back to the synthetic `n{id}` label.
+fn decode_node(dict: &dyn DictionaryCodec, node: NodeId) -> String {
+    match dict.decode_node(node) {
+        Some(value) => value,
+        None => format!("n{}", node.get()),
+    }
+}
+
+/// Render an object term as plain text: IRI string, blank-node label, or the
+/// literal lexical form.
+fn render_term(term: &ontolith_rdf::domain::Term, dict: &dyn DictionaryCodec) -> String {
+    match term {
+        ontolith_rdf::domain::Term::Iri(i) => i.as_str().to_owned(),
+        ontolith_rdf::domain::Term::BlankNode(n) => match dict.decode_node(*n) {
+            Some(value) => value,
+            None => format!("n{}", n.get()),
+        },
+        ontolith_rdf::domain::Term::Literal(l) => l.lexical_form(),
+    }
 }
 
 fn json_opt_number(v: Option<u64>) -> String {
@@ -3591,5 +3758,69 @@ mod tests {
                 "store term after restart: {body2}"
             );
         }
+    }
+
+    #[test]
+    fn l6_inference_materialize_and_shacl_endpoints() {
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let get = |path: &str| HttpRequest {
+            method: "GET".to_owned(),
+            path: path.to_owned(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        };
+        let post = |path: &str, body: &str| HttpRequest {
+            method: "POST".to_owned(),
+            path: path.to_owned(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: body.as_bytes().to_vec(),
+        };
+
+        // Posture card: mode + materialization guards + supported rules.
+        let resp = dispatch_for_test(&state, get("/inference"));
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+        let body = String::from_utf8(resp.body).expect("utf8");
+        assert!(body.contains("\"mode\""), "body={body}");
+        assert!(body.contains("\"max_iterations\""), "body={body}");
+        assert!(body.contains("\"rules\":["), "body={body}");
+
+        // Seed a small graph, then run forward-chaining materialization.
+        let nt = "<http://example.org/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/Person> .\n\
+                 <http://example.org/Person> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.org/Agent> .\n";
+        let ingest = dispatch_for_test(&state, post("/data/nt", nt));
+        assert_eq!(
+            ingest.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&ingest.body)
+        );
+
+        let mat = dispatch_for_test(&state, post("/materialize", ""));
+        assert_eq!(mat.status, 200, "{}", String::from_utf8_lossy(&mat.body));
+        let mbody = String::from_utf8(mat.body).expect("utf8");
+        assert!(mbody.contains("\"input_triples\":2"), "body={mbody}");
+        assert!(mbody.contains("\"derived_triples\":"), "body={mbody}");
+        assert!(mbody.contains("\"inferred_triples\":"), "body={mbody}");
+        assert!(mbody.contains("\"sample\":["), "body={mbody}");
+
+        // SHACL workbench: the seeded Person has no ex:name -> violation.
+        let shapes = "@prefix ex: <http://example.org/> .\n\
+                      @prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+                      ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;\n\
+                        sh:property [ sh:path ex:name ; sh:minCount 1 ] .\n";
+        let shacl = dispatch_for_test(&state, post("/validate/shacl", shapes));
+        assert_eq!(
+            shacl.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&shacl.body)
+        );
+        let sbody = String::from_utf8(shacl.body).expect("utf8");
+        assert!(sbody.contains("\"conforms\":false"), "body={sbody}");
+        assert!(sbody.contains("\"result_count\":1"), "body={sbody}");
+        assert!(sbody.contains("\"severity\""), "body={sbody}");
     }
 }

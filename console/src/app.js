@@ -101,6 +101,8 @@ async function render() {
       case 'overview': await renderOverview(); break;
       case 'monitor': await renderMonitor(); break;
       case 'cluster': await renderCluster(); break;
+      case 'infer': await renderInfer(); break;
+      case 'plugins': await renderPlugins(); break;
       case 'data': await renderData(); break;
       case 'audit': await renderAudit(); break;
       case 'traces': await renderTraces(); break;
@@ -221,7 +223,10 @@ async function renderMonitor() {
 function rateSeries(s) {
   return s.map((p, i) => i === 0 ? { t: p.t, v: 0 } : { t: p.t, v: Math.max(0, p.v - s[i - 1].v) });
 }
-function chartCard(title, series, color = '#4da3ff', extra = '') {
+function twoSeries(a, b, colorA, colorB) {
+  return [{ points: a, color: colorA }, { points: b, color: colorB }];
+}
+function chartCard(title, series, color = '#4da3ff') {
   const card = el('div', 'chart-card');
   card.append(el('h3', null, title));
   const cv = el('canvas', 'chart');
@@ -230,29 +235,42 @@ function chartCard(title, series, color = '#4da3ff', extra = '') {
   return card;
 }
 function drawChart(cv, series, color = '#4da3ff') {
+  const list = series.length > 0 && Array.isArray(series[0].points) ? series : [{ points: series, color }];
+  const all = list.flatMap(s => s.points);
+  if (all.length < 2) return;
   const dpr = window.devicePixelRatio || 1;
   const w = cv.clientWidth || 320, h = 140;
   cv.width = w * dpr; cv.height = h * dpr;
   const ctx = cv.getContext('2d');
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
-  if (series.length < 2) return;
-  const max = Math.max(...series.map(p => p.max ?? p.v), 1);
+  const max = Math.max(...all.map(p => p.max ?? p.v), 1);
   const pad = 4;
-  const step = (w - pad * 2) / (series.length - 1);
+  const step = (w - pad * 2) / (all.length - 1);
   const y = (v) => h - pad - (v / max) * (h - pad * 2);
-  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
-  series.forEach((p, i) => {
-    const x = pad + i * step;
-    i === 0 ? ctx.moveTo(x, y(p.v)) : ctx.lineTo(x, y(p.v));
-  });
-  ctx.stroke();
-  ctx.fillStyle = '#8b98a9'; ctx.font = '10px ui-monospace, monospace';
-  if (series[0]) ctx.fillText(fmtTime(series[0].t), pad, h - 2);
-  if (series[series.length - 1]) {
-    const last = series[series.length - 1];
-    ctx.fillStyle = color;
-    ctx.fillText(String(last.v) + (last.max ? '/' + last.max : ''), pad + (series.length - 1) * step - 34, h - 2);
+  for (const s of list) {
+    const pts = s.points;
+    if (pts.length < 2) continue;
+    ctx.strokeStyle = s.color; ctx.lineWidth = 1.5; ctx.beginPath();
+    pts.forEach((p, i) => {
+      const x = pad + i * step;
+      i === 0 ? ctx.moveTo(x, y(p.v)) : ctx.lineTo(x, y(p.v));
+    });
+    ctx.stroke();
+  }
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.fillStyle = '#8b98a9';
+  if (all[0]) ctx.fillText(fmtTime(all[0].t), pad, h - 2);
+  let labelX = w - pad;
+  for (const s of list) {
+    const pts = s.points;
+    if (pts.length < 2) continue;
+    const last = pts[pts.length - 1];
+    const text = String(last.v) + (last.max ? '/' + last.max : '');
+    ctx.fillStyle = s.color;
+    labelX -= ctx.measureText(text).width;
+    ctx.fillText(text, labelX, h - 2);
+    labelX -= 8;
   }
 }
 
@@ -279,6 +297,146 @@ async function renderCluster() {
   detail.append(el('h3', null, '集群状态 JSON'));
   detail.append(el('pre', 'json', JSON.stringify(st, null, 2)));
   sec.append(detail);
+}
+
+// ---------- inference (L6 reasoner) ----------
+const DEFAULT_SHACL_SHAPES = `@prefix ex: <http://example.org/> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+
+ex:PersonShape a sh:NodeShape ;
+  sh:targetClass ex:Person ;
+  sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+`;
+
+async function renderInfer() {
+  const sec = $('#tab-infer');
+  sec.replaceChildren();
+  const posture = await gw('inference').catch(e => ({ error: e.message }));
+  if (posture.error) { sec.append(el('p', 'err', posture.error)); return; }
+  const cards = el('div', 'cards');
+  cards.append(kvCard('推理姿态', [
+    ['mode', posture.mode],
+    ['max_iterations', posture.max_iterations],
+    ['max_elapsed_ms', posture.max_elapsed_ms ?? 'unlimited'],
+    ['规则数', (posture.rules || []).length],
+  ]));
+  const rulesCard = el('div', 'card');
+  rulesCard.append(el('h3', null, '规则清单（forward-chaining）'));
+  rulesCard.append(el('pre', 'json', JSON.stringify(posture.rules || [], null, 2)));
+  cards.append(rulesCard);
+  sec.append(cards);
+
+  const shaclCard = el('div', 'card');
+  shaclCard.append(el('h3', null, 'SHACL 校验工作台（POST /validate/shacl）'));
+  const ta = el('textarea');
+  ta.value = localStorage.getItem('consoleShaclShapes') || DEFAULT_SHACL_SHAPES;
+  shaclCard.append(ta);
+  const shaclRow = el('div', 'row');
+  const runBtn = el('button', 'run', '运行校验');
+  const shaclMsg = el('span', 'muted');
+  shaclRow.append(runBtn, shaclMsg);
+  shaclCard.append(shaclRow);
+  const shaclOut = el('pre', 'json');
+  shaclOut.textContent = '—';
+  shaclCard.append(shaclOut);
+  runBtn.addEventListener('click', async () => {
+    const body = ta.value.trim();
+    if (!body) { shaclMsg.textContent = '请输入 Turtle shapes'; return; }
+    runBtn.disabled = true; shaclMsg.textContent = '校验中…';
+    try {
+      const res = await gw('validate/shacl', { method: 'POST', headers: { 'content-type': 'text/turtle' }, body });
+      localStorage.setItem('consoleShaclShapes', body);
+      shaclMsg.textContent = res.conforms ? '✓ conforms' : `✗ 不通过（${res.result_count} 条违规）`;
+      shaclOut.textContent = JSON.stringify({
+        conforms: res.conforms, result_count: res.result_count,
+        shapes: res.shapes, data: res.data, results: (res.results || []).slice(0, 20),
+      }, null, 2);
+    } catch (err) {
+      shaclMsg.textContent = '';
+      shaclOut.textContent = '加载失败: ' + err.message;
+    } finally { runBtn.disabled = false; }
+  });
+  sec.append(shaclCard);
+
+  const matCard = el('div', 'card');
+  matCard.append(el('h3', null, '物化运行（POST /materialize）'));
+  const matRow = el('div', 'row');
+  const matBtn = el('button', 'run', '运行物化');
+  const matMsg = el('span', 'muted');
+  matRow.append(matBtn, matMsg);
+  matCard.append(matRow);
+  const matOut = el('pre', 'json');
+  matOut.textContent = '—';
+  matCard.append(matOut);
+  matBtn.addEventListener('click', async () => {
+    matBtn.disabled = true; matMsg.textContent = '物化中…';
+    try {
+      const res = await gw('materialize', { method: 'POST' });
+      const warn = (res.timed_out ? ' · 超时' : '') + (res.inconsistent ? ' · inconsistent' : '');
+      matMsg.textContent = `${res.derived_triples} 条派生 · ${res.elapsed_ms}ms${warn}`;
+      matOut.textContent = JSON.stringify(res, null, 2);
+    } catch (err) {
+      matMsg.textContent = '';
+      matOut.textContent = '加载失败: ' + err.message;
+    } finally { matBtn.disabled = false; }
+  });
+  sec.append(matCard);
+}
+
+// ---------- plugins (L8 plugin-api) ----------
+async function renderPlugins() {
+  const sec = $('#tab-plugins');
+  sec.replaceChildren();
+  const res = await mg('admin/plugins').catch(e => ({ error: e.message }));
+  if (res.error) { sec.append(el('p', 'err', res.error)); return; }
+  const cards = el('div', 'cards');
+  cards.append(kvCard('插件契约状态', [
+    ['status', res.status],
+    ['api_version', res.api_version],
+    ['插件数', (res.plugins || []).length],
+    ['能力数', (res.capabilities || []).length],
+  ]));
+  const capCard = el('div', 'card');
+  capCard.append(el('h3', null, '能力集合（PluginCapability）'));
+  const capRow = el('div', 'row');
+  for (const c of res.capabilities || []) capRow.append(el('span', 'tag', c));
+  capCard.append(capRow);
+  cards.append(capCard);
+  sec.append(cards);
+
+  for (const p of res.plugins || []) {
+    const card = el('div', 'card');
+    card.append(el('h3', null, p.id));
+    const dl = el('dl', 'kv');
+    dl.append(el('dt', null, '版本'), el('dd', null, p.version));
+    dl.append(el('dt', null, '契约 api_version'), el('dd', null, p.api_version));
+    dl.append(el('dt', null, '能力'), el('dd', null, (p.capabilities || []).join('、')));
+    card.append(dl);
+    for (const tool of p.tools || []) {
+      card.append(el('h4', null, '工具 · ' + tool.name));
+      card.append(el('p', 'muted', tool.description));
+      const tbl = el('table');
+      const thead = el('thead');
+      const hr = el('tr');
+      ['参数', '说明', '必填'].forEach(h => hr.append(el('th', null, h)));
+      thead.append(hr);
+      tbl.append(thead);
+      const tbody = el('tbody');
+      for (const pa of tool.parameters || []) {
+        const tr = el('tr');
+        tr.append(el('td', null, pa.name), el('td', null, pa.description), el('td', null, pa.required ? '是' : '否'));
+        tbody.append(tr);
+      }
+      tbl.append(tbody);
+      card.append(tbl);
+    }
+    sec.append(card);
+  }
+
+  const contractCard = el('div', 'card');
+  contractCard.append(el('h3', null, '契约状态（ontolith-plugin-api）'));
+  contractCard.append(el('pre', 'json', JSON.stringify(res.contracts || {}, null, 2)));
+  sec.append(contractCard);
 }
 
 // ---------- SPARQL (HTTP / gRPC channel) ----------

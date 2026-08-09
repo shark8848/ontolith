@@ -1,14 +1,22 @@
 {
   "name": "ontolith-console",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Ontolith management console — zero-dependency Node.js admin UI for the ontolith semantic runtime",
+  "description": "Ontolith management console — Vite 8 SPA + zero-dependency Node API server",
   "type": "module",
   "main": "server.js",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
+    "dev": "vite",
+    "dev:api": "node server.js",
+    "build": "vite build",
     "start": "node server.js",
-    "check": "node --check server.js"
+    "check": "node --check server.js && node --check grpc.js && node --check vite.config.js && node --check src/app.js"
+  },
+  "devDependencies": {
+    "vite": "^8.2.1"
   },
   "license": "MIT"
 }
