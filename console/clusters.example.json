@@ -1,0 +1,22 @@
+[
+  {
+    "id": "prod",
+    "name": "Production (localhost)",
+    "gateway": "http://127.0.0.1:8080",
+    "management": "http://127.0.0.1:9091",
+    "grpc": "http://127.0.0.1:50051",
+    "apiKey": "copy-from-ontolith-prod",
+    "tenant": "prod",
+    "user": "console"
+  },
+  {
+    "id": "staging",
+    "name": "Staging (localhost:18080)",
+    "gateway": "http://127.0.0.1:18080",
+    "management": "http://127.0.0.1:19091",
+    "grpc": "http://127.0.0.1:15051",
+    "apiKey": "copy-from-staging",
+    "tenant": "staging",
+    "user": "console"
+  }
+]

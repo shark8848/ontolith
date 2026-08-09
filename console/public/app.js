@@ -8,25 +8,77 @@ const el = (tag, cls, text) => {
   return n;
 };
 
-// ---------- fetch helpers ----------
+// ---------- auth token (console access token) ----------
+let consoleToken = localStorage.getItem('consoleToken') || '';
+function authHeaders(extra = {}) {
+  if (consoleToken) extra['Authorization'] = 'Bearer ' + consoleToken;
+  return extra;
+}
 async function api(path, opts = {}) {
-  const res = await fetch(path, opts);
+  const res = await fetch(path, { ...opts, headers: authHeaders(opts.headers || {}) });
   const text = await res.text();
   let body;
   try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (res.status === 401 && !opts._noAuthUi) {
+    showLogin();
+    throw new Error('unauthorized');
+  }
   if (!res.ok) {
     const msg = (body && (body.error || body.message)) || `HTTP ${res.status}`;
     throw new Error(msg);
   }
   return body;
 }
-const gw = (p, o) => api('/api/gw/' + p, o);
-const mg = (p, o) => api('/api/mg/' + p, o);
 
-// ---------- state ----------
+// ---------- cluster state ----------
+let clusters = [];
+let current = null;
+const gw = (p, o) => api(`/api/gw/${current}/${p}`, o);
+const mg = (p, o) => api(`/api/mg/${current}/${p}`, o);
+
 let refreshMs = 5000;
 let activeTab = 'overview';
 let autoTimer = null;
+
+// ---------- login ----------
+function showLogin() {
+  const ov = $('#login-overlay');
+  ov.classList.remove('hidden');
+  $('#login-token').focus();
+}
+function hideLogin() { $('#login-overlay').classList.add('hidden'); }
+$('#login-btn').addEventListener('click', () => {
+  const t = $('#login-token').value.trim();
+  if (!t) { $('#login-msg').textContent = '请输入令牌'; return; }
+  consoleToken = t;
+  localStorage.setItem('consoleToken', t);
+  $('#login-msg').textContent = '';
+  hideLogin();
+  render();
+});
+$('#login-token').addEventListener('keydown', e => { if (e.key === 'Enter') $('#login-btn').click(); });
+
+// ---------- clusters ----------
+async function initClusters() {
+  try {
+    clusters = await api('/api/clusters', { _noAuthUi: true });
+  } catch { clusters = [{ id: 'default', name: 'default' }]; }
+  const sel = $('#cluster-select');
+  sel.replaceChildren();
+  for (const c of clusters) {
+    const opt = el('option', null, c.name || c.id);
+    opt.value = c.id;
+    sel.append(opt);
+  }
+  const saved = localStorage.getItem('consoleCluster');
+  current = clusters.find(c => c.id === saved) || clusters[0];
+  sel.value = current.id;
+  sel.addEventListener('change', () => {
+    current = clusters.find(c => c.id === sel.value) || clusters[0];
+    localStorage.setItem('consoleCluster', current.id);
+    switchTab(activeTab);
+  });
+}
 
 // ---------- tabs ----------
 document.querySelectorAll('nav button').forEach(btn => {
@@ -39,11 +91,7 @@ function switchTab(name) {
   stopAuto();
   render();
 }
-
-function startAuto(ms) {
-  stopAuto();
-  if (ms > 0) autoTimer = setInterval(render, ms);
-}
+function startAuto(ms) { stopAuto(); if (ms > 0) autoTimer = setInterval(render, ms); }
 function stopAuto() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
 
 // ---------- rendering ----------
@@ -51,6 +99,7 @@ async function render() {
   try {
     switch (activeTab) {
       case 'overview': await renderOverview(); break;
+      case 'monitor': await renderMonitor(); break;
       case 'cluster': await renderCluster(); break;
       case 'data': await renderData(); break;
       case 'audit': await renderAudit(); break;
@@ -58,30 +107,29 @@ async function render() {
       case 'config': await renderConfig(); break;
     }
   } catch (err) {
-    const sec = $('#tab-' + activeTab);
-    sec.replaceChildren(el('p', 'err', '加载失败: ' + err.message));
+    if (err.message !== 'unauthorized') {
+      const sec = $('#tab-' + activeTab);
+      sec.replaceChildren(el('p', 'err', '加载失败: ' + err.message));
+    }
   }
-  if (activeTab === 'overview' || activeTab === 'cluster' || activeTab === 'data') {
-    startAuto(refreshMs);
-  }
+  if (['overview', 'monitor', 'cluster', 'data'].includes(activeTab)) startAuto(refreshMs);
 }
 
 async function probeStatus() {
+  if (!current) return;
   let health;
-  try { health = await api('/api/health'); } catch { return; }
+  try { health = await api(`/api/health?cluster=${current}`); } catch { return; }
   if (health.refresh_ms) refreshMs = health.refresh_ms;
   const gwOk = health.gateway && health.gateway.status === 'ok';
   const mgOk = health.management && health.management.status === 'ok';
   setDot('dot-gw', gwOk ? 'ok' : 'bad');
   setDot('dot-mg', mgOk ? 'ok' : 'bad');
   const note = $('#refresh-note');
-  if (gwOk && mgOk) note.textContent = '网关/管理面可达 · 自动刷新 ' + refreshMs + 'ms';
-  else note.textContent = '部分组件不可达';
+  note.textContent = gwOk && mgOk
+    ? `${current} 可达 · 自动刷新 ${refreshMs}ms`
+    : `${current} 部分组件不可达`;
 }
-function setDot(id, state) {
-  const d = $('#' + id);
-  d.className = 'dot ' + state;
-}
+function setDot(id, state) { $('#' + id).className = 'dot ' + state; }
 
 function kvCard(title, entries) {
   const card = el('div', 'card');
@@ -94,11 +142,14 @@ function kvCard(title, entries) {
   card.append(dl);
   return card;
 }
-
 function fmtTs(ts) {
   if (!ts) return '—';
   const d = new Date(Number(ts));
   return isNaN(d) ? String(ts) : d.toLocaleString();
+}
+function fmtTime(ts) {
+  const d = new Date(Number(ts));
+  return isNaN(d) ? '' : d.toLocaleTimeString();
 }
 
 // ---------- overview ----------
@@ -109,17 +160,14 @@ async function renderOverview() {
     gw('health').catch(e => ({ error: e.message })),
     mg('admin/health').catch(e => ({ error: e.message })),
     mg('admin/monitoring').catch(e => ({ error: e.message })),
-    api('/api/gw/metrics').catch(() => ''),
+    api(`/api/gw/${current}/metrics`).catch(() => ''),
   ]);
   const cards = el('div', 'cards');
   cards.append(kvCard('Gateway', [
     ['状态', gwHealth.error ? '不可达' : (gwHealth.status || '—')],
-    ['后端', gwHealth.backend || '—'],
-    ['三元组', gwHealth.triples ?? '—'],
-    ['四元组', gwHealth.quads ?? '—'],
-    ['鉴权', gwHealth.auth_mode || '—'],
-    ['tracing', gwHealth.tracing || '—'],
-    ['数据目录', gwHealth.data_dir || '—'],
+    ['后端', gwHealth.backend || '—'], ['三元组', gwHealth.triples ?? '—'],
+    ['四元组', gwHealth.quads ?? '—'], ['鉴权', gwHealth.auth_mode || '—'],
+    ['tracing', gwHealth.tracing || '—'], ['数据目录', gwHealth.data_dir || '—'],
   ]));
   cards.append(kvCard('管理面', [
     ['状态', mgHealth.error ? '不可达' : (mgHealth.status || '—')],
@@ -128,21 +176,17 @@ async function renderOverview() {
     ['jwt / oidc', `${mgHealth.jwt || 'off'} / ${mgHealth.oidc || 'off'}`],
   ]));
   cards.append(kvCard('监控摘要', [
-    ['请求总数', mon.requests_total ?? '—'],
-    ['SPARQL 请求', mon.sparql_total ?? '—'],
-    ['SPARQL 错误', mon.sparql_errors ?? '—'],
-    ['ingest 总数', mon.ingest_total ?? '—'],
+    ['请求总数', mon.requests_total ?? '—'], ['SPARQL 请求', mon.sparql_total ?? '—'],
+    ['SPARQL 错误', mon.sparql_errors ?? '—'], ['ingest 总数', mon.ingest_total ?? '—'],
     ['平均延迟', mon.latency_avg_ms !== undefined ? mon.latency_avg_ms + 'ms' : '—'],
     ['集群节点', mon.cluster ? `${mon.cluster.healthy}/${mon.cluster.nodes}` : '—'],
   ]));
   sec.append(cards);
-
   const m = el('div', 'card');
   m.append(el('h3', null, 'Prometheus 指标（网关）'));
   const lines = String(metrics || '').split('\n').filter(l => l && !l.startsWith('#'));
   const tbl = el('table');
-  const thead = el('thead');
-  const hr = el('tr');
+  const thead = el('thead'); const hr = el('tr');
   ['指标', '值', '时间戳'].forEach(h => hr.append(el('th', null, h)));
   thead.append(hr); tbl.append(thead);
   const tbody = el('tbody');
@@ -150,14 +194,66 @@ async function renderOverview() {
     const parts = line.split(/\s+/);
     if (parts.length < 2) continue;
     const tr = el('tr');
-    tr.append(el('td', null, parts[0]));
-    tr.append(el('td', null, parts[1]));
-    tr.append(el('td', null, parts[2] ? fmtTs(parts[2]) : '—'));
+    tr.append(el('td', null, parts[0]), el('td', null, parts[1]), el('td', null, parts[2] ? fmtTs(parts[2]) : '—'));
     tbody.append(tr);
   }
-  tbl.append(tbody);
-  m.append(tbl);
-  sec.append(m);
+  tbl.append(tbody); m.append(tbl); sec.append(m);
+}
+
+// ---------- monitor (charts) ----------
+let chartCache = {};
+async function renderMonitor() {
+  const sec = $('#tab-monitor');
+  sec.replaceChildren();
+  const res = await api(`/api/history?cluster=${current}`);
+  const pts = res.points || [];
+  if (pts.length < 2) { sec.append(el('p', 'muted', '历史采样中（至少需要 2 个采样点）…')); return; }
+  const series = (key) => pts.map((p, i) => ({ t: p.ts, v: p[key] ?? 0 }));
+  const charts = el('div', 'charts');
+  charts.append(chartCard('请求速率（req/refresh 窗口）', rateSeries(series('requests_total'))));
+  charts.append(chartCard('SPARQL 请求 vs 错误', twoSeries(series('sparql_total'), series('sparql_errors'), '#4da3ff', '#e74c3c')));
+  charts.append(chartCard('平均延迟（ms）', series('latency_avg_ms')));
+  charts.append(chartCard('三元组总量', series('triples'), '#2ecc71'));
+  charts.append(chartCard('commit_index', series('commit_index')));
+  charts.append(chartCard('节点健康（healthy/nodes）', pts.map((p, i) => ({ t: p.ts, v: p.healthy ?? 0, max: p.nodes ?? 1 })), '#f1c40f'));
+  sec.append(charts);
+}
+function rateSeries(s) {
+  return s.map((p, i) => i === 0 ? { t: p.t, v: 0 } : { t: p.t, v: Math.max(0, p.v - s[i - 1].v) });
+}
+function chartCard(title, series, color = '#4da3ff', extra = '') {
+  const card = el('div', 'chart-card');
+  card.append(el('h3', null, title));
+  const cv = el('canvas', 'chart');
+  card.append(cv);
+  setTimeout(() => drawChart(cv, series, color), 0);
+  return card;
+}
+function drawChart(cv, series, color = '#4da3ff') {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 320, h = 140;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  if (series.length < 2) return;
+  const max = Math.max(...series.map(p => p.max ?? p.v), 1);
+  const pad = 4;
+  const step = (w - pad * 2) / (series.length - 1);
+  const y = (v) => h - pad - (v / max) * (h - pad * 2);
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+  series.forEach((p, i) => {
+    const x = pad + i * step;
+    i === 0 ? ctx.moveTo(x, y(p.v)) : ctx.lineTo(x, y(p.v));
+  });
+  ctx.stroke();
+  ctx.fillStyle = '#8b98a9'; ctx.font = '10px ui-monospace, monospace';
+  if (series[0]) ctx.fillText(fmtTime(series[0].t), pad, h - 2);
+  if (series[series.length - 1]) {
+    const last = series[series.length - 1];
+    ctx.fillStyle = color;
+    ctx.fillText(String(last.v) + (last.max ? '/' + last.max : ''), pad + (series.length - 1) * step - 34, h - 2);
+  }
 }
 
 // ---------- cluster ----------
@@ -169,8 +265,7 @@ async function renderCluster() {
     mg('admin/monitoring').catch(e => ({ error: e.message })),
   ]);
   const cards = el('div', 'cards');
-  cards.append(kvCard('集群状态', st.error
-    ? [['错误', st.error]]
+  cards.append(kvCard('集群状态', st.error ? [['错误', st.error]]
     : [['epoch', st.epoch], ['leader', st.leader], ['节点', `${st.healthy}/${st.nodes}`],
        ['分片', st.shards], ['log_index', st.log_index], ['commit_index', st.commit_index],
        ['failovers', st.failovers], ['partition', st.partition]]));
@@ -186,7 +281,7 @@ async function renderCluster() {
   sec.append(detail);
 }
 
-// ---------- SPARQL ----------
+// ---------- SPARQL (HTTP / gRPC channel) ----------
 function buildSparqlTab() {
   const sec = $('#tab-sparql');
   sec.replaceChildren();
@@ -197,8 +292,10 @@ function buildSparqlTab() {
   const row = el('div', 'row');
   const runBtn = el('button', 'run', '运行查询');
   const expBtn = el('button', 'run secondary', 'Explain');
+  const ch = el('select');
+  ['HTTP', 'gRPC'].forEach(m => { const o = el('option', null, m); o.value = m; ch.append(o); });
   const msg = el('span', 'muted');
-  row.append(runBtn, expBtn, msg);
+  row.append(runBtn, expBtn, ch, msg);
   sec.append(row);
   const out = el('div');
   sec.append(out);
@@ -209,16 +306,25 @@ function buildSparqlTab() {
     runBtn.disabled = expBtn.disabled = true;
     msg.textContent = '执行中…';
     try {
-      const res = await api('/api/gw/' + (explain ? 'explain' : 'sparql') + '?query=' + encodeURIComponent(q));
       out.replaceChildren();
-      if (explain) {
-        out.append(el('pre', 'json', typeof res === 'string' ? res : JSON.stringify(res, null, 2)));
+      let res;
+      if (ch.value === 'gRPC') {
+        res = await api(`/api/grpc/${current}/query`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ query: q, explain }),
+        });
+        if (explain) out.append(el('pre', 'json', JSON.stringify(res, null, 2)));
+        else renderSparqlResult(out, res);
+        msg.textContent = 'gRPC 通道';
       } else {
-        renderSparqlResult(out, res);
+        res = await api(`/api/gw/${current}/` + (explain ? 'explain' : 'sparql') + '?query=' + encodeURIComponent(q));
+        if (explain) out.append(el('pre', 'json', typeof res === 'string' ? res : JSON.stringify(res, null, 2)));
+        else renderSparqlResult(out, res);
+        msg.textContent = 'HTTP 通道';
       }
-      msg.textContent = '';
     } catch (err) {
-      msg.textContent = '错误: ' + err.message;
+      if (err.message !== 'unauthorized') msg.textContent = '错误: ' + err.message;
     } finally {
       runBtn.disabled = expBtn.disabled = false;
     }
@@ -233,8 +339,7 @@ function renderSparqlResult(out, res) {
   const rows = res.results?.bindings || [];
   if (head.length === 0) { out.append(el('p', 'muted', '查询返回空结果')); return; }
   const tbl = el('table');
-  const thead = el('thead');
-  const hr = el('tr');
+  const thead = el('thead'); const hr = el('tr');
   head.forEach(v => hr.append(el('th', null, v)));
   thead.append(hr); tbl.append(thead);
   const tbody = el('tbody');
@@ -243,23 +348,20 @@ function renderSparqlResult(out, res) {
     for (const v of head) {
       const cell = b[v];
       const td = el('td');
-      if (!cell) { td.textContent = ''; }
-      else if (cell.type === 'uri') { td.append(el('code', null, cell.value)); }
+      if (!cell) td.textContent = '';
+      else if (cell.type === 'uri') td.append(el('code', null, cell.value));
       else if (cell.type === 'literal') {
         td.append(el('span', null, cell.value));
         if (cell.datatype && cell.datatype !== 'http://www.w3.org/2001/XMLSchema#string') {
           td.append(el('span', 'tag', '^' + cell.datatype.split(/[#/]/).pop()));
         }
         if (cell['xml:lang']) td.append(el('span', 'tag', '@' + cell['xml:lang']));
-      } else {
-        td.append(el('span', 'tag', cell.type), el('span', null, ' ' + (cell.value || '')));
-      }
+      } else td.append(el('span', 'tag', cell.type), el('span', null, ' ' + (cell.value || '')));
       tr.append(td);
     }
     tbody.append(tr);
   }
-  tbl.append(tbody);
-  out.append(tbl);
+  tbl.append(tbody); out.append(tbl);
   const meta = res.meta || {};
   out.append(el('p', 'muted', `${rows.length} 行 · ${meta.elapsed_ms ?? '?'}ms · tenant=${meta.tenant ?? '?'} · consistency=${meta.consistency ?? '?'}`));
 }
@@ -276,7 +378,6 @@ async function renderData() {
     ['存储后端', stats.storage_backend],
   ]));
   sec.append(cards);
-
   const card = el('div', 'card');
   card.append(el('h3', null, 'Turtle 写入（POST /data/turtle）'));
   const ta = el('textarea');
@@ -294,16 +395,12 @@ async function renderData() {
     if (!body) { msg.textContent = '请输入 Turtle'; return; }
     btn.disabled = true; msg.textContent = '写入中…';
     try {
-      const res = await gw('data/turtle', {
-        method: 'POST',
-        headers: { 'content-type': 'text/turtle' },
-        body,
-      });
+      const res = await gw('data/turtle', { method: 'POST', headers: { 'content-type': 'text/turtle' }, body });
       out.textContent = JSON.stringify(res, null, 2);
       msg.textContent = '写入成功';
       renderData();
     } catch (err) {
-      msg.textContent = '错误: ' + err.message;
+      if (err.message !== 'unauthorized') msg.textContent = '错误: ' + err.message;
     } finally { btn.disabled = false; }
   });
   sec.append(card);
@@ -328,17 +425,12 @@ async function renderAudit() {
   const tbody = el('tbody');
   for (const ev of res.events || []) {
     const tr = el('tr');
-    tr.append(el('td', null, fmtTs(ev.ts)));
-    tr.append(el('td', null, ev.tenant || '—'));
-    tr.append(el('td', null, ev.user || '—'));
-    tr.append(el('td', null, ev.action || '—'));
-    tr.append(el('td', null, ev.resource || '—'));
-    tr.append(el('td', null, ev.outcome || '—'));
-    tr.append(el('td', null, ev.detail || '—'));
+    tr.append(el('td', null, fmtTs(ev.ts)), el('td', null, ev.tenant || '—'), el('td', null, ev.user || '—'),
+      el('td', null, ev.action || '—'), el('td', null, ev.resource || '—'), el('td', null, ev.outcome || '—'),
+      el('td', null, ev.detail || '—'));
     tbody.append(tr);
   }
-  tbl.append(tbody);
-  sec.append(tbl);
+  tbl.append(tbody); sec.append(tbl);
   btn.addEventListener('click', renderAudit);
 }
 
@@ -387,14 +479,15 @@ async function renderConfig() {
       tr.append(el('td', null, l.id), el('td', null, l.crate), el('td', null, l.domain));
       tbody.append(tr);
     }
-    tbl.append(tbody);
-    lc.append(tbl);
-    sec.append(lc);
+    tbl.append(tbody); lc.append(tbl); sec.append(lc);
   }
 }
 
 // ---------- boot ----------
-if (!document.querySelector('#tab-sparql').hasChildNodes()) buildSparqlTab();
-setInterval(probeStatus, refreshMs > 0 ? refreshMs : 5000);
-probeStatus();
-render();
+(async () => {
+  await initClusters();
+  buildSparqlTab();
+  setInterval(probeStatus, refreshMs > 0 ? refreshMs : 5000);
+  probeStatus();
+  render();
+})();
