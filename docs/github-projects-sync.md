@@ -2,8 +2,8 @@
 
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
-数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.38，2026-08-09）
-状态: Active（待有效令牌执行首次同步）
+数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.40，2026-08-09）
+状态: Active（Classic PAT 已配置，随增量同步）
 
 ## 1. 认证要求（重要，勿重复探索）
 
@@ -79,7 +79,11 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P7-03 发布/回滚手册 + 实际演练 | 已完成 | release-rollback-drill.sh DRILL PASS 2026-08-08 |
 | P7-04 灾备运维手册 | 已完成 | L7-ops-rebalance-dr.md |
 | 首次真实发布（生产） | 未开始 | P7-03 手册就绪，待首次发布 |
-| L8 AI-Native 扩展 | 未开始 | Phase 8 整体 0% |
+| L8 AI-Native 扩展 | 进行中 | Phase 8 整体 ~15%（2026-08-09：P8-01 M1+M2+M3） |
+| P8-01 语义-向量桥接 | 进行中 | 80%（M3 持久化 + 增量更新完成，2026-08-09） |
+| P8-01 M3 语义索引持久化 + 增量更新 | 已完成 | RocksDB `semantic` CF + `RocksSemanticIndex` + 删改回流，2026-08-09 |
+| P8-02 检索增强接口 | 进行中 | 30%（HTTP 接口落地，KPI 门禁待收尾） |
+| P8-03 代理集成扩展点 | 未开始 | 依赖 P8-01/P8-02 |
 | R1 退出标准全表 | 已完成 | 2026-08-08 全勾选（含正式验收包 G1–G5 全 PASS） |
 | R2 查询代价模型与高级 Update | 进行中 | W3C 剩余欠账 + 代价模型 |
 | R2 OWL 2 RL 推理 | 未开始 | |

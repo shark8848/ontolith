@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.39
+版本: 0.1.40
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -48,10 +48,10 @@
 | Phase 5 接入层与安全基线 | 部分完成 | ~90% | HTTP 全路由 + 文件审计（含哈希链）+ cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
 | Phase 6 推理与验证 | 已完成 | ~100% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key、prp-spo2 属性链、cls-hv1/2 hasValue、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2/3（AllDifferent）+ prp-irp/cax-adc（bnode 感知 + 同迭代检测），迭代上限 + 墙钟超时护栏）可用；**SHACL 基线校验引擎落地（目标/核心约束组件全齐 + 属性路径表达式全量 + W3C SHACL 核心套件 98/98 全绿——uniqueLang-002 缺口经 RDF 1.1 布尔项区分修复闭合，reasoner 4→80 测）** |
 | Phase 7 企业运维与发布 | 部分完成 | ~72% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业，**已接阈值断言 + 趋势记录硬门禁**）+ license 审计 CI 作业 + **依赖登记审计（P0-03 硬门禁）+ cargo-audit CVE 观测（CI 新作业）** + **在线重平衡与灾备演练脚本（P7-01/04，真实 3 进程 raft，DRILL PASS）** + **发布/回滚手册（P7-03）** |
-| Phase 8 AI-Native 扩展 | 进行中 | ~10% | 立项 + P8-01 M1（`ontolith-ai` crate，8 测）+ **M2 server 接线**（`/semantic/search`·`/semantic/index`，server 54 测） |
+| Phase 8 AI-Native 扩展 | 进行中 | ~15% | 立项 + P8-01 M1（`ontolith-ai` crate，8 测）+ **M2 server 接线**（`/semantic/search`·`/semantic/index`，server 54 测）+ **M3 RocksDB 持久化与增量更新（删改回流）**（storage 53 测、ai 13 测、server 57 测） |
 | **分层内核 L0–L3** | **部分完成** | **~92–96%** | 语义+存储+查询主路径可用，完整聚合/Update/子查询/属性路径最小集（含 `?`）已纳入回归保护 |
 | **相对 R1 退出标准** | **已完成** | **~100%** | 内核+HTTP+集群数据面（多进程 raft M1–M3 + P4-01–P4-04）+ CI/烟雾合规 + W3C 子集 required-lite（30/30）+ 完整 W3C 套件 492/492 全绿 + 核心 SLO 实测达标（success 100%、p95=0ms）+ 恢复/灾备演练 DRILL PASS + 实际发布回滚演练 DRILL PASS + **R1 正式验收包全 PASS + OIDC 完整链路（R2+）**；全表勾选完成 |
-| **相对 R1–R4 全计划** | **进行中** | **~20%** | R1/R2 完成、R3 要素多数落地（L5/L7）、L8 进行中（P8-01 M1+M2） |
+| **相对 R1–R4 全计划** | **进行中** | **~22%** | R1/R2 完成、R3 要素多数落地（L5/L7）、L8 进行中（P8-01 M1+M2+M3） |
 
 ### 架构分层完成度（实现视图）
 
@@ -65,7 +65,7 @@
 | L5 server/security/obs | ~90% | 双后端、文件审计（哈希链）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
 | L6 reasoner | ~100% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key（值→成员桶索引）、prp-spo2 属性链、cls-hv1/2 hasValue、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2/3 + prp-irp/cax-adc（bnode 感知 + 同迭代检测）、迭代上限 + 墙钟超时）+ SHACL 基线校验（目标四选 + 隐式类目标；核心约束组件全齐 + 属性路径表达式全量 inversePath/alternativePath/sequence/zeroOrMore/oneOrMore/zeroOrOne；severity/message；ValidationReport；W3C SHACL 核心套件 98/98 全绿）；80 测 |
 | L7 平台工程 | ~70% | CI workflow + ci-local + compliance crate + systemd 安装脚本 + 管理面 smoke + 窗口化 SLO 校验 + 存储微基准（阈值断言 + 趋势记录）+ license 审计作业 + 在线重平衡/灾备演练脚本 + 发布回滚手册 |
-| L8 AI-Native | 0% | — |
+| L8 AI-Native | ~15% | P8-01 M1 语义核心 + M2 server 接线 + M3 RocksDB 持久化与增量更新；P8-02 检索 KPI 门禁待收尾、P8-03 代理扩展点未开始 |
 
 ### 当前焦点
 
@@ -194,8 +194,8 @@
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P8-01 | 语义-向量桥接 | 进行中 | 55% | `crates/ontolith-ai`（EmbeddingProvider 抽象 + FeatureHashEmbedding + 余弦 top-k 检索，8 测全绿）+ **M2 server 接线完成**（`/semantic/search` + `/semantic/index` + 启动自动索引 + 鉴权/审计复用 + `/health`·`/admin/config` 姿态，server 49→54 测；见 [L8-ai-native.md](./L8-ai-native.md)） | M3 RocksDB 持久化 + 增量更新 |
-| P8-02 | 检索增强接口 | 进行中 | 25% | `GET /semantic/search` HTTP 接口已落地（P8-01 M2 交付） | M3 持久化 + 检索 KPI 门禁 |
+| P8-01 | 语义-向量桥接 | 进行中 | 80% | M1 `crates/ontolith-ai` 语义核心（8 测）+ **M2 server 接线**（`/semantic/search` + `/semantic/index` + 启动自动索引 + 鉴权/审计复用 + `/health`·`/admin/config` 姿态，server 49→54 测）+ **M3 RocksDB 持久化与增量更新**（独立 `semantic` CF + `RocksSemanticIndex` + 删改回流：ingest 精确差异 / SPARQL Update 存储差异对账 / 位置无关引用检查；storage 52→53、ai 8→13、server 54→57 测，重启持久验证通过；另修复 `InMemoryDictionary::contains_value` 变更副作用；见 [L8-ai-native.md](./L8-ai-native.md)） | M4 P8-03 前置：检索 KPI 门禁收尾（P8-02） |
+| P8-02 | 检索增强接口 | 进行中 | 30% | `GET /semantic/search` HTTP 接口已落地（P8-01 M2/M3 交付，RocksDB 持久索引 + 删改回流） | 检索 KPI 门禁（确定性/相关命中/延迟预算，仿 r2-gates CI 作业） |
 | P8-03 | 代理集成扩展点 | 未开始 | 0% | — | 可挂 plugin-api；依赖 P8-01/P8-02 |
 
 **阶段退出条件：** 扩展安全与兼容门禁通过。
@@ -307,6 +307,8 @@
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-09 | Codex | **L8 看板增量同步 DONE（SYNC-PROJ-0001）**：GitHub Projects #2 新增「P8-01 M3 语义索引持久化 + 增量更新」卡（已完成/P2），P8-01·P8-02 保持进行中、P8-03 未开始、L8 进行中；看板 total 49→50，回读验证通过 |
+| 2026-08-09 | Codex | **L8 P8-01 M3 语义索引持久化 + 增量更新 DONE**：① `ontolith-storage` 独立 `semantic` CF（`RocksDbStorageEngine::semantic_cf_*` 字节级原语：put/write_batch/get/delete/scan_range/scan_all，仿 L4 `raft` CF；storage 52→53 测——roundtrip + 重开持久）；② `ontolith-ai` 新增 `RocksSemanticIndex`（term→embedding 落盘：键=RFC-0001 `encode_term` 规范编码、值=`u32 BE dim‖f32 LE`、批量 upsert/remove 单次耐久批、计数缓存开库重建）+ `SemanticIndex` trait 扩展（`upsert_many`/`remove`/`remove_many`/`contains`/`all_terms`）+ `SemanticSearchService` 索引容量上限内聚（启动/显式 POST/写回流共用 `AUTO_INDEX_CAP`），ai 8→13 测（roundtrip/remove/search、重开持久、批删耐久）；③ server 接线：`build_persistent_semantic_service`（RocksDB 构造路径默认持久索引，重启自动补齐未持久项）、**删改回流**——ingest 精确 ops 差异（Put 入索引 / Delete 位置无关引用检查后驱逐，`term_referenced` 覆盖主语/谓词/宾语全位置 + 命名图四元组）、SPARQL Update 提交后全量存储差异对账（仅写变化项）、`DeleteKey` 回退全量对账；另修复 `InMemoryDictionary::contains_value` 变更副作用（非破坏性成员探测）；server 54→57 测（ingest 回流+SPARQL DELETE 驱逐、共享术语保留、RocksDB 重启持久——含非存储显式条目）；workspace 全量 + W3C 492/492 + SHACL 98/98 零漂移 + clippy 零警告 + fmt 对齐；[L8-ai-native.md](./L8-ai-native.md) 0.1.1→0.1.2（M3 里程碑 + 持久化契约 + 增量语义）；PROGRESS.md 0.1.39→0.1.40 |
 | 2026-08-09 | Codex | **L8 P8-01 M2 server 接线 DONE**：`ontolith-server` 接入 `ontolith-ai`——`SemanticConfig`（`ONTOLITH_SEMANTIC_ENABLED` 默认关 / `DIM` / `AUTO_INDEX_CAP`）+ `build_semantic_service`（启动自动索引：主语（bnode 跳过）/谓词/宾语，cap 100k）+ AppState.semantic（`Mutex<SemanticSearchService>`）；新增 `GET /semantic/search?q=&k=`（top-k 余弦命中，SPARQL 结果 JSON 同构 term 渲染 + 固定 6 位分数保证确定性）与 `POST /semantic/index?term=|<terms=>`（幂等去重）；鉴权/审计复用 L5 模式（`semantic:read/write`），未启用 501；`/health` 与 `/admin/config` 暴露 `semantic` 姿态；server 49→54 测（禁用 501/缺 q 400/缺 term 400/索引+检索往返+分数确定性/启动自动索引），workspace 全量 + clippy 零警告 + fmt 对齐；[L8-ai-native.md](./L8-ai-native.md) 0.1.0→0.1.1（env 契约 + API + 已知限制）；PROGRESS.md 0.1.38→0.1.39 |
 | 2026-08-09 | Codex | **L8 看板增量同步 DONE（SYNC-PROJ-0001）**：GitHub Projects #2 新增 P8-01/02/03 三条（P8-01 进行中 / P8-02·P8-03 未开始，P2），L8 AI-Native 扩展转进行中；看板 total 46→49，回读验证通过 |
 | 2026-08-09 | Codex | **看板同步 + L8 AI-Native 立项 DONE（SYNC-PROJ-0001 + P8-01 M1）**：① GitHub Projects #2 全量同步（46 条，44 更新 0 失败）：R2 四轨（代价模型/OWL 2 RL/Explain 门禁/推理护栏）+ R2 SHACL 缺口收尾 + P0-03 依赖登记 + P2-01 RocksDB 适配转 Done，新增「R2 退出标准全表勾选」「RDF 1.1 布尔项区分（uniqueLang-002 闭合）」两条，回读验证 total=46；② L8 AI-Native 立项：新文档 [L8-ai-native.md](./L8-ai-native.md)（范围/非目标、架构决策——可插拔 `EmbeddingProvider` + 树内确定性 fallback（零新增外部依赖）、语义索引与检索、R4 扩展安全与兼容门禁、M1–M4 里程碑、检索 KPI）；③ P8-01 语义-向量桥接 M1：新建 `crates/ontolith-ai`（`FeatureHashEmbedding`——FNV-1a 64 特征哈希 + token/字符三连 + L2 归一、`InMemorySemanticIndex`——幂等 upsert + 余弦 top-k + k∈[1,100] 上限、`SemanticSearchService`）；8 测全绿，workspace 全量 + clippy 零警告 + fmt 对齐；PROGRESS.md 0.1.37→0.1.38 |
@@ -426,7 +428,7 @@
 
 原则：先底层逐层到最顶层应用——优先完成当前最低未完成层，再推进上一层；避免跳层开发。R1 退出标准收尾（核心 SLO 基线、恢复/回滚演练、全表勾选）随各层推进同步完成。
 
-> 当前光标：**L8 AI-Native（2026-08-09：立项 + P8-01 M1 语义核心 + M2 server 接线完成；下一步 P8-01 M3 RocksDB 持久化 + 增量更新）**
+> 当前光标：**L8 AI-Native（2026-08-09：立项 + P8-01 M1 语义核心 + M2 server 接线 + M3 RocksDB 持久化与增量更新完成；下一步 P8-02 检索 KPI 门禁收尾）**
 
 - [x] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局（2026-08-07）
 - [x] **L2 存储内核**：P2-02 真 MVCC 版本链（内存+磁盘）✅（2026-08-07，storage 30→40 测）、P2-01 纯 CF 索引扫描 ✅（2026-08-07）、P2-04 命名图六置换 ✅（2026-08-07；Async 维护预留）、P2-05 fsync/备份演练 ✅（2026-08-07，storage 43→46 测）
@@ -435,7 +437,7 @@
 - [x] **L5 接入与安全**：P5-01 gRPC 网关 **完成**（tonic+prost `SparqlService{Query,Health}` 真实 HTTP/2 + metadata 鉴权 + `traceparent` 延续/回带 + 双网关 bin，server 29→33 测）；P5-02 OIDC/JWT **完成**（树内 HS256 Bearer 鉴权 + `iss`/`aud` 策略 + JWT 租户优先，security 12→18 测）；P5-03 强制租户隔离 **完成**（`ONTOLITH_TENANT_MODE=enforced`：`TenantNamespace` + 执行器租户视图 + 写盖章/越权 403，query 83→86 测）；P5-05 Tracing 全链路 **完成**（`traceparent` 延续 + 根/子 span + `Traceparent` 回带 + `/admin/traces`，observability 6→11、server 26→29 测）→ **L5 全绿，光标移至 L6 推理与验证（P6-01 规则扩展收尾 → P6-03 接入 server 查询/推理管线 → P6-02 SHACL 补全）**
 - [x] **L6 推理与验证**：P6-01 规则扩展 **完成**（cls-hv1/2、prp-irp、cax-adc、eq-diff2/3 AllDifferent、prp-spo2 属性链，reasoner 52→59 测）；P6-03 接入 server 查询/推理管线 **完成**（`InferenceConfig` + `ONTOLITH_INFERENCE_*` 环境 + HTTP `?inference=` 覆盖 + `ReasoningReadService` overlay + reasoning meta + 租户隔离，server 33→43 测）；P6-02 SHACL 核心组件补全 **完成**（languageIn/uniqueLang/xone + 语言标签管道重构，SHACL 21→30 测、reasoner 59→68 测）→ W3C SHACL 套件接入 **完成**（vendored 官方 core 套件 + `shacl_suite` runner + `w3c-shacl_profile.tsv` 84 PASS/14 FAIL 基线：60→84 PASS，SHACL 30→35、reasoner 68→73 测）→ 属性路径表达式与 shacl-shacl 元校验 **完成**（`PropertyPath` 全量：inversePath/alternativePath/sequence/zeroOrMore/oneOrMore/zeroOrOne + canonical 结果路径比对；12 项 path/* 与 shacl-shacl 转绿，84→97 PASS/1 FAIL 基线：唯一缺口 uniqueLang-002 词法差异，SHACL 35→42、reasoner 73→80 测）→ **L6 全绿，光标移至 L7 平台工程（P7-01/04 重平衡与灾备演练）**
 - [x] **L7 平台工程**：P7-01/04 在线重平衡与灾备演练 **完成**（2026-08-08：`drill-rebalance-dr.sh` 真实 3 进程 raft 走完 7 步 DRILL PASS：选主→在线重平衡（slot bias 偏斜 + `shard_map_epoch` 前进证据）→复制收敛→杀 follower（多数派提交）→重启追赶→杀 leader（自动 failover）→重启追赶；cluster 30→31 测）✅；P7-02 阈值断言/趋势记录 **完成**（2026-08-08：`check-bench-thresholds.sh` 按 case ns/op 硬断言 + JSONL 趋势，CI `bench` 作业已切换）✅；P7-03 发布/回滚手册与**实际演练** **完成**（2026-08-08：[L7-release-rollback.md](./L7-release-rollback.md) 代码级/数据级回滚 + 验证判据 + §3.4 实际演练记录；`release-rollback-drill.sh` staging DRILL PASS）✅；P7-04 运维手册与证据包 **完成**（[L7-ops-rebalance-dr.md](./L7-ops-rebalance-dr.md)）✅ → **L7 全绿，光标移至 L8 AI-Native**
-- [~] **L8 AI-Native**：R4 启动立项 **完成**（2026-08-09：[L8-ai-native.md](./L8-ai-native.md) 设计文档——范围/架构决策（可插拔 EmbeddingProvider + 树内确定性 fallback）/里程碑 M1–M4/R4 扩展安全与兼容门禁/KPI）；P8-01 M1 **完成**（`ontolith-ai` crate：EmbeddingProvider + FeatureHashEmbedding（FNV-1a 64 + token/字符三连 + L2 归一）+ InMemorySemanticIndex（幂等 upsert + 余弦 top-k + k 上限）+ SemanticSearchService，零新增外部依赖，8 测全绿）；P8-01 M2 **完成**（server 接线：`GET /semantic/search?q=&k=` + `POST /semantic/index?term=` + 启动自动索引（主语/谓词/宾语，cap 100k）+ 鉴权/审计复用（semantic:read/write）+ `/health`·`/admin/config` 姿态，`ONTOLITH_SEMANTIC_ENABLED` 默认关；server 49→54 测）→ **P8-01 进行中（M3 RocksDB 持久化 + 增量更新），P8-02 检索接口 25% 已开工，光标保持 L8**
+- [~] **L8 AI-Native**：R4 启动立项 **完成**（2026-08-09：[L8-ai-native.md](./L8-ai-native.md) 设计文档——范围/架构决策（可插拔 EmbeddingProvider + 树内确定性 fallback）/里程碑 M1–M4/R4 扩展安全与兼容门禁/KPI）；P8-01 M1 **完成**（`ontolith-ai` crate：EmbeddingProvider + FeatureHashEmbedding（FNV-1a 64 + token/字符三连 + L2 归一）+ InMemorySemanticIndex（幂等 upsert + 余弦 top-k + k 上限）+ SemanticSearchService，零新增外部依赖，8 测全绿）；P8-01 M2 **完成**（server 接线：`GET /semantic/search?q=&k=` + `POST /semantic/index?term=` + 启动自动索引（主语/谓词/宾语，cap 100k）+ 鉴权/审计复用（semantic:read/write）+ `/health`·`/admin/config` 姿态，`ONTOLITH_SEMANTIC_ENABLED` 默认关；server 49→54 测）；P8-01 M3 **完成**（RocksDB 独立 `semantic` CF + `RocksSemanticIndex` 持久索引 + 删改回流：ingest 精确 ops 差异 / SPARQL Update 存储差异对账 / 位置无关引用检查，重启持久验证；storage 52→53、ai 8→13、server 54→57 测；另修复 `InMemoryDictionary::contains_value` 变更副作用）→ **P8-01 80%，下一步 P8-02 检索 KPI 门禁收尾（确定性/相关命中/延迟预算 → ontolith-compliance 门禁 + CI 作业，仿 r2-gates），光标保持 L8**
 
 ### 本周建议
 

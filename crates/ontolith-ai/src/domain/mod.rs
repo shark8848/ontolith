@@ -80,6 +80,41 @@ pub struct SemanticHit {
 /// Semantic term index (P8-01): upsert terms, top-k nearest by cosine.
 pub trait SemanticIndex: Send + Sync {
     fn upsert(&mut self, term: &Term) -> Result<(), OntolithError>;
+
+    /// Batch upsert (idempotent). Returns the number of terms that were not
+    /// already present.
+    fn upsert_many(&mut self, terms: &[Term]) -> Result<usize, OntolithError> {
+        let mut added = 0usize;
+        for term in terms {
+            if !self.contains(term) {
+                self.upsert(term)?;
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
+    /// Remove a term from the index (idempotent: absent terms are ignored).
+    fn remove(&mut self, term: &Term) -> Result<(), OntolithError>;
+
+    /// Batch remove. Returns the number of terms that were present.
+    fn remove_many(&mut self, terms: &[Term]) -> Result<usize, OntolithError> {
+        let mut removed = 0usize;
+        for term in terms {
+            if self.contains(term) {
+                self.remove(term)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Whether the index currently holds `term`.
+    fn contains(&self, term: &Term) -> bool;
+
+    /// All currently indexed terms (used for store-diff reconciliation).
+    fn all_terms(&self) -> Vec<Term>;
+
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool;
     /// Top-k nearest entries to `query` (cosine, descending). Dimension

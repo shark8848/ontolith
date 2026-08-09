@@ -324,6 +324,11 @@ mod tests {
         let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        let semantic = crate::app::build_semantic_service(
+            &*triples,
+            &*dictionary,
+            &crate::app::SemanticConfig::default(),
+        );
         AppState::from_parts(
             storage,
             dictionary,
@@ -336,7 +341,7 @@ mod tests {
             InMemoryAuditLog::new(),
             TenantMode::Disabled,
             InferenceConfig::new(InferenceMode::ForwardChaining, 64, None),
-            crate::app::SemanticConfig::default(),
+            semantic,
         )
     }
 

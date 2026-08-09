@@ -10,7 +10,7 @@ use ontolith_cluster::domain::{ClusterNodeId, LogPayload, SessionId};
 #[cfg(feature = "raft-backend")]
 use ontolith_cluster::infrastructure::raft::{RaftClusterConfig, RaftClusterRuntime};
 use ontolith_cluster::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
-use ontolith_core::domain::{ConsistencyLevel, NodeId};
+use ontolith_core::domain::{CanonicalEncode, ConsistencyLevel, NodeId};
 use ontolith_core::error::OntolithError;
 use ontolith_observability::domain::{
     MetricKind, MetricPoint, SpanEvent, SpanName, SpanStatus, TraceContext,
@@ -95,9 +95,38 @@ impl SemanticConfig {
     }
 }
 
-/// Build the semantic search service (P8-01 M2): deterministic
-/// feature-hash embeddings + auto-index of store terms (subjects/predicates/
-/// objects, capped). Returns `None` when semantic is disabled.
+/// Collect the indexable terms of one triple (subject decoded from the
+/// dictionary; blank-node subjects are ephemeral and skipped).
+fn triple_index_terms(triple: &Triple, dictionary: &dyn DictionaryCodec) -> Vec<Term> {
+    let mut out = Vec::with_capacity(3);
+    if let Some(s) = dictionary.decode_node(triple.subject)
+        && !s.starts_with("_:")
+    {
+        out.push(Term::iri(s));
+    }
+    out.push(Term::Iri(triple.predicate.clone()));
+    out.push(triple.object.clone());
+    out
+}
+
+/// Auto-index store terms (subjects decoded / predicates / objects) into an
+/// existing service; the service's own cap bounds the result (P8-01 M3).
+fn auto_index_store_terms(
+    svc: &mut SemanticSearchService,
+    triples: &dyn TripleRepository,
+    dictionary: &dyn DictionaryCodec,
+) {
+    let terms: Vec<Term> = triples
+        .all()
+        .iter()
+        .flat_map(|t| triple_index_terms(t, dictionary))
+        .collect();
+    let _ = svc.index_terms(&terms);
+}
+
+/// Build the in-memory semantic search service (P8-01 M2): deterministic
+/// feature-hash embeddings + auto-index of store terms. Returns `None` when
+/// semantic is disabled.
 pub(crate) fn build_semantic_service(
     triples: &dyn TripleRepository,
     dictionary: &dyn DictionaryCodec,
@@ -110,32 +139,32 @@ pub(crate) fn build_semantic_service(
         FeatureHashEmbedding::new(config.dim)
             .expect("semantic embedding dimension must be non-zero"),
     ) as Arc<dyn ontolith_ai::domain::EmbeddingProvider>;
-    let mut svc = SemanticSearchService::new(provider);
-    let mut indexed = 0usize;
-    for triple in triples.all() {
-        if indexed >= config.auto_index_cap {
-            break;
-        }
-        // Predicate and object terms are directly indexable.
-        svc.index(&Term::Iri(triple.predicate.clone())).ok();
-        indexed += 1;
-        if indexed >= config.auto_index_cap {
-            break;
-        }
-        svc.index(&triple.object).ok();
-        indexed += 1;
-        if indexed >= config.auto_index_cap {
-            break;
-        }
-        // Subject: decode the dictionary id; blank nodes are ephemeral and
-        // not stable search targets, so they are skipped.
-        if let Some(s) = dictionary.decode_node(triple.subject)
-            && !s.starts_with("_:")
-        {
-            svc.index(&Term::iri(s)).ok();
-            indexed += 1;
-        }
+    let mut svc = SemanticSearchService::with_cap(provider, config.auto_index_cap);
+    auto_index_store_terms(&mut svc, triples, dictionary);
+    Some(svc)
+}
+
+/// Build the RocksDB-persistent semantic search service (P8-01 M3): the
+/// term → embedding store lives in the dedicated `semantic` column family
+/// and survives restarts; startup auto-index only adds store terms that are
+/// not yet persisted (idempotent).
+#[cfg(feature = "rocksdb-backend")]
+pub(crate) fn build_persistent_semantic_service(
+    engine: Arc<ontolith_storage::infrastructure::RocksDbStorageEngine>,
+    triples: &dyn TripleRepository,
+    dictionary: &dyn DictionaryCodec,
+    config: &SemanticConfig,
+) -> Option<SemanticSearchService> {
+    if !config.enabled {
+        return None;
     }
+    let provider = Arc::new(
+        FeatureHashEmbedding::new(config.dim)
+            .expect("semantic embedding dimension must be non-zero"),
+    ) as Arc<dyn ontolith_ai::domain::EmbeddingProvider>;
+    let mut svc =
+        SemanticSearchService::new_persistent(engine, provider, config.auto_index_cap).ok()?;
+    auto_index_store_terms(&mut svc, triples, dictionary);
     Some(svc)
 }
 
@@ -207,6 +236,7 @@ impl AppState {
         let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        let semantic = build_semantic_service(&*triples, &*dictionary, &SemanticConfig::default());
         Self::from_parts(
             storage,
             dictionary,
@@ -219,7 +249,7 @@ impl AppState {
             audit,
             tenant_mode,
             InferenceConfig::default(),
-            SemanticConfig::default(),
+            semantic,
         )
     }
 
@@ -239,6 +269,7 @@ impl AppState {
         let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        let semantic = build_semantic_service(&*triples, &*dictionary, &semantic_config);
         Self::from_parts(
             storage,
             dictionary,
@@ -251,7 +282,7 @@ impl AppState {
             audit,
             tenant_mode,
             inference,
-            semantic_config,
+            semantic,
         )
     }
 
@@ -283,6 +314,12 @@ impl AppState {
         let storage: Arc<dyn StorageEngine> = Arc::clone(&engine) as Arc<dyn StorageEngine>;
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        let semantic = build_persistent_semantic_service(
+            Arc::clone(&engine),
+            &*triples,
+            &*dictionary,
+            &SemanticConfig::default(),
+        );
         Ok(Self::from_parts(
             storage,
             dictionary,
@@ -295,7 +332,7 @@ impl AppState {
             audit,
             tenant_mode,
             InferenceConfig::default(),
-            SemanticConfig::default(),
+            semantic,
         ))
     }
 
@@ -317,6 +354,12 @@ impl AppState {
         let storage: Arc<dyn StorageEngine> = Arc::clone(&engine) as Arc<dyn StorageEngine>;
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        let semantic = build_persistent_semantic_service(
+            Arc::clone(&engine),
+            &*triples,
+            &*dictionary,
+            &semantic_config,
+        );
         Ok(Self::from_parts(
             storage,
             dictionary,
@@ -329,7 +372,7 @@ impl AppState {
             audit,
             tenant_mode,
             inference,
-            semantic_config,
+            semantic,
         ))
     }
 
@@ -346,10 +389,9 @@ impl AppState {
         audit: InMemoryAuditLog,
         tenant_mode: TenantMode,
         inference: InferenceConfig,
-        semantic_config: SemanticConfig,
+        semantic: Option<SemanticSearchService>,
     ) -> Arc<Self> {
-        let semantic = build_semantic_service(&*triples, &*dictionary, &semantic_config)
-            .map(std::sync::Mutex::new);
+        let semantic = semantic.map(std::sync::Mutex::new);
         Arc::new(Self {
             storage,
             dictionary,
@@ -388,6 +430,7 @@ impl AppState {
         let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        let semantic = build_semantic_service(&*triples, &*dictionary, &config);
         Self::from_parts(
             storage,
             dictionary,
@@ -400,7 +443,7 @@ impl AppState {
             InMemoryAuditLog::new(),
             TenantMode::Disabled,
             InferenceConfig::default(),
-            config,
+            semantic,
         )
     }
 
@@ -643,6 +686,117 @@ impl AppState {
                 svc.indexed_terms()
             ),
         ))
+    }
+
+    /// P8-01 M3 incremental update semantics (删改回流): keep the semantic
+    /// index aligned with the store after a committed write.
+    ///
+    /// `Some(ops)` (ingest path) drives an exact term diff: put ops add their
+    /// terms, delete ops evict terms that are no longer referenced anywhere
+    /// in the store. `None` (SPARQL Update, where the applied ops are not
+    /// surfaced to the gateway) falls back to a full store-diff reconcile.
+    fn reconcile_semantic(&self, ops: Option<&[WriteOperation]>) {
+        let Some(semantic) = &self.semantic else {
+            return;
+        };
+        let Ok(mut svc) = semantic.lock() else { return };
+        match ops {
+            Some(ops) => {
+                if ops
+                    .iter()
+                    .any(|op| matches!(op, WriteOperation::DeleteKey(_)))
+                {
+                    // Wholesale key deletes are rare: reconcile from the store.
+                    return self.reconcile_semantic_from_store(&mut svc);
+                }
+                let mut to_index: Vec<Term> = Vec::new();
+                let mut evict_candidates: Vec<Term> = Vec::new();
+                for op in ops {
+                    match op {
+                        WriteOperation::PutTriple(t) => {
+                            to_index.extend(triple_index_terms(t, self.dictionary.as_ref()));
+                        }
+                        WriteOperation::PutQuad(q) => {
+                            to_index
+                                .extend(triple_index_terms(&q.triple, self.dictionary.as_ref()));
+                        }
+                        WriteOperation::DeleteTriple(t) => {
+                            evict_candidates
+                                .extend(triple_index_terms(t, self.dictionary.as_ref()));
+                        }
+                        WriteOperation::DeleteQuad(q) => {
+                            evict_candidates
+                                .extend(triple_index_terms(&q.triple, self.dictionary.as_ref()));
+                        }
+                        WriteOperation::DeleteKey(_) => {}
+                    }
+                }
+                let to_evict: Vec<Term> = evict_candidates
+                    .into_iter()
+                    .filter(|t| !self.term_referenced(t))
+                    .collect();
+                let _ = svc.index_terms(&to_index);
+                let _ = svc.remove_terms(&to_evict);
+            }
+            None => self.reconcile_semantic_from_store(&mut svc),
+        }
+    }
+
+    /// Full store-diff reconcile: index every term present in the store (up
+    /// to the service cap) and evict indexed terms no longer present.
+    fn reconcile_semantic_from_store(&self, svc: &mut SemanticSearchService) {
+        let mut present: Vec<Term> = Vec::new();
+        for triple in self.triples.all() {
+            present.extend(triple_index_terms(&triple, self.dictionary.as_ref()));
+        }
+        for quad in self.storage.named_graph_quads() {
+            present.extend(triple_index_terms(&quad.triple, self.dictionary.as_ref()));
+        }
+        let indexed = svc.all_terms();
+        let present_set: std::collections::HashSet<Vec<u8>> =
+            present.iter().map(|t| t.canonical_bytes()).collect();
+        let indexed_set: std::collections::HashSet<Vec<u8>> =
+            indexed.iter().map(|t| t.canonical_bytes()).collect();
+        let to_index: Vec<Term> = present
+            .into_iter()
+            .filter(|t| !indexed_set.contains(&t.canonical_bytes()))
+            .collect();
+        let to_evict: Vec<Term> = indexed
+            .into_iter()
+            .filter(|t| !present_set.contains(&t.canonical_bytes()))
+            .collect();
+        let _ = svc.index_terms(&to_index);
+        let _ = svc.remove_terms(&to_evict);
+    }
+
+    /// Whether `term` is referenced in any position (subject/predicate/object)
+    /// of any default-graph triple or named-graph quad (delete flow-back).
+    fn term_referenced(&self, term: &Term) -> bool {
+        let storage = self.storage.as_ref();
+        let quads = storage.named_graph_quads();
+        match term {
+            Term::Iri(iri) => {
+                if !storage.triples_by_predicate_in_txn(iri, None).is_empty()
+                    || !storage.triples_by_object_in_txn(term, None).is_empty()
+                    || quads
+                        .iter()
+                        .any(|q| &q.triple.predicate == iri || &q.triple.object == term)
+                {
+                    return true;
+                }
+                // Subject position: only dictionary-known IRIs can be subjects.
+                self.dictionary.contains_value(iri.as_str()) && {
+                    let node = self.dictionary.encode_node(iri.as_str());
+                    !storage.triples_by_subject_in_txn(node, None).is_empty()
+                        || quads.iter().any(|q| q.triple.subject == node)
+                }
+            }
+            Term::Literal(_) => {
+                !storage.triples_by_object_in_txn(term, None).is_empty()
+                    || quads.iter().any(|q| &q.triple.object == term)
+            }
+            Term::BlankNode(_) => false,
+        }
     }
 
     fn health(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
@@ -1017,6 +1171,11 @@ impl AppState {
             (None, pipeline.execute_planned(&plan, &qreq))
         };
         let result = result?;
+        // P8-01 M3: SPARQL Update commits flow back into the semantic index
+        // (insert terms; evict terms no longer referenced).
+        if result.kind == QueryKind::Update {
+            self.reconcile_semantic(None);
+        }
         self.audit.record(
             now_ms(),
             ctx,
@@ -1143,6 +1302,8 @@ impl AppState {
             })?;
             self.storage.commit_transaction(txn.id)?;
             let _ = self.txns.commit(txn.id);
+            // P8-01 M3: flow the ingested terms into the semantic index.
+            self.reconcile_semantic(Some(&ops));
 
             let triple_n = ops
                 .iter()
@@ -2146,6 +2307,7 @@ mod tests {
         let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        let semantic = build_semantic_service(&*triples, &*dictionary, &SemanticConfig::default());
         AppState::from_parts(
             storage,
             dictionary,
@@ -2158,7 +2320,7 @@ mod tests {
             InMemoryAuditLog::new(),
             TenantMode::Disabled,
             inference,
-            SemanticConfig::default(),
+            semantic,
         )
     }
 
@@ -2167,6 +2329,7 @@ mod tests {
         let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        let semantic = build_semantic_service(&*triples, &*dictionary, &SemanticConfig::default());
         AppState::from_parts(
             storage,
             dictionary,
@@ -2183,7 +2346,7 @@ mod tests {
             InMemoryAuditLog::new(),
             TenantMode::Enforced,
             inference,
-            SemanticConfig::default(),
+            semantic,
         )
     }
 
@@ -3066,6 +3229,49 @@ mod tests {
             }
         }
 
+        fn search(q: &str) -> HttpRequest {
+            let mut query = HashMap::new();
+            query.insert("q".to_owned(), q.to_owned());
+            HttpRequest {
+                method: "GET".to_owned(),
+                path: "/semantic/search".to_owned(),
+                query,
+                headers: HashMap::new(),
+                body: Vec::new(),
+            }
+        }
+
+        fn ingest_nt(state: &Arc<AppState>, body: &[u8]) -> HttpResponse {
+            dispatch_for_test(
+                state,
+                HttpRequest {
+                    method: "POST".to_owned(),
+                    path: "/data/nt".to_owned(),
+                    query: HashMap::new(),
+                    headers: HashMap::new(),
+                    body: body.to_vec(),
+                },
+            )
+        }
+
+        fn sparql_update(state: &Arc<AppState>, query_text: &str) -> HttpResponse {
+            let mut headers = HashMap::new();
+            headers.insert(
+                "content-type".to_owned(),
+                "application/sparql-query".to_owned(),
+            );
+            dispatch_for_test(
+                state,
+                HttpRequest {
+                    method: "POST".to_owned(),
+                    path: "/sparql".to_owned(),
+                    query: HashMap::new(),
+                    headers,
+                    body: query_text.as_bytes().to_vec(),
+                },
+            )
+        }
+
         fn semantic_config() -> SemanticConfig {
             SemanticConfig {
                 enabled: true,
@@ -3207,6 +3413,7 @@ mod tests {
                 )
                 .unwrap();
             storage.commit_transaction(txn_id).unwrap();
+            let semantic = build_semantic_service(&*triples, &*dictionary, &semantic_config());
             let state = AppState::from_parts(
                 storage,
                 dictionary,
@@ -3219,7 +3426,7 @@ mod tests {
                 InMemoryAuditLog::new(),
                 TenantMode::Disabled,
                 InferenceConfig::default(),
-                semantic_config(),
+                semantic,
             );
             let mut q = HashMap::new();
             q.insert("q".to_owned(), "alice".to_owned());
@@ -3238,6 +3445,150 @@ mod tests {
             assert!(
                 body.contains("urn:ex:alice"),
                 "auto-indexed object term should be searchable: {body}"
+            );
+        }
+
+        #[test]
+        fn semantic_ingest_indexes_and_sparql_delete_evicts() {
+            let state = AppState::new_memory_with_semantic(
+                "127.0.0.1:8080".to_owned(),
+                HeaderAuthenticator::default(),
+                semantic_config(),
+            );
+            let ingest = ingest_nt(
+                &state,
+                b"<urn:ex:sparql_query> <urn:ex:rdf_graph> <urn:ex:unrelated_thing> .",
+            );
+            assert_eq!(
+                ingest.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&ingest.body)
+            );
+
+            let resp = dispatch_for_test(&state, search("sparql"));
+            assert_eq!(resp.status, 200);
+            let body = String::from_utf8_lossy(&resp.body);
+            assert!(
+                body.contains("urn:ex:sparql_query"),
+                "ingest should index terms: {body}"
+            );
+
+            let del = sparql_update(
+                &state,
+                "DELETE DATA { <urn:ex:sparql_query> <urn:ex:rdf_graph> <urn:ex:unrelated_thing> }",
+            );
+            assert_eq!(del.status, 200, "{}", String::from_utf8_lossy(&del.body));
+
+            let resp2 = dispatch_for_test(&state, search("sparql"));
+            let body2 = String::from_utf8_lossy(&resp2.body);
+            assert!(
+                !body2.contains("urn:ex:sparql_query"),
+                "SPARQL DELETE should evict orphaned terms: {body2}"
+            );
+            assert!(body2.contains("\"indexed\":0"), "body={body2}");
+        }
+
+        #[test]
+        fn semantic_delete_keeps_terms_still_referenced() {
+            let state = AppState::new_memory_with_semantic(
+                "127.0.0.1:8080".to_owned(),
+                HeaderAuthenticator::default(),
+                semantic_config(),
+            );
+            let ingest = ingest_nt(
+                &state,
+                b"<urn:ex:a> <urn:ex:knows> <urn:ex:alice> .\n<urn:ex:b> <urn:ex:knows> <urn:ex:alice> .",
+            );
+            assert_eq!(
+                ingest.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&ingest.body)
+            );
+
+            let del = sparql_update(
+                &state,
+                "DELETE DATA { <urn:ex:a> <urn:ex:knows> <urn:ex:alice> }",
+            );
+            assert_eq!(del.status, 200, "{}", String::from_utf8_lossy(&del.body));
+
+            // Shared terms must survive: alice and knows are still referenced.
+            let resp = dispatch_for_test(&state, search("alice"));
+            let body = String::from_utf8_lossy(&resp.body);
+            assert!(body.contains("urn:ex:alice"), "shared object stays: {body}");
+            let resp2 = dispatch_for_test(&state, search("knows"));
+            let body2 = String::from_utf8_lossy(&resp2.body);
+            assert!(
+                body2.contains("urn:ex:knows"),
+                "shared predicate stays: {body2}"
+            );
+        }
+
+        #[cfg(feature = "rocksdb-backend")]
+        #[test]
+        fn semantic_index_persists_across_restart() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("db");
+            let config = semantic_config();
+            let builder = |p: std::path::PathBuf| {
+                AppState::new_rocksdb_with_cluster(
+                    "127.0.0.1:8080".to_owned(),
+                    HeaderAuthenticator::default(),
+                    p,
+                    InMemoryAuditLog::new(),
+                    TenantMode::Disabled,
+                    default_cluster(),
+                    InferenceConfig::default(),
+                    config.clone(),
+                )
+                .expect("open rocksdb state")
+            };
+            {
+                let state = builder(path.clone());
+                let ingest = ingest_nt(
+                    &state,
+                    b"<urn:ex:alice> <urn:ex:knows> \"hello semantic\" .",
+                );
+                assert_eq!(
+                    ingest.status,
+                    200,
+                    "{}",
+                    String::from_utf8_lossy(&ingest.body)
+                );
+                // Explicitly index a term that is NOT in the store: only
+                // durable persistence (not startup auto-index) can restore it.
+                let mut q = HashMap::new();
+                q.insert("term".to_owned(), "urn:ex:persisted_extra".to_owned());
+                let idx = dispatch_for_test(
+                    &state,
+                    HttpRequest {
+                        method: "POST".to_owned(),
+                        path: "/semantic/index".to_owned(),
+                        query: q,
+                        headers: HashMap::new(),
+                        body: Vec::new(),
+                    },
+                );
+                assert_eq!(idx.status, 200, "{}", String::from_utf8_lossy(&idx.body));
+                let resp = dispatch_for_test(&state, search("persisted"));
+                assert!(
+                    String::from_utf8_lossy(&resp.body).contains("urn:ex:persisted_extra"),
+                    "pre-restart search should hit"
+                );
+            }
+            let state = builder(path);
+            let resp = dispatch_for_test(&state, search("persisted"));
+            let body = String::from_utf8_lossy(&resp.body);
+            assert!(
+                body.contains("urn:ex:persisted_extra"),
+                "persisted index must survive restart: {body}"
+            );
+            let resp2 = dispatch_for_test(&state, search("alice"));
+            let body2 = String::from_utf8_lossy(&resp2.body);
+            assert!(
+                body2.contains("urn:ex:alice"),
+                "store term after restart: {body2}"
             );
         }
     }

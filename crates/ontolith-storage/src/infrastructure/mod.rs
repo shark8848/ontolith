@@ -21,7 +21,11 @@ mod indexes;
 mod rocks;
 
 #[cfg(feature = "rocksdb-backend")]
+pub use codec::{decode_term, encode_term};
+#[cfg(feature = "rocksdb-backend")]
 pub use rocks::{RaftCfOp, RocksDbStorageEngine, open_rocksdb_engine};
+#[cfg(feature = "rocksdb-backend")]
+pub use rocks::{SemanticCfEntry, SemanticCfOp};
 
 #[derive(Default)]
 struct DictionaryState {
@@ -69,6 +73,15 @@ impl DictionaryCodec for InMemoryDictionary {
     fn decode_node(&self, node_id: NodeId) -> Option<String> {
         let guard = self.state.read().ok()?;
         guard.node_to_value.get(&node_id).cloned()
+    }
+
+    /// Non-mutating membership probe (overrides the trait default, which
+    /// would insert unknown values via [`Self::encode_node`]).
+    fn contains_value(&self, value: &str) -> bool {
+        self.state
+            .read()
+            .map(|guard| guard.value_to_node.contains_key(value))
+            .unwrap_or(false)
     }
 }
 

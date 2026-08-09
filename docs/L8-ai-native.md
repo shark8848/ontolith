@@ -1,10 +1,10 @@
 # L8 — AI-Native 语义扩展立项
 
 文档 ID: AI-L8-0001  
-版本: 0.1.1  
-状态: Active（R4 立项完成；P8-01 M1 语义核心 + M2 server 接线完成）  
+版本: 0.1.2  
+状态: Active（R4 立项完成；P8-01 M1 语义核心 + M2 server 接线 + M3 持久化与增量更新完成）  
 日期: 2026-08-09  
-对应代码: `crates/ontolith-ai`（新建）  
+对应代码: `crates/ontolith-ai` + `crates/ontolith-storage`（`semantic` CF）  
 计划: [Ontolith_Development_Plan.zh-CN.md](./Ontolith_Development_Plan.zh-CN.md) §6 R4 / Phase 8
 
 ---
@@ -53,11 +53,25 @@ EmbeddingProvider (trait)
 
 ### 3.2 语义索引与检索（P8-02 接口基础）
 
-- `SemanticIndex`：`term -> Embedding` 线性存储（内存首版；RocksDB 持久化留待
-  P8-02 里程碑，避免本期引入存储面耦合）。
+- `SemanticIndex`：`term -> Embedding` 线性存储。M1 内存首版；M3 落盘为
+  `ontolith-storage` 独立 `semantic` 列族（仿 L4 `raft` CF 的字节级原语
+  `semantic_cf_*`），`crates/ontolith-ai` 内 `RocksSemanticIndex` 经该原语读写，
+  向量数据与 RDF 数据面物理隔离（R4 门禁 4）。
 - `SemanticSearchService`：查询文本 → embedding → top-k 余弦相似度 → 返回
-  `(Term, score)`；k 有上限护栏（默认 10，硬上限 100）。
+  `(Term, score)`；k 有上限护栏（默认 10，硬上限 100）；索引容量上限
+  `AUTO_INDEX_CAP` 在服务内统一执行（启动自动索引 / 显式 POST / 写回流共用）。
 - 空索引 / 维度不匹配 / 非有限值（NaN/Inf）显式报错，不静默吞掉。
+
+### 3.4 增量更新语义（M3，删改回流）
+
+- 写提交后回流：ingest（`POST /data/*`）携带精确 `WriteOperation` 列表 → 精确
+  术语差异（Put 项入索引，Delete 项在“全位置引用检查”后驱逐）；SPARQL Update
+  未向网关暴露操作列表 → 全量存储差异对账（扫描存储术语集合与索引术语集合，
+  新增入索引、消失项驱逐，仅写变化项）。
+- 引用检查是位置无关的：一个 IRI 只要仍出现在任何三元组/四元组的
+  主语/谓词/宾语任一位置即保留索引；仅当全无引用才驱逐（多三元组共享术语安全）。
+- 删除与插入同一批次时按提交后状态判定，天然支持“删除+重建”更新形态。
+- 索引容量上限同样约束回流（超出部分跳过，与启动自动索引一致）。
 
 ### 3.3 扩展安全与兼容门禁（R4 判据）
 
@@ -73,11 +87,11 @@ EmbeddingProvider (trait)
 |--------|------|------|
 | M1（完成 2026-08-09） | `ontolith-ai` crate：EmbeddingProvider 抽象 + FeatureHashEmbedding + 余弦相似度 + 内存语义索引 + top-k 检索 + 测试 | crate 8 测全绿 |
 | M2（完成 2026-08-09） | server 接线：`/semantic/search` + `/semantic/index` HTTP + 启动自动索引 + 鉴权/审计复用 + `/health`·`/admin/config` 姿态 | server 54 测（+5 语义） |
-| M3 | 持久化语义索引（RocksDB 独立 CF）+ 增量更新语义 | storage 复用 + 重启持久测试 |
+| M3（完成 2026-08-09） | 持久化语义索引（RocksDB 独立 `semantic` CF + `RocksSemanticIndex`）+ 增量更新语义（删改回流：ingest 精确差异 + SPARQL Update 存储差异对账 + 位置无关引用检查）；另修复 `InMemoryDictionary::contains_value` 变更副作用（非破坏性成员探测） | storage 52→53 测（semantic CF 重启往返）、ai 8→13 测（Rocks 索引重启持久/批删）、server 54→57 测（ingest 回流 + SPARQL DELETE 驱逐 + 共享术语保留 + RocksDB 重启持久） |
 | M4 | P8-03 代理集成扩展点：plugin-api `Retrieval` 能力 + AgentTool 抽象 | plugin-api + 示例工具 |
 | R4 | 检索 KPI 与扩展安全/兼容门禁全绿 | ACC-R4 验收包 |
 
-## 7. 环境契约与 API（P8-01 M2）
+## 7. 环境契约与 API（P8-01 M2/M3）
 
 | 环境变量 | 默认 | 说明 |
 |----------|------|------|
@@ -91,7 +105,13 @@ API（鉴权/审计复用 L5 模式，`semantic:read` / `semantic:write`）：
 - `POST /semantic/index?term=<iri>` 或 `?terms=<iri1>,<iri2>`（URL 编码）→ `{"indexed":n,"total":m}`；幂等去重。
 - `/health` 与 `/admin/config` 暴露 `semantic: on|off` 姿态。
 
-已知限制（M2）：增量索引仅限显式 `POST /semantic/index` 与启动自动索引；删除/更新不回流索引（M3 持久化 + 增量更新语义解决）。
+持久化契约（M3，RocksDB 后端）：术语→向量存储于独立 `semantic` 列族，键为
+RFC-0001 规范编码（`encode_term`），值为 `u32 BE 维度 ‖ f32 LE 向量`；写走引擎
+耐久路径（默认 fsync WAL），重启后索引完整恢复（含非存储术语，如显式
+`POST /semantic/index` 的条目）。内存后端保持原有行为。
+
+已解决限制（M2→M3）：删除/更新已回流索引——ingest 与 SPARQL Update 提交后，
+新术语入索引、无引用术语被驱逐；重启后索引持久不丢。
 
 ## 5. KPI（R4 检索与语义集成）
 

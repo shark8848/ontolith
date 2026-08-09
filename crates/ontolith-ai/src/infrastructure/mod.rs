@@ -1,4 +1,5 @@
-//! Infrastructure: deterministic feature-hash embedding + in-memory index.
+//! Infrastructure: deterministic feature-hash embedding + in-memory index
+//! and (P8-01 M3) the RocksDB-persisted semantic index.
 
 use std::sync::Arc;
 
@@ -9,6 +10,12 @@ use ontolith_rdf::domain::Term;
 use crate::domain::{
     DEFAULT_EMBEDDING_DIM, Embedding, EmbeddingProvider, SemanticHit, SemanticIndex,
 };
+
+#[cfg(feature = "rocksdb-backend")]
+mod rocks;
+
+#[cfg(feature = "rocksdb-backend")]
+pub use rocks::RocksSemanticIndex;
 
 /// Deterministic feature-hash embedding (P8-01 fallback, zero external deps).
 ///
@@ -171,6 +178,19 @@ impl SemanticIndex for InMemorySemanticIndex {
         let embedding = self.provider.embed_term(term)?;
         self.entries.push((term.clone(), embedding));
         Ok(())
+    }
+
+    fn remove(&mut self, term: &Term) -> Result<(), OntolithError> {
+        self.entries.retain(|(t, _)| t != term);
+        Ok(())
+    }
+
+    fn contains(&self, term: &Term) -> bool {
+        self.entries.iter().any(|(t, _)| t == term)
+    }
+
+    fn all_terms(&self) -> Vec<Term> {
+        self.entries.iter().map(|(t, _)| t.clone()).collect()
     }
 
     fn len(&self) -> usize {

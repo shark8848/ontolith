@@ -3,6 +3,14 @@ name = "ontolith-ai"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["rocksdb-backend"]
+rocksdb-backend = ["ontolith-storage/rocksdb-backend"]
+
 [dependencies]
 ontolith-core = { path = "../ontolith-core" }
 ontolith-rdf = { path = "../ontolith-rdf" }
+ontolith-storage = { path = "../ontolith-storage", default-features = false }
+
+[dev-dependencies]
+tempfile = "3.14.0"

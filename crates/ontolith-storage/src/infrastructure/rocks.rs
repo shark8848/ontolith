@@ -47,6 +47,11 @@ const CF_VERSIONS_QUADS: &str = "versions_quads";
 /// log entries, hard state (vote/committed/last_applied), and snapshot refs.
 /// Accessed only through the `raft_cf_*` byte-level primitives below.
 const CF_RAFT: &str = "raft";
+/// Dedicated column family for the L8 semantic index (P8-01 M3): persisted
+/// term → embedding entries of the semantic search index, isolated from the
+/// RDF data plane. Accessed only through the `semantic_cf_*` byte-level
+/// primitives below.
+const CF_SEMANTIC: &str = "semantic";
 
 const META_NEXT_NODE: &[u8] = b"next_node_id";
 const META_WAL_SEQ: &[u8] = b"wal_seq";
@@ -145,6 +150,14 @@ pub enum RaftCfOp {
 /// Owned key/value pair read back from the `raft` CF scans.
 pub type RaftCfEntry = (Vec<u8>, Vec<u8>);
 
+/// One write operation for the `semantic` CF batch API (P8-01 M3). Shares
+/// the same op shape as [`RaftCfOp`]; kept as a distinct name so call sites
+/// stay readable and the CFs stay independent.
+pub type SemanticCfOp = RaftCfOp;
+
+/// Owned key/value pair read back from the `semantic` CF scans.
+pub type SemanticCfEntry = RaftCfEntry;
+
 pub struct RocksDbStorageEngine {
     db: Arc<DB>,
     path: PathBuf,
@@ -215,6 +228,7 @@ impl RocksDbStorageEngine {
             CF_VERSIONS,
             CF_VERSIONS_QUADS,
             CF_RAFT,
+            CF_SEMANTIC,
         ]
         .into_iter()
         .map(|name| {
@@ -396,6 +410,77 @@ impl RocksDbStorageEngine {
         let mut to = prefix.to_vec();
         to.push(0xFF);
         self.raft_cf_scan_range(prefix, &to)
+    }
+
+    /// Put one byte blob into the dedicated `semantic` CF (durable write).
+    pub fn semantic_cf_put(&self, key: &[u8], value: &[u8]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_SEMANTIC)?;
+        let mut batch = RocksBatch::default();
+        batch.put_cf(cf, key, value);
+        self.durable_write(batch)
+    }
+
+    /// Apply an ordered set of writes to the `semantic` CF in one durable
+    /// batch (atomic within the batch).
+    pub fn semantic_cf_write_batch(&self, ops: &[SemanticCfOp]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_SEMANTIC)?;
+        let mut batch = RocksBatch::default();
+        for op in ops {
+            match op {
+                SemanticCfOp::Put(key, value) => batch.put_cf(cf, key, value),
+                SemanticCfOp::Delete(key) => batch.delete_cf(cf, key),
+                SemanticCfOp::DeleteRange(from, to) => batch.delete_range_cf(cf, from, to),
+            }
+        }
+        self.durable_write(batch)
+    }
+
+    /// Read one byte blob from the `semantic` CF.
+    pub fn semantic_cf_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, OntolithError> {
+        let cf = self.cf(CF_SEMANTIC)?;
+        self.db.get_cf(cf, key).map_err(rocks_err)
+    }
+
+    /// Delete one key from the `semantic` CF (durable write).
+    pub fn semantic_cf_delete(&self, key: &[u8]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_SEMANTIC)?;
+        let mut batch = RocksBatch::default();
+        batch.delete_cf(cf, key);
+        self.durable_write(batch)
+    }
+
+    /// Scan the `semantic` CF for keys in `[from, to)`, returning owned
+    /// key/value pairs in RocksDB byte order.
+    pub fn semantic_cf_scan_range(
+        &self,
+        from: &[u8],
+        to: &[u8],
+    ) -> Result<Vec<SemanticCfEntry>, OntolithError> {
+        let cf = self.cf(CF_SEMANTIC)?;
+        let iter = self
+            .db
+            .iterator_cf(cf, IteratorMode::From(from, Direction::Forward));
+        let mut out = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(rocks_err)?;
+            if key.as_ref() >= to {
+                break;
+            }
+            out.push((key.to_vec(), value.to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// Scan the `semantic` CF for all keys (index reconstruction).
+    pub fn semantic_cf_scan_all(&self) -> Result<Vec<SemanticCfEntry>, OntolithError> {
+        let cf = self.cf(CF_SEMANTIC)?;
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        let mut out = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(rocks_err)?;
+            out.push((key.to_vec(), value.to_vec()));
+        }
+        Ok(out)
     }
 
     /// Write a batch with the configured durability: fsync the WAL when
@@ -2608,5 +2693,46 @@ mod tests {
         let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
         assert_eq!(engine.stats().triple_count, 0);
         assert!(engine.default_graph_triples().is_empty());
+    }
+
+    #[test]
+    fn semantic_cf_roundtrip_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let key_a = b"term/a";
+        let key_b = b"term/b";
+        {
+            let engine = RocksDbStorageEngine::open(&path).expect("open");
+            // Single put + batched writes share the CF.
+            engine.semantic_cf_put(key_a, b"embedding-a").unwrap();
+            engine
+                .semantic_cf_write_batch(&[
+                    SemanticCfOp::Put(key_b.to_vec(), b"embedding-b".to_vec()),
+                    SemanticCfOp::Put(b"term/c".to_vec(), b"embedding-c".to_vec()),
+                ])
+                .unwrap();
+            assert_eq!(
+                engine.semantic_cf_get(key_a).unwrap().as_deref(),
+                Some(&b"embedding-a"[..])
+            );
+            assert_eq!(engine.semantic_cf_scan_all().unwrap().len(), 3);
+            // Range scan is [from, to): only the two keys under `term/` below
+            // the exclusive bound show up.
+            let range = engine
+                .semantic_cf_scan_range(b"term/", b"term/\xFF")
+                .unwrap();
+            assert_eq!(range.len(), 3);
+            // Delete removes the key durably.
+            engine.semantic_cf_delete(key_b).unwrap();
+            assert!(engine.semantic_cf_get(key_b).unwrap().is_none());
+        }
+        // Reopen: remaining entries survive restart.
+        let engine = RocksDbStorageEngine::open(&path).expect("reopen");
+        assert_eq!(
+            engine.semantic_cf_get(key_a).unwrap().as_deref(),
+            Some(&b"embedding-a"[..])
+        );
+        assert!(engine.semantic_cf_get(key_b).unwrap().is_none());
+        assert_eq!(engine.semantic_cf_scan_all().unwrap().len(), 2);
     }
 }

@@ -1048,6 +1048,8 @@ version = "0.1.0"
 dependencies = [
  "ontolith-core",
  "ontolith-rdf",
+ "ontolith-storage",
+ "tempfile",
 ]
 
 [[package]]
