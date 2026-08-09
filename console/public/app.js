@@ -33,8 +33,8 @@ async function api(path, opts = {}) {
 // ---------- cluster state ----------
 let clusters = [];
 let current = null;
-const gw = (p, o) => api(`/api/gw/${current}/${p}`, o);
-const mg = (p, o) => api(`/api/mg/${current}/${p}`, o);
+const gw = (p, o) => api(`/api/gw/${current.id}/${p}`, o);
+const mg = (p, o) => api(`/api/mg/${current.id}/${p}`, o);
 
 let refreshMs = 5000;
 let activeTab = 'overview';
@@ -118,7 +118,7 @@ async function render() {
 async function probeStatus() {
   if (!current) return;
   let health;
-  try { health = await api(`/api/health?cluster=${current}`); } catch { return; }
+  try { health = await api(`/api/health?cluster=${current.id}`); } catch { return; }
   if (health.refresh_ms) refreshMs = health.refresh_ms;
   const gwOk = health.gateway && health.gateway.status === 'ok';
   const mgOk = health.management && health.management.status === 'ok';
@@ -126,8 +126,8 @@ async function probeStatus() {
   setDot('dot-mg', mgOk ? 'ok' : 'bad');
   const note = $('#refresh-note');
   note.textContent = gwOk && mgOk
-    ? `${current} 可达 · 自动刷新 ${refreshMs}ms`
-    : `${current} 部分组件不可达`;
+    ? `${current.name} 可达 · 自动刷新 ${refreshMs}ms`
+    : `${current.name} 部分组件不可达`;
 }
 function setDot(id, state) { $('#' + id).className = 'dot ' + state; }
 
@@ -160,7 +160,7 @@ async function renderOverview() {
     gw('health').catch(e => ({ error: e.message })),
     mg('admin/health').catch(e => ({ error: e.message })),
     mg('admin/monitoring').catch(e => ({ error: e.message })),
-    api(`/api/gw/${current}/metrics`).catch(() => ''),
+    api(`/api/gw/${current.id}/metrics`).catch(() => ''),
   ]);
   const cards = el('div', 'cards');
   cards.append(kvCard('Gateway', [
@@ -205,7 +205,7 @@ let chartCache = {};
 async function renderMonitor() {
   const sec = $('#tab-monitor');
   sec.replaceChildren();
-  const res = await api(`/api/history?cluster=${current}`);
+  const res = await api(`/api/history?cluster=${current.id}`);
   const pts = res.points || [];
   if (pts.length < 2) { sec.append(el('p', 'muted', '历史采样中（至少需要 2 个采样点）…')); return; }
   const series = (key) => pts.map((p, i) => ({ t: p.ts, v: p[key] ?? 0 }));
@@ -309,7 +309,7 @@ function buildSparqlTab() {
       out.replaceChildren();
       let res;
       if (ch.value === 'gRPC') {
-        res = await api(`/api/grpc/${current}/query`, {
+        res = await api(`/api/grpc/${current.id}/query`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ query: q, explain }),
@@ -318,7 +318,7 @@ function buildSparqlTab() {
         else renderSparqlResult(out, res);
         msg.textContent = 'gRPC 通道';
       } else {
-        res = await api(`/api/gw/${current}/` + (explain ? 'explain' : 'sparql') + '?query=' + encodeURIComponent(q));
+        res = await api(`/api/gw/${current.id}/` + (explain ? 'explain' : 'sparql') + '?query=' + encodeURIComponent(q));
         if (explain) out.append(el('pre', 'json', typeof res === 'string' ? res : JSON.stringify(res, null, 2)));
         else renderSparqlResult(out, res);
         msg.textContent = 'HTTP 通道';
