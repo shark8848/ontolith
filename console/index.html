@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ontolith Console</title>
 <link rel="stylesheet" href="/src/style.css">
+<script>document.documentElement.dataset.theme = localStorage.getItem("consoleTheme") || "midnight";</script>
 </head>
 <body>
 <div class="layout">
@@ -33,6 +34,10 @@
         <button data-tab="traces"><svg class="icon"><use href="#icon-traces"></use></svg>追踪</button>
         <button data-tab="config"><svg class="icon"><use href="#icon-config"></use></svg>配置</button>
       </nav>
+      <div class="sidebar-foot">
+        <button id="btn-settings" title="界面设置"><svg class="icon"><use href="#icon-palette"></use></svg>界面设置</button>
+        <button id="btn-logout" title="退出登录"><svg class="icon"><use href="#icon-logout"></use></svg>退出</button>
+      </div>
     </aside>
     <main>
       <section id="tab-overview" class="tab active"></section>
@@ -89,8 +94,27 @@
   <symbol id="icon-config" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="12" cy="12" r="3"></circle>
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+  <symbol id="icon-palette" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 22a10 10 0 1 1 10-10c0 2.21-1.79 4-4 4h-2a2 2 0 0 0-2 2 2 2 0 0 1-2 2z"></path>
+    <circle cx="7.5" cy="11.5" r="1"></circle><circle cx="11" cy="7.5" r="1"></circle><circle cx="16" cy="8.5" r="1"></circle>
+  </symbol>
+  <symbol id="icon-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+    <polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line>
+  </symbol>
   </symbol>
 </svg>
+<div id="settings-overlay" class="hidden">
+  <div class="settings-card">
+    <h2>界面设置</h2>
+    <p class="muted">选择界面样式，即时生效并记住选择。</p>
+    <div class="themes" id="theme-grid"></div>
+    <div class="row">
+      <span class="spacer"></span>
+      <button class="run secondary" id="settings-close">关闭</button>
+    </div>
+  </div>
+</div>
 <div id="login-overlay" class="hidden">
   <div class="login-card">
     <h2>Ontolith Console 访问令牌</h2>

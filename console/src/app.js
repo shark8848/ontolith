@@ -40,8 +40,54 @@ let refreshMs = 5000;
 let activeTab = 'overview';
 let autoTimer = null;
 
+// ---------- themes / UI settings (bottom-left config menu) ----------
+const THEMES = [
+  { id: 'midnight', name: '午夜蓝', desc: '深邃蓝黑 · 默认', swatch: ['#0f1419', '#171d26', '#4da3ff', '#2ecc71'] },
+  { id: 'graphite', name: '石墨', desc: '冷灰质感', swatch: ['#111418', '#191d22', '#58a6ff', '#2ecc71'] },
+  { id: 'forest', name: '森林', desc: '墨绿静谧', swatch: ['#0c1512', '#13211b', '#43c98a', '#2ecc71'] },
+  { id: 'dusk', name: '暮紫', desc: '蓝紫暮色', swatch: ['#110f1b', '#181526', '#9d7bff', '#2ecc71'] },
+  { id: 'paper', name: '纸白', desc: '浅色明亮', swatch: ['#f2f5f9', '#ffffff', '#4d94ff', '#1f9d57'] },
+];
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#4da3ff';
+}
+function applyTheme(id) {
+  document.documentElement.dataset.theme = id;
+  localStorage.setItem('consoleTheme', id);
+  document.querySelectorAll('.theme-card').forEach(c => c.classList.toggle('active', c.dataset.theme === id));
+}
+function buildThemeGrid() {
+  const grid = $('#theme-grid');
+  grid.replaceChildren();
+  for (const t of THEMES) {
+    const card = el('button', 'theme-card' + (t.id === (localStorage.getItem('consoleTheme') || 'midnight') ? ' active' : ''));
+    card.dataset.theme = t.id;
+    const sw = el('span', 'theme-swatch');
+    for (const c of t.swatch) {
+      const chip = document.createElement('span');
+      chip.style.background = c;
+      sw.append(chip);
+    }
+    card.append(sw);
+    const name = el('b', null, t.name);
+    card.append(name, el('small', null, t.desc));
+    card.addEventListener('click', () => applyTheme(t.id));
+    grid.append(card);
+  }
+}
+function openSettings() { buildThemeGrid(); $('#settings-overlay').classList.remove('hidden'); }
+function closeSettings() { $('#settings-overlay').classList.add('hidden'); }
+function logout() {
+  stopAuto();
+  consoleToken = '';
+  localStorage.removeItem('consoleToken');
+  closeSettings();
+  showLogin();
+}
+
 // ---------- login ----------
 function showLogin() {
+  closeSettings();
   const ov = $('#login-overlay');
   ov.classList.remove('hidden');
   $('#login-token').focus();
@@ -213,11 +259,11 @@ async function renderMonitor() {
   const series = (key) => pts.map((p, i) => ({ t: p.ts, v: p[key] ?? 0 }));
   const charts = el('div', 'charts');
   charts.append(chartCard('请求速率（req/refresh 窗口）', rateSeries(series('requests_total'))));
-  charts.append(chartCard('SPARQL 请求 vs 错误', twoSeries(series('sparql_total'), series('sparql_errors'), '#4da3ff', '#e74c3c')));
+  charts.append(chartCard('SPARQL 请求 vs 错误', twoSeries(series('sparql_total'), series('sparql_errors'), cssVar('--accent'), cssVar('--bad'))));
   charts.append(chartCard('平均延迟（ms）', series('latency_avg_ms')));
-  charts.append(chartCard('三元组总量', series('triples'), '#2ecc71'));
+  charts.append(chartCard('三元组总量', series('triples'), cssVar('--ok')));
   charts.append(chartCard('commit_index', series('commit_index')));
-  charts.append(chartCard('节点健康（healthy/nodes）', pts.map((p, i) => ({ t: p.ts, v: p.healthy ?? 0, max: p.nodes ?? 1 })), '#f1c40f'));
+  charts.append(chartCard('节点健康（healthy/nodes）', pts.map((p, i) => ({ t: p.ts, v: p.healthy ?? 0, max: p.nodes ?? 1 })), cssVar('--warn')));
   sec.append(charts);
 }
 function rateSeries(s) {
@@ -226,7 +272,7 @@ function rateSeries(s) {
 function twoSeries(a, b, colorA, colorB) {
   return [{ points: a, color: colorA }, { points: b, color: colorB }];
 }
-function chartCard(title, series, color = '#4da3ff') {
+function chartCard(title, series, color = cssVar('--accent')) {
   const card = el('div', 'chart-card');
   card.append(el('h3', null, title));
   const cv = el('canvas', 'chart');
@@ -234,7 +280,7 @@ function chartCard(title, series, color = '#4da3ff') {
   setTimeout(() => drawChart(cv, series, color), 0);
   return card;
 }
-function drawChart(cv, series, color = '#4da3ff') {
+function drawChart(cv, series, color = cssVar('--accent')) {
   const list = series.length > 0 && Array.isArray(series[0].points) ? series : [{ points: series, color }];
   const all = list.flatMap(s => s.points);
   if (all.length < 2) return;
@@ -259,7 +305,7 @@ function drawChart(cv, series, color = '#4da3ff') {
     ctx.stroke();
   }
   ctx.font = '10px ui-monospace, monospace';
-  ctx.fillStyle = '#8b98a9';
+  ctx.fillStyle = cssVar('--muted');
   if (all[0]) ctx.fillText(fmtTime(all[0].t), pad, h - 2);
   let labelX = w - pad;
   for (const s of list) {
@@ -643,6 +689,11 @@ async function renderConfig() {
 
 // ---------- boot ----------
 (async () => {
+  applyTheme(localStorage.getItem('consoleTheme') || 'midnight');
+  $('#btn-settings').addEventListener('click', openSettings);
+  $('#btn-logout').addEventListener('click', logout);
+  $('#settings-close').addEventListener('click', closeSettings);
+  $('#settings-overlay').addEventListener('click', e => { if (e.target === e.currentTarget) closeSettings(); });
   await initClusters();
   buildSparqlTab();
   setInterval(probeStatus, refreshMs > 0 ? refreshMs : 5000);
