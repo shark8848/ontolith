@@ -38,6 +38,7 @@ const cfg = {
   refreshMs: Math.max(1000, Number(process.env.CONSOLE_REFRESH_MS || 5000)),
   historyPoints: Math.max(10, Number(process.env.CONSOLE_HISTORY_POINTS || 120)),
   bodyLimit: 2 * 1024 * 1024,
+  proxyTimeoutMs: Math.max(5000, Number(process.env.CONSOLE_PROXY_TIMEOUT_MS || 60000)),
   tlsCert: process.env.CONSOLE_TLS_CERT || '',
   tlsKey: process.env.CONSOLE_TLS_KEY || '',
   authToken: process.env.CONSOLE_AUTH_TOKEN || '',
@@ -132,7 +133,7 @@ async function proxy(req, res, cluster, path, method) {
   }
   let up;
   try {
-    up = await fetch(url, { method, headers, body, redirect: 'manual', signal: AbortSignal.timeout(15000) });
+    up = await fetch(url, { method, headers, body, redirect: 'manual', signal: AbortSignal.timeout(cfg.proxyTimeoutMs) });
   } catch (err) {
     return sendJson(res, 502, { error: 'upstream unreachable', detail: String(err.message || err) });
   }

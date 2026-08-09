@@ -344,7 +344,7 @@ async function renderInfer() {
     if (!body) { shaclMsg.textContent = '请输入 Turtle shapes'; return; }
     runBtn.disabled = true; shaclMsg.textContent = '校验中…';
     try {
-      const res = await gw('validate/shacl', { method: 'POST', headers: { 'content-type': 'text/turtle' }, body });
+      const res = await gw('validate/shacl?limit=1000', { method: 'POST', headers: { 'content-type': 'text/turtle' }, body });
       localStorage.setItem('consoleShaclShapes', body);
       shaclMsg.textContent = res.conforms ? '✓ conforms' : `✗ 不通过（${res.result_count} 条违规）`;
       shaclOut.textContent = JSON.stringify({

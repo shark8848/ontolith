@@ -1411,7 +1411,7 @@ impl AppState {
             .query
             .get("limit")
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(5000)
+            .unwrap_or(1000)
             .min(50_000);
         let dict = self.dictionary.as_ref();
         let parsed = parse_turtle_doc(text, dict)?;

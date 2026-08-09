@@ -51,6 +51,7 @@ Vite 将 `/api` 代理到 8890 后端）。
 | `ONTOLITH_TENANT` / `ONTOLITH_USER` | `prod` / `console` | 注入的鉴权头 |
 | `CONSOLE_REFRESH_MS` | `5000` | 自动刷新/采样间隔 |
 | `CONSOLE_HISTORY_POINTS` | `120` | 历史采样窗口 |
+| `CONSOLE_PROXY_TIMEOUT_MS` | `60000` | `/api/gw`、`/api/mg` 上游代理超时（SHACL 校验/物化等长任务需要放宽默认 15s） |
 | `CONSOLE_AUTH_TOKEN` | 空 | 设置后所有 `/api/*` 路由要求 `Authorization: Bearer <token>`（静态资源公开，前端显示登录框） |
 | `CONSOLE_TLS_CERT` / `CONSOLE_TLS_KEY` | 空 | 设置后以 HTTPS 监听 |
 
