@@ -171,6 +171,7 @@ Core crates:
 -   ontolith-server
 -   ontolith-sdk
 -   ontolith-ai（R4 AI-native：embedding 提供 + 语义索引 + 检索服务）
+-   ontolith-geo（R3 GeoSPARQL 范围能力：Point/Rect 几何 + WKT/GeoJSON + sf 拓扑，零外部依赖）
 -   ontolith-compliance（R2+ 合规门禁 harness：W3C/SHACL/R2 gates）
 
 Recommended additional crates for clear ownership:

@@ -2488,6 +2488,10 @@ fn eval_bgp(patterns: &[TriplePattern], ctx: &ExecCtx<'_>) -> Result<Vec<Solutio
         ctx.check()?;
         let mut next = Vec::new();
         for sol in &solutions {
+            if let Some(extended) = eval_geo_property(pattern, sol, ctx)? {
+                next.push(extended);
+                continue;
+            }
             let candidates = fetch_candidates(pattern, sol, ctx)?;
             for triple in candidates {
                 ctx.check()?;
@@ -2502,6 +2506,51 @@ fn eval_bgp(patterns: &[TriplePattern], ctx: &ExecCtx<'_>) -> Result<Vec<Solutio
         }
     }
     Ok(solutions)
+}
+
+/// GeoSPARQL property functions (L9 §5): `geo:asWKT` / `geo:asGeoJSON` /
+/// `geo:hasGeometry` rewritten from a subject bound to a geometry literal.
+///
+/// Forward direction only: when the subject is bound to a scoped geometry
+/// literal, synthesize the object binding without touching the store. When
+/// the predicate is not a geo property IRI, or the subject is unbound /
+/// not a geometry literal, returns `Ok(None)` so normal triple matching
+/// (including any explicitly stored geo triples) proceeds unchanged.
+fn eval_geo_property(
+    pattern: &TriplePattern,
+    sol: &Solution,
+    ctx: &ExecCtx<'_>,
+) -> Result<Option<Solution>, OntolithError> {
+    let Some(pred) = bound_iri(&pattern.predicate, sol) else {
+        return Ok(None);
+    };
+    let key = match pred.as_str() {
+        ontolith_geo::GEO_AS_WKT => "asWKT",
+        ontolith_geo::GEO_AS_GEOJSON => "asGeoJSON",
+        ontolith_geo::GEO_HAS_GEOMETRY => "hasGeometry",
+        _ => return Ok(None),
+    };
+    let subj = match &pattern.subject {
+        TermPattern::Variable(v) | TermPattern::Blank(v) => sol.get(v).cloned(),
+        TermPattern::Literal(l) => Some(BoundValue::Literal(l.clone())),
+        _ => None,
+    };
+    let Some(subj) = subj else {
+        return Ok(None);
+    };
+    let Some(geom) = geo_arg(&subj) else {
+        return Ok(None);
+    };
+    let computed = match key {
+        "asWKT" => BoundValue::Literal(LiteralValue::String(geom.as_wkt())),
+        "asGeoJSON" => BoundValue::Literal(LiteralValue::String(geom.as_geojson())),
+        _ => subj,
+    };
+    let mut out = sol.clone();
+    match bind_pattern(&pattern.object, computed, &mut out, ctx)? {
+        Some(()) => Ok(Some(out)),
+        None => Ok(None),
+    }
 }
 
 fn fetch_candidates(
@@ -3279,6 +3328,95 @@ fn eval_function(
         "TZ" => {
             let dt = datetime_of(&arg(0)?)?;
             Some(strlit(dt.tz.to_string()))
+        }
+        _ if geof_key(name) == Some("DISTANCE") => {
+            let g1 = geo_arg(&arg(0)?)?;
+            let g2 = geo_arg(&arg(1)?)?;
+            if !g1.is_point() || !g2.is_point() {
+                return None;
+            }
+            let units = match args.get(2) {
+                Some(_) => match arg(2)? {
+                    BoundValue::Iri(i) => i.as_str().to_owned(),
+                    _ => return None,
+                },
+                None => ontolith_geo::UOM_METRE.to_owned(),
+            };
+            let scale = match units.as_str() {
+                ontolith_geo::UOM_METRE => 1.0,
+                ontolith_geo::UOM_KILOMETRE => 0.001,
+                _ => return None,
+            };
+            let d = ontolith_geo::haversine_distance(g1, g2) * scale;
+            Some(BoundValue::Literal(LiteralValue::Double(d)))
+        }
+        _ if geof_key(name) == Some("ENVELOPE") => {
+            let g = geo_arg(&arg(0)?)?;
+            Some(BoundValue::Literal(LiteralValue::Typed {
+                value: g.envelope().as_wkt(),
+                datatype: Iri::new(ontolith_geo::WKT_LITERAL_IRI),
+            }))
+        }
+        _ if geof_key(name) == Some("GETSRID") => {
+            let _ = geo_arg(&arg(0)?)?;
+            Some(BoundValue::Literal(LiteralValue::Integer(
+                ontolith_geo::CRS84_SRID,
+            )))
+        }
+        _ if matches!(geof_key(name), Some("ISSIMPLE") | Some("ISVALID")) => {
+            let _ = geo_arg(&arg(0)?)?;
+            Some(bool(true))
+        }
+        _ if matches!(
+            geof_key(name),
+            Some("SFEQUALS")
+                | Some("SFDISJOINT")
+                | Some("SFINTERSECTS")
+                | Some("SFTOUCHES")
+                | Some("SFCROSSES")
+                | Some("SFWITHIN")
+                | Some("SFCONTAINS")
+                | Some("SFOVERLAPS")
+        ) =>
+        {
+            let g1 = geo_arg(&arg(0)?)?;
+            let g2 = geo_arg(&arg(1)?)?;
+            let r = match geof_key(name).expect("matched above") {
+                "SFEQUALS" => ontolith_geo::sf_equals(g1, g2),
+                "SFDISJOINT" => ontolith_geo::sf_disjoint(g1, g2),
+                "SFINTERSECTS" => ontolith_geo::sf_intersects(g1, g2),
+                "SFTOUCHES" => ontolith_geo::sf_touches(g1, g2),
+                "SFCROSSES" => ontolith_geo::sf_crosses(g1, g2),
+                "SFWITHIN" => ontolith_geo::sf_within(g1, g2),
+                "SFCONTAINS" => ontolith_geo::sf_contains(g1, g2),
+                _ => ontolith_geo::sf_overlaps(g1, g2),
+            };
+            Some(bool(r))
+        }
+        _ => None,
+    }
+}
+
+/// Canonical GeoSPARQL function key for a normalized function name
+/// (`GEOF:DISTANCE` or the full function IRI), or `None` for non-geo names.
+fn geof_key(name: &str) -> Option<&str> {
+    const FUNC_IRI: &str = "HTTP://WWW.OPENGIS.NET/DEF/FUNCTION/GEOSPARQL/";
+    let rest = name
+        .strip_prefix("GEOF:")
+        .or_else(|| name.strip_prefix(FUNC_IRI))?;
+    match rest {
+        "DISTANCE" | "ENVELOPE" | "GETSRID" | "ISSIMPLE" | "ISVALID" | "SFEQUALS"
+        | "SFDISJOINT" | "SFINTERSECTS" | "SFTOUCHES" | "SFCROSSES" | "SFWITHIN" | "SFCONTAINS"
+        | "SFOVERLAPS" => Some(rest),
+        _ => None,
+    }
+}
+
+/// Extract a scoped geometry from a bound value (geo:wktLiteral / jsonLiteral).
+fn geo_arg(bv: &BoundValue) -> Option<ontolith_geo::Geometry> {
+    match bv {
+        BoundValue::Literal(LiteralValue::Typed { value, datatype }) => {
+            ontolith_geo::geometry_from_literal(value, datatype.as_str()).ok()
         }
         _ => None,
     }

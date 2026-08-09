@@ -15,6 +15,7 @@ members = [
     "crates/ontolith-observability",
     "crates/ontolith-plugin-api",
     "crates/ontolith-ai",
+    "crates/ontolith-geo",
     "crates/ontolith-compliance",
 ]
 

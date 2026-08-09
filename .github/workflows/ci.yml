@@ -250,6 +250,47 @@ jobs:
           ONTOLITH_BENCH_TREND_PATH="benchmarks/trends/semantic-bench.jsonl" \
           bash scripts/check-semantic-bench-thresholds.sh
 
+  # R3 exit-criteria gates (PLAN §6 R3): GeoSPARQL scoped capability +
+  # enterprise security hardening + HA/failover (real 3-process DR drill).
+  r3-gates:
+    name: r3 gates (geo + security + HA/failover)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system deps (RocksDB)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-dev pkg-config libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+
+      - name: GeoSPARQL gate (scoped profile determinism/topology/property fns)
+        run: cargo test -p ontolith-compliance --test r3_geo_gate -- --nocapture
+
+      - name: Security gate (audit chain tamper-evidence + tenant isolation)
+        run: cargo test -p ontolith-compliance --test r3_security_gate -- --nocapture
+
+      - name: HA/failover gate (real 3-process rebalance + DR drill)
+        run: |
+          set -euo pipefail
+          cargo build -p ontolith-server --bin ontolith-management-server
+          evidence_dir="$(mktemp -d)/evidence"
+          ONTOLITH_DRILL_EVIDENCE_DIR="${evidence_dir}" \
+            timeout 900 bash scripts/drill-rebalance-dr.sh
+          grep -q "=== DRILL PASS ===" "${evidence_dir}/drill-transcript.txt"
+          echo "r3 HA gate: drill PASS (transcript: ${evidence_dir}/drill-transcript.txt)"
+
   # Required-lite gate: block regressions in must-pass subset without requiring
   # zero known-gap / zero unsupported yet.
   w3c-subset:

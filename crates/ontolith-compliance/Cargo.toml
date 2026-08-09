@@ -14,6 +14,7 @@ ontolith-transaction = { path = "../ontolith-transaction" }
 ontolith-parser = { path = "../ontolith-parser" }
 ontolith-reasoner = { path = "../ontolith-reasoner" }
 ontolith-ai = { path = "../ontolith-ai", default-features = false }
+ontolith-security = { path = "../ontolith-security" }
 
 [[test]]
 name = "sparql_r1_smoke"
@@ -42,6 +43,14 @@ path = "tests/r2_reasoner_gate.rs"
 [[test]]
 name = "p802_retrieval_gate"
 path = "tests/p802_retrieval_gate.rs"
+
+[[test]]
+name = "r3_geo_gate"
+path = "tests/r3_geo_gate.rs"
+
+[[test]]
+name = "r3_security_gate"
+path = "tests/r3_security_gate.rs"
 
 [dev-dependencies]
 quick-xml = "0.37"

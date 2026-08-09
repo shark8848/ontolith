@@ -284,13 +284,13 @@ sudo -v# Ontolith 开发计划
 
 ### R3（Rust）
 范围：
-- 高级集群运维能力。
-- GeoSPARQL 范围能力。
-- 企业级安全加固。
+- 高级集群运维能力。✅（P4-01–P4-04 + P7-01/04：多进程 Raft 数据面、在线重平衡、灾备演练 DRILL PASS）
+- GeoSPARQL 范围能力。✅（2026-08-09：新 crate `ontolith-geo` 零外部依赖——Point/Rect 范围几何 + WKT/GeoJSON 序列化 + `geof:distance/envelope/getSRID/isSimple/isValid` + `geof:sf*` 八拓扑 + `geo:asWKT/asGeoJSON/hasGeometry` 属性函数；[L9-geosparql.md](./L9-geosparql.md) 1.0.0 + [ADR-0005](../adr/0005-geosparql-scoped-capability.md)；`r3_geo_gate` 5 测）
+- 企业级安全加固。✅（2026-08-09：`/admin/config` 密钥脱敏 + 审计链完整性/防篡改 + 强制租户隔离端到端；`r3_security_gate` 3 测 + server 脱敏测试）
 
 退出标准：
-- 高可用与故障转移门禁通过。
-- 租户隔离与审计加固门禁通过。
+- 高可用与故障转移门禁通过。✅（2026-08-09：CI `r3-gates` 作业——真实 3 进程 `drill-rebalance-dr.sh`：选主→在线重平衡→复制收敛→杀 follower（多数派提交存活）→重启追赶→杀 leader（自动 failover）→重启追赶，**DRILL PASS** + transcript 断言）
+- 租户隔离与审计加固门禁通过。✅（2026-08-09：`ontolith-compliance` `r3_security_gate`：强制租户隔离端到端（读隔离/跨租户引用拒绝/写盖章不泄漏）+ 审计链完整性/防篡改 + 密钥脱敏契约）
 
 ### R4（Rust）
 范围：

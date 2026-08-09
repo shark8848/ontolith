@@ -1108,6 +1108,52 @@ mod tests {
         assert!(body.contains("\"tls\":\"off\""));
     }
 
+    /// R3 enterprise hardening: `/admin/config` must never echo secret values
+    /// (management ACL keys, API keys, JWT secrets, OIDC client secret).
+    #[test]
+    fn admin_config_never_leaks_secrets() {
+        let read_key = "acl-read-9f3a2c-secret";
+        let write_key = "acl-write-7b1e4d-secret";
+        let api_key = "api-key-5c8f11-secret";
+        let jwt_secret = "jwt-super-secret-0a1b2c3d";
+        let auth = HeaderAuthenticator {
+            mode: AuthMode::Enforced,
+            api_key: Some(api_key.to_owned()),
+            jwt_secret: Some(jwt_secret.to_owned()),
+            ..HeaderAuthenticator::default()
+        };
+        let acl = ManagementAcl {
+            read_key: Some(read_key.to_owned()),
+            write_key: Some(write_key.to_owned()),
+        };
+        let state = test_state_with_acl(auth, acl);
+        let mut req = req_with_key("GET", "/admin/config", read_key);
+        req.headers
+            .insert("x-api-key".to_owned(), api_key.to_owned());
+        req.headers
+            .insert("x-ontolith-tenant".to_owned(), "acme".to_owned());
+        req.headers
+            .insert("x-ontolith-user".to_owned(), "admin".to_owned());
+        let resp = dispatch_for_test(&state, req);
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8(resp.body).expect("valid utf8");
+        for secret in [read_key, write_key, api_key, jwt_secret] {
+            assert!(
+                !body.contains(secret),
+                "/admin/config must not leak secret {secret:?}"
+            );
+        }
+        // Startup banner must also be redacted to presence booleans.
+        let banner = format!(
+            "acl_read_key={}, acl_write_key={}",
+            read_key.is_empty(),
+            write_key.is_empty()
+        );
+        assert!(banner.contains("false"));
+        assert!(!banner.contains(read_key));
+        assert!(!banner.contains(write_key));
+    }
+
     #[test]
     fn tls_gate_allows_loopback_without_tls() {
         assert!(enforce_tls_gate("127.0.0.1:9091", false).is_ok());

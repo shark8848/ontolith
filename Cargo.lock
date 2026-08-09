@@ -1077,6 +1077,7 @@ dependencies = [
  "ontolith-query",
  "ontolith-rdf",
  "ontolith-reasoner",
+ "ontolith-security",
  "ontolith-storage",
  "ontolith-transaction",
  "quick-xml",
@@ -1085,6 +1086,10 @@ dependencies = [
 
 [[package]]
 name = "ontolith-core"
+version = "0.1.0"
+
+[[package]]
+name = "ontolith-geo"
 version = "0.1.0"
 
 [[package]]
@@ -1118,6 +1123,7 @@ name = "ontolith-query"
 version = "0.1.0"
 dependencies = [
  "ontolith-core",
+ "ontolith-geo",
  "ontolith-rdf",
  "ontolith-storage",
  "ontolith-transaction",

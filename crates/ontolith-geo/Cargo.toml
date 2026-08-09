@@ -1,0 +1,8 @@
+[package]
+name = "ontolith-geo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Scoped GeoSPARQL geometry profile: Point/Rect + WKT/GeoJSON + sf topology (R3, zero external deps)"
+
+[dependencies]

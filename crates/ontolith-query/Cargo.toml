@@ -8,4 +8,5 @@ ontolith-core = { path = "../ontolith-core" }
 ontolith-rdf = { path = "../ontolith-rdf" }
 ontolith-storage = { path = "../ontolith-storage", default-features = false }
 ontolith-transaction = { path = "../ontolith-transaction" }
+ontolith-geo = { path = "../ontolith-geo" }
 regex = "1.13.1"

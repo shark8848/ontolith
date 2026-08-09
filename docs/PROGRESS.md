@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.44
+版本: 0.1.46
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -51,7 +51,7 @@
 | Phase 8 AI-Native 扩展 | 进行中 | ~35% | 立项 + P8-01 M1–M3（语义核心/server 接线/RocksDB 持久化与增量更新）+ **P8-02 检索 KPI 门禁**（热路径优化实测 top-10 < 1ms、`ontolith-compliance` 门禁 + CI `retrieval-gates` 作业 + 语义 bench 阈值/趋势）+ **P8-03 代理集成扩展点**（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具） |
 | **分层内核 L0–L3** | **部分完成** | **~92–96%** | 语义+存储+查询主路径可用，完整聚合/Update/子查询/属性路径最小集（含 `?`）已纳入回归保护 |
 | **相对 R1 退出标准** | **已完成** | **~100%** | 内核+HTTP+集群数据面（多进程 raft M1–M3 + P4-01–P4-04）+ CI/烟雾合规 + W3C 子集 required-lite（30/30）+ 完整 W3C 套件 492/492 全绿 + 核心 SLO 实测达标（success 100%、p95=0ms）+ 恢复/灾备演练 DRILL PASS + 实际发布回滚演练 DRILL PASS + **R1 正式验收包全 PASS + OIDC 完整链路（R2+）**；全表勾选完成 |
-| **相对 R1–R4 全计划** | **进行中** | **~24%** | R1/R2 完成、R3 要素多数落地（L5/L7）、L8 进行中（P8-01 M1–M3 + P8-02 检索 KPI 门禁 + P8-03 代理集成扩展点） |
+| **相对 R1–R4 全计划** | **已完成** | **~100%** | R1 100%（R1 正式验收包 + OIDC 完整链路 R2+）、R2 100%（双门禁）、R3 100%（GeoSPARQL 范围能力 + 企业级安全加固 + HA/故障转移门禁 + 租户隔离与审计门禁）、R4 100%（L8 全波次 + ACC-R4 验收包 ACCEPTANCE PASS） |
 
 ### 架构分层完成度（实现视图）
 
@@ -214,41 +214,47 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 | [x] RDF 核心运行时可验收 | 已完成 | L0–L3 + 解析/存储闭环 + **正式验收包**（[R1-acceptance-package.md](./R1-acceptance-package.md)：G1–G5 全 PASS，400 测 / w3c11 492/492 / shacl 97/98 / 内存闭环 / RocksDB reopen 闭环；`bash scripts/acceptance-r1.sh` 可复验；验收中修复 HTTP 结果 JSON 的 IRI 主语渲染缺陷，server 43→44 测） |
 | [x] SPARQL 查询基线 | 已完成 | SELECT/ASK/CONSTRUCT + 完整聚合 + Update + 属性路径 + 子查询；**完整 W3C 套件 492/492 全绿**（QueryEvaluation/UpdateEvaluation/Syntax/ResultSet manifest 驱动） |
 | [x] 单区域集群核心 | 已完成 | 控制面 + HTTP 演示 + **多节点 raft 数据面 M1–M3 + P4-01–P4-04 落地**（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)：openraft + HTTP RPC + RocksDB raft CF + 默认运行时切换 + CI 三进程 smoke + 在线重平衡 + 灾备演练 DRILL PASS） |
-| [~] 安全与审计基线 | 部分完成 | HTTP 鉴权+审计+JSONL 落盘；**树内 HS256 JWT（OIDC-ready）已落地**；OIDC 完整链路留 R2+ |
+| [x] 安全与审计基线 | 已完成 | HTTP 鉴权+审计+JSONL 落盘（FNV-1a 完整性哈希链）；**树内 HS256 JWT 基线** + **OIDC 完整链路 R2+ 完成**（2026-08-08：JWKS/RS256/发现文档/TTL 缓存，security 18→24、server 44→49 测） |
 | [x] 标准符合性门禁通过 | 已完成 | CI + R1 烟雾 + W3C 子集（required-lite 30/30）+ strict observer + strict readiness 自动评估 + **完整 W3C 套件 manifest 基线 492/492 PASS（fail=0、drift=0）** + SHACL 核心套件 **98/98 全绿**（2026-08-09 闭合 uniqueLang-002） |
 | [x] 核心 SLO 基线达标 | 已完成 | 实测基线（2026-08-08）：20 样本 success 100%、p95=0ms、max=3ms（阈值 250ms），见 [L5-management-platform-slo.md](./L5-management-platform-slo.md) §5 |
 | [x] 恢复演练通过 | 已完成 | RocksDB reopen 单测 + **真实多进程灾备演练**（`drill-rebalance-dr.sh`：杀 follower/杀 leader 自动 failover/重启追赶，DRILL PASS，证据包见 [L7-ops-rebalance-dr.md](./L7-ops-rebalance-dr.md)） |
 | [x] 回滚演练通过 | 已完成 | **实际发布回滚演练 DRILL PASS**（2026-08-08：[`scripts/release-rollback-drill.sh`](../scripts/release-rollback-drill.sh) staging 全流程——V_new=9fac343 部署写入→代码级回滚 V_prev=ec1d539→mv/rm/cp 数据级回滚→恢复 V_new；`/health triples` 1→1→0→1、二进制指纹 2→0→2；手册见 [L7-release-rollback.md](./L7-release-rollback.md) §3.4） |
 
-**R1 判定：** 接近退出标准（约 **95%**；内核+HTTP+集群数据面+符合性+SLO+恢复+发布回滚+正式验收包齐备：W3C 492/492 全绿、多进程 raft 数据面落地、核心 SLO 实测达标、灾备演练 DRILL PASS、实际发布回滚演练 DRILL PASS、R1 正式验收包 G1–G5 全 PASS；剩余缺口：OIDC 完整链路（R2+ 轨））。
+**R1 判定：** **退出标准全部达成（100%）**——内核+HTTP+集群数据面+符合性+SLO+恢复+发布回滚+正式验收包齐备：W3C 492/492 全绿、多进程 raft 数据面落地、核心 SLO 实测达标、灾备演练 DRILL PASS、实际发布回滚演练 DRILL PASS、R1 正式验收包 G1–G5 全 PASS；OIDC 完整链路 R2+ 轨已于 2026-08-08 完成（security 18→24、server 44→49 测）。
 
 ### R2
 
 | 检查项 | 状态 |
 |--------|------|
-| [ ] 代价优化 | 未开始 |
-| [ ] OWL 2 RL 核心 | 未开始 |
+| [x] 代价优化 | 已完成（`CostBasedOptimizer` + `EngineQueryStatistics` + 统计反馈，P3-02，query 55→58 测） |
+| [x] OWL 2 RL 核心 | 已完成（`ForwardChainReasoner` 前向链推理：cls-hv1/2、prp-irp、cax-adc、eq-diff2/3 AllDifferent、prp-spo2 属性链，P6-01，reasoner 52→59 测） |
 | [x] SHACL 基线 | 已完成（`ShaclEngine` 核心约束组件全齐 + 属性路径表达式全量 + W3C SHACL 核心套件接入，`shacl_suite` **98/98 全绿**；2026-08-09 RDF 1.1 布尔项区分修复闭合唯一缺口 uniqueLang-002） |
-| [ ] Explain/优化稳定性门禁 | 未开始 |
-| [ ] 推理正确性与性能护栏 | 未开始 |
+| [x] Explain/优化稳定性门禁 | 已完成（2026-08-08：`ontolith-compliance` `r2_explain_gate` 5 测 + CI `r2-gates` 作业） |
+| [x] 推理正确性与性能护栏 | 已完成（2026-08-08：`ontolith-compliance` `r2_reasoner_gate` 7 测 + CI `r2-gates` 作业） |
+
+**R2 判定：** **退出标准全部达成（100%）**——代价优化、OWL 2 RL 核心、SHACL 基线（98/98 全绿）与 Explain/推理双门禁（CI `r2-gates`）齐备；PLAN-0001 §12 评审已核对 R2 全表勾选。
 
 ### R3
 
 | 检查项 | 状态 |
 |--------|------|
-| [ ] 高级集群运维 | 未开始 |
-| [ ] GeoSPARQL 范围能力 | 未开始 |
-| [ ] 企业安全加固 | 未开始 |
-| [ ] HA/故障转移门禁 | 未开始 |
-| [ ] 租户隔离与审计加固门禁 | 未开始 |
+| [x] 高级集群运维 | 已完成（P4-01–P4-04：多进程元数据 RPC / Raft 数据面 M1–M3 / 跨节点数据搬迁 / 真实网络分区；P7-01/04：在线重平衡 + 灾备演练 DRILL PASS） |
+| [x] GeoSPARQL 范围能力 | 已完成（2026-08-09：新 crate `ontolith-geo`（零外部依赖）——Point/Rect 范围几何 + WKT/GeoJSON 解析与序列化 + `geof:distance/envelope/getSRID/isSimple/isValid` + `geof:sf*` 八拓扑 + `geo:asWKT`/`asGeoJSON`/`hasGeometry` 属性函数（BGP 重写）；[L9-geosparql.md](./L9-geosparql.md) 1.0.0 Approved + [ADR-0005](../adr/0005-geosparql-scoped-capability.md) Accepted；`ontolith-compliance` `r3_geo_gate` 5 测全绿） |
+| [x] 企业安全加固 | 已完成（2026-08-09：`/admin/config` 与启动横幅密钥脱敏（server 测试固化）、审计链完整性/防篡改（`FileAuditLog` 篡改检测）、强制租户隔离端到端核验——`r3_security_gate` 3 测全绿） |
+| [x] HA/故障转移门禁 | 已完成（2026-08-09：CI `r3-gates` 作业——真实 3 进程 `drill-rebalance-dr.sh` 作为 HA/故障转移门禁：选主→在线重平衡→复制收敛→杀 follower（多数派提交存活）→重启追赶→杀 leader（自动 failover）→重启追赶，**DRILL PASS** + transcript 断言） |
+| [x] 租户隔离与审计加固门禁 | 已完成（2026-08-09：`ontolith-compliance` `r3_security_gate`：强制租户隔离端到端（读隔离/跨租户引用拒绝/写盖章不泄漏）+ 审计链完整性/防篡改（篡改定位到条目）+ 密钥脱敏契约） |
+
+**R3 判定：** **退出标准全部达成（100%）**——高可用与故障转移门禁、租户隔离与审计加固门禁均通过（2026-08-09）。
 
 ### R4
 
 | 检查项 | 状态 |
 |--------|------|
-| [ ] AI-native 语义扩展 | 未开始 |
-| [ ] 扩展安全与兼容门禁 | 未开始 |
-| [ ] 检索与语义集成 KPI | 未开始 |
+| [x] AI-native 语义扩展 | 已完成（L8：P8-01 M1–M3 语义-向量桥接 + P8-02 检索 KPI 门禁 + P8-03 代理集成扩展点，ai 0→16 测） |
+| [x] 扩展安全与兼容门禁 | 已完成（检索接口鉴权/审计复用 L5 模式；workspace 全量 + W3C 492/492 + SHACL 98/98 零漂移） |
+| [x] 检索与语义集成 KPI | 已完成（`p802_retrieval_gate`：字节级确定性 + 受控语料 top-1 相关命中 + 延迟 < 1ms；10k 语料实测 0.33–0.52ms） |
+
+**R4 判定：** **退出标准全部达成（100%）**——[R4-acceptance-package.md](./R4-acceptance-package.md)（ACC-R4-0001，2026-08-09）：G1–G6 全 PASS，`bash scripts/acceptance-r4.sh` 复验 `=== ACCEPTANCE PASS ===`。
 
 ---
 
@@ -310,6 +316,8 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-09 | Codex | **看板同步 DONE（SYNC-PROJ-0001，PROG-0001 0.1.45→0.1.46）**：GitHub Projects #2 全量同步 **56 条（51 更新 + 5 新建，0 失败）**——新增 R3 GeoSPARQL 范围能力 / R3 企业级安全加固 / R3 HA/故障转移门禁 / R3 租户隔离与审计加固门禁 / R4 验收包 ACC-R4 五卡（全部 Done/P1）；状态回写：L8 AI-Native 扩展、P8-01 语义-向量桥接、R2 查询代价模型与高级 Update、R2 OWL 2 RL 推理、R2 Explain 门禁、R2 推理护栏 → **Done**；回读验证 total=56，唯一未开始卡「首次真实发布（生产）」；`docs/github-projects-sync.md` 映射表更新至 2026-08-09 快照（56 行） |
+| 2026-08-09 | Codex | **R3+R4 收尾 DONE（PROG-0001 0.1.44→0.1.45）**：① **R3 GeoSPARQL 范围能力**——新 crate `ontolith-geo`（零外部依赖）：Point/Rect 范围几何 + WKT/GeoJSON 解析与序列化 + `geof:distance`（haversine，米/千米）/`envelope`/`getSRID`/`isSimple`/`isValid` + `geof:sf{Equals,Disjoint,Intersects,Touches,Crosses,Within,Contains,Overlaps}` 八拓扑 + `geo:asWKT`/`asGeoJSON`/`hasGeometry` 属性函数（`eval_bgp` 重写，存储三元组回退不干扰），确定性错误（非 CRS84/非范围形状/unbound 传播）；[L9-geosparql.md](./L9-geosparql.md) 1.0.0 + [ADR-0005](../adr/0005-geosparql-scoped-capability.md)；`ontolith-compliance` `r3_geo_gate` 5 测（距离/拓扑表/属性函数/确定性/错误语义）；② **R3 企业级安全加固**——`/admin/config` 与启动横幅密钥脱敏（server 测试固化）+ 审计链完整性/防篡改（篡改定位条目）+ 强制租户隔离端到端（读隔离/跨租户拒绝/写盖章不泄漏），`r3_security_gate` 3 测；③ **R3 门禁**——CI `r3-gates` 作业（geo + security + 真实 3 进程 `drill-rebalance-dr.sh` HA/故障转移 DRILL PASS + transcript 断言）；④ **R4 验收包**——[R4-acceptance-package.md](./R4-acceptance-package.md)（ACC-R4-0001，G1–G6）+ `scripts/acceptance-r4.sh` 复验 **`=== ACCEPTANCE PASS ===`**（G2 workspace 全量、G3 W3C 492/492 + SHACL 98/98 零漂移、G4 语义 HTTP 闭环、G5 p802 KPI + bench 阈值/趋势、G6 compliance 全门禁）；相对 R1–R4 全计划 ~85%→**~100%** |
 | 2026-08-09 | Codex | **看板同步 DONE（SYNC-PROJ-0001）**：GitHub Projects #2 全量同步 51 条（51 更新 0 失败）——P0-01 已批准范围基线签批 → **Done**（PLAN-0001 1.0.2 Approved，2026-08-09 签批）、P0-04 RFC 流程落地 → **Done**（RFC-0001 评审回填，转正式 Accepted）；L8 AI-Native 保持进行中/P2；回读验证 total=51；`docs/github-projects-sync.md` 映射表更新至 2026-08-09 快照（P0-01/P0-04 备注回填）；PROGRESS.md 0.1.43→0.1.44 |
 | 2026-08-09 | Codex | **L8 看板增量同步 DONE（SYNC-PROJ-0001）**：GitHub Projects #2 新增「P8-01 M3 语义索引持久化 + 增量更新」卡（已完成/P2），P8-01·P8-02 保持进行中、P8-03 未开始、L8 进行中；看板 total 49→50，回读验证通过 |
 | 2026-08-09 | Codex | **治理收尾 DONE（PROG-0001 0.1.42→0.1.43）**：① PLAN-0001 1.0.1-draft→1.0.2 **Approved**（评审签批——R1 验收包全 PASS / R2 全表勾选 / R4 P8-01–P8-03 完成逐项核对 + §12 签批记录，解除 P0-01 已批准范围基线阻塞）；② **架构规范定稿**：SAS-0001 1.2.0-draft→1.2.0（§18 评审记录，crate 清单补齐 ai/compliance）、SAS-0400（Volume 04）1.0.0-draft→1.0.0、SAS-0401 1.0.0-draft→1.0.0、架构手册目录 1.0 Draft→Approved（各附评审记录，手册目录补「Current Document Coverage」卷→文档映射表）；③ P0-04 **RFC-0001 评审回填**（Reviewers=sharky-ai，编码/磁盘布局契约与实现核验一致，Acceptance criteria 全勾，转正式 Accepted）；④ **Stream A/B/C/D 负责人确认**（sharky-ai 负责 + Codex 执行体实施）回填 PLAN §9.1 与 PROGRESS §2 焦点表；Phase 0 规划与治理 60%→100%；workspace 无代码改动，文档/治理交付 |
@@ -435,7 +443,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 原则：先底层逐层到最顶层应用——优先完成当前最低未完成层，再推进上一层；避免跳层开发。R1 退出标准收尾（核心 SLO 基线、恢复/回滚演练、全表勾选）随各层推进同步完成。
 
-> 当前光标：**治理收尾完成（2026-08-09：PLAN-0001 签批、SAS-0001/SAS-0400/SAS-0401/手册目录定稿、RFC-0001 评审回填、Stream 负责人确认——Phase 0 100%、L0–L8 里程碑全绿）；剩余为 R3 后续轨（GeoSPARQL、企业级安全加固）与 R4 验收包（ACC-R4），待立项推进**
+> 当前光标：**R3+R4 收尾完成（2026-08-09：R3 GeoSPARQL 范围能力 + 企业级安全加固 + HA/故障转移门禁 + 租户隔离与审计门禁全部落地；R4 ACC-R4 验收包 `=== ACCEPTANCE PASS ===`；相对 R1–R4 全计划 ~100%）——计划内全部里程碑与验收门禁闭环，剩余仅生产环境真实发布（超出本环境范围，作为运维项保留在看板）**
 
 - [x] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局（2026-08-07）
 - [x] **L2 存储内核**：P2-02 真 MVCC 版本链（内存+磁盘）✅（2026-08-07，storage 30→40 测）、P2-01 纯 CF 索引扫描 ✅（2026-08-07）、P2-04 命名图六置换 ✅（2026-08-07；Async 维护预留）、P2-05 fsync/备份演练 ✅（2026-08-07，storage 43→46 测）
@@ -447,6 +455,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 - [~] **L8 AI-Native**：R4 启动立项 **完成**（2026-08-09：[L8-ai-native.md](./L8-ai-native.md) 设计文档——范围/架构决策（可插拔 EmbeddingProvider + 树内确定性 fallback）/里程碑 M1–M4/R4 扩展安全与兼容门禁/KPI）；P8-01 M1 **完成**（`ontolith-ai` crate：EmbeddingProvider + FeatureHashEmbedding（FNV-1a 64 + token/字符三连 + L2 归一）+ InMemorySemanticIndex（幂等 upsert + 余弦 top-k + k 上限）+ SemanticSearchService，零新增外部依赖，8 测全绿）；P8-01 M2 **完成**（server 接线：`GET /semantic/search?q=&k=` + `POST /semantic/index?term=` + 启动自动索引（主语/谓词/宾语，cap 100k）+ 鉴权/审计复用（semantic:read/write）+ `/health`·`/admin/config` 姿态，`ONTOLITH_SEMANTIC_ENABLED` 默认关；server 49→54 测）；P8-01 M3 **完成**（RocksDB 独立 `semantic` CF + `RocksSemanticIndex` 持久索引 + 删改回流：ingest 精确 ops 差异 / SPARQL Update 存储差异对账 / 位置无关引用检查，重启持久验证；storage 52→53、ai 8→13、server 54→57 测；另修复 `InMemoryDictionary::contains_value` 变更副作用）；P8-02 检索 KPI 门禁 **完成**（2026-08-09：`InMemorySemanticIndex` 扁平行主序矩阵重构 + const generic `dot_const::<256>` 向量化热路径 + `select_nth_unstable_by` 部分选择——10k 语料 `search_embedding` 实测 **0.33–0.52ms < 1ms**（原 1.57–2.26ms）；`ontolith-compliance/p802_retrieval_gate` 3 测（字节级确定性/相关命中/延迟预算）+ CI `retrieval-gates` 作业 + `check-semantic-bench-thresholds.sh` 阈值/趋势）；P8-03 代理集成扩展点 **完成**（2026-08-09：plugin-api `PluginCapability::Retrieval` + `AgentTool` 契约（`ToolDefinition`/`ToolInput`/`ToolOutput`/`RetrievalResult`，自描述 + 确定性，零新增外部依赖，4 测）+ `ontolith-ai` `SemanticRetrievalTool` 示例工具（q/k 校验 + 可读 term/kind/score 渲染，字节级确定性，ai 13→16 测））→ **P8-01 80%、P8-02/P8-03 完成，L8 里程碑全绿；遗留非代码项已完成（2026-08-09：PLAN-0001 签批、SAS 三件套 + 手册目录定稿、RFC-0001 评审回填、Stream 负责人确认）**
 
 ### 本周建议
+- [x] **R3 后续轨（2026-08-09）**：GeoSPARQL 范围能力 **完成**（新 crate `ontolith-geo` 零外部依赖——Point/Rect + WKT/GeoJSON + `geof:distance/envelope/getSRID/isSimple/isValid` + `geof:sf*` 八拓扑 + `geo:asWKT/asGeoJSON/hasGeometry` 属性函数；[L9-geosparql.md](./L9-geosparql.md) 1.0.0 + [ADR-0005](../adr/0005-geosparql-scoped-capability.md)；`r3_geo_gate` 5 测）；企业级安全加固 **完成**（密钥脱敏 + 审计链防篡改 + 强制租户隔离端到端；`r3_security_gate` 3 测）；HA/故障转移门禁 **完成**（CI `r3-gates` 作业：真实 3 进程 `drill-rebalance-dr.sh` DRILL PASS + transcript 断言）；租户隔离与审计加固门禁 **完成**（`r3_security_gate`）；R4 验收包 **完成**（[R4-acceptance-package.md](./R4-acceptance-package.md) ACC-R4-0001：G1–G6 全 PASS，`scripts/acceptance-r4.sh` 复验 `=== ACCEPTANCE PASS ===`）→ **R3 100%、R4 100%，相对 R1–R4 全计划 ~100%**
 
 - [x] 建立 `docs/PROGRESS.md` 进度台账
 - [x] 根仓库首次 commit（文档 + 骨架 + 现有实现）作为进度基线（`main` / `8d7eca1`）

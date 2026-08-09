@@ -79,17 +79,22 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P7-03 发布/回滚手册 + 实际演练 | 已完成 | release-rollback-drill.sh DRILL PASS 2026-08-08 |
 | P7-04 灾备运维手册 | 已完成 | L7-ops-rebalance-dr.md |
 | 首次真实发布（生产） | 未开始 | P7-03 手册就绪，待首次发布 |
-| L8 AI-Native 扩展 | 进行中 | Phase 8 整体 ~35%（P8-01–P8-03 + 治理收尾，2026-08-09） |
-| P8-01 语义-向量桥接 | 进行中 | 80%（M3 持久化 + 增量更新完成，2026-08-09） |
+| L8 AI-Native 扩展 | 已完成 | 100%（P8-01 M1–M3 + P8-02 KPI 门禁 + P8-03 扩展点 + ACC-R4 验收包 `=== ACCEPTANCE PASS ===`，2026-08-09） |
+| P8-01 语义-向量桥接 | 已完成 | 100%（M1–M3：语义核心 + server 接线 + RocksDB 持久化与增量更新，2026-08-09） |
 | P8-01 M3 语义索引持久化 + 增量更新 | 已完成 | RocksDB `semantic` CF + `RocksSemanticIndex` + 删改回流，2026-08-09 |
 | P8-02 检索增强接口 | 已完成 | 80%（检索 KPI 门禁：热路径优化 <1ms + compliance 门禁 + CI 作业，2026-08-09） |
 | P8-02 检索 KPI 门禁 | 已完成 | 确定性/相关命中/延迟预算（10k 语料实测 0.33–0.52ms < 1ms）+ 语义 bench 阈值/趋势，2026-08-09 |
 | P8-03 代理集成扩展点 | 已完成 | 100%（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具，2026-08-09） |
+| R3 GeoSPARQL 范围能力 | 已完成 | `ontolith-geo`（Point/Rect + WKT/GeoJSON + geof:/sf: 函数 + geo: 属性函数）+ `r3_geo_gate` 5 测，2026-08-09 |
+| R3 企业级安全加固 | 已完成 | 密钥脱敏 + 审计链防篡改 + 强制租户隔离端到端 + `r3_security_gate` 3 测，2026-08-09 |
+| R3 HA/故障转移门禁 | 已完成 | CI `r3-gates` 作业 + 真实 3 进程 `drill-rebalance-dr.sh` DRILL PASS，2026-08-09 |
+| R3 租户隔离与审计加固门禁 | 已完成 | `r3_security_gate`（读隔离/跨租户拒绝/写盖章/审计链），2026-08-09 |
+| R4 验收包 ACC-R4 | 已完成 | ACC-R4-0001 G1–G6 全 PASS + `acceptance-r4.sh` 复验，2026-08-09 |
 | R1 退出标准全表 | 已完成 | 2026-08-08 全勾选（含正式验收包 G1–G5 全 PASS） |
-| R2 查询代价模型与高级 Update | 进行中 | W3C 剩余欠账 + 代价模型 |
-| R2 OWL 2 RL 推理 | 未开始 | |
-| R2 Explain 门禁 | 未开始 | |
-| R2 推理护栏 | 未开始 | |
+| R2 查询代价模型与高级 Update | 已完成 | `CostBasedOptimizer` + `EngineQueryStatistics`（P3-02）+ 高级 Update 全量 + W3C 492/492 |
+| R2 OWL 2 RL 推理 | 已完成 | `ForwardChainReasoner` 前向链（P6-01，reasoner 52→59 测） |
+| R2 Explain 门禁 | 已完成 | `r2_explain_gate` 5 测 + CI `r2-gates` 作业（2026-08-08） |
+| R2 推理护栏 | 已完成 | `r2_reasoner_gate` 7 测（正确性 + 迭代/墙钟护栏） + CI `r2-gates`（2026-08-08） |
 | R2 SHACL 97/98 缺口收尾 | 已完成 | 2026-08-09 闭合，98/98 全绿 |
 | R2 退出标准全表勾选 | 已完成 | 2026-08-08 R2 全项（Explain 门禁 + 推理护栏） |
 | RDF 1.1 布尔项区分（uniqueLang-002 闭合） | 已完成 | 2026-08-09 |
