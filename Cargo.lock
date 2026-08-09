@@ -1047,6 +1047,7 @@ name = "ontolith-ai"
 version = "0.1.0"
 dependencies = [
  "ontolith-core",
+ "ontolith-plugin-api",
  "ontolith-rdf",
  "ontolith-storage",
  "tempfile",

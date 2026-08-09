@@ -79,12 +79,12 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P7-03 发布/回滚手册 + 实际演练 | 已完成 | release-rollback-drill.sh DRILL PASS 2026-08-08 |
 | P7-04 灾备运维手册 | 已完成 | L7-ops-rebalance-dr.md |
 | 首次真实发布（生产） | 未开始 | P7-03 手册就绪，待首次发布 |
-| L8 AI-Native 扩展 | 进行中 | Phase 8 整体 ~25%（2026-08-09：P8-01 M1+M2+M3 + P8-02 检索 KPI 门禁） |
+| L8 AI-Native 扩展 | 进行中 | Phase 8 整体 ~35%（2026-08-09：P8-01 M1–M3 + P8-02 检索 KPI 门禁 + P8-03 代理集成扩展点） |
 | P8-01 语义-向量桥接 | 进行中 | 80%（M3 持久化 + 增量更新完成，2026-08-09） |
 | P8-01 M3 语义索引持久化 + 增量更新 | 已完成 | RocksDB `semantic` CF + `RocksSemanticIndex` + 删改回流，2026-08-09 |
 | P8-02 检索增强接口 | 已完成 | 80%（检索 KPI 门禁：热路径优化 <1ms + compliance 门禁 + CI 作业，2026-08-09） |
 | P8-02 检索 KPI 门禁 | 已完成 | 确定性/相关命中/延迟预算（10k 语料实测 0.33–0.52ms < 1ms）+ 语义 bench 阈值/趋势，2026-08-09 |
-| P8-03 代理集成扩展点 | 未开始 | 依赖 P8-01/P8-02 |
+| P8-03 代理集成扩展点 | 已完成 | 100%（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具，2026-08-09） |
 | R1 退出标准全表 | 已完成 | 2026-08-08 全勾选（含正式验收包 G1–G5 全 PASS） |
 | R2 查询代价模型与高级 Update | 进行中 | W3C 剩余欠账 + 代价模型 |
 | R2 OWL 2 RL 推理 | 未开始 | |

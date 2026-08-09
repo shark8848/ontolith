@@ -11,6 +11,8 @@ use crate::infrastructure::InMemorySemanticIndex;
 /// Default auto-index cap: bounds the semantic index size (P8-01 M3).
 pub const DEFAULT_SEMANTIC_INDEX_CAP: usize = 100_000;
 
+pub mod agent;
+
 /// Semantic search service (P8-02 interface foundation): embed + index +
 /// top-k retrieval in one handle.
 ///
