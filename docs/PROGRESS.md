@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.53
+版本: 0.1.54
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-10 | Codex | **console 数值精度全局 3 位小数（PROG-0001 0.1.53→0.1.54）**：新增通用 `fmtNum`（整数原样、浮点 `toFixed(3)`、非法/空回退 `—`），覆盖概览 Prometheus 指标表「值」列（如 `ontolith_http_request_latency_ms_avg 0.0018001800180018`→`0.002`）、运行时长、监控摘要（请求/SPARQL/ingest 计数）、监控图末值标签默认格式化（`drawChart` 无 `fmt` 时回退 `fmtNum`）；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 延迟显示统一 3 位小数（PROG-0001 0.1.52→0.1.53）**：新增 `fmtLatency`（`Number(ms).toFixed(3)`，非法值回退 `—`），应用于概览「平均延迟」/「runtime probe」与监控图「平均延迟（ms）」末值标签（`chartCard`/`drawChart` 增加可选 `fmt`）；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 刷新收敛为监控/集群双页签 + 模块内定时器（PROG-0001 0.1.51→0.1.52）**：撤销全局刷新机制（移除 `REFRESH_TABS`/`startAuto`/`stopAuto`/`autoTimer`，`render()` 不再启动任何定时器）；自动刷新仅保留「监控」「集群」两页，且各自在模块内部管理 `setInterval`（`monitorTimer`/`clusterTimer`，进入即清旧定时器、渲染完自排下一轮、`editingInTab` 聚焦守卫），`switchTab`/`logout` 通过 `stopPageAuto()` 统一清理；状态栏提示改为「监控/集群自动刷新」；其余页签保持手动加载；草稿/一次性 key 快照保留（跨手动切页不丢）；`npm run build` 重建 dist，8890 线上验证新 bundle |
 | 2026-08-10 | Codex | **console 自动刷新覆盖全部页签（PROG-0001 0.1.50→0.1.51）**：`REFRESH_TABS` 由 5 个（概览/监控/集群/数据/租户）扩展为全部 10 个数据页签（+推理/插件/审计/追踪/配置，SPARQL 交互控制台保持手动）；编辑聚焦守卫 `editingInTab`（输入/文本域/下拉聚焦时跳过本轮刷新，防表单被 5s 重渲染清空）；跨刷新保留——SHACL shapes/Turtle 草稿即时写入 localStorage、SHACL/物化/Turtle 写入结果快照（`lastShacl`/`lastMat`/`lastTurtle`）与租户一次性 key 提示（`lastTenantNote`）重渲染后恢复；`npm run build` 重建 dist，8890 线上已验证新 bundle 生效 |

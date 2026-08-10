@@ -196,6 +196,12 @@ function fmtLatency(ms) {
   if (ms === undefined || ms === null || isNaN(Number(ms))) return '—';
   return Number(ms).toFixed(3);
 }
+function fmtNum(v) {
+  if (v === undefined || v === null || v === '') return '—';
+  const n = Number(v);
+  if (isNaN(n) || !isFinite(n)) return String(v);
+  return Number.isInteger(n) ? String(n) : n.toFixed(3);
+}
 
 function kvCard(title, entries) {
   const card = el('div', 'card');
@@ -237,13 +243,13 @@ async function renderOverview() {
   ]));
   cards.append(kvCard('管理面', [
     ['状态', mgHealth.error ? '不可达' : (mgHealth.status || '—')],
-    ['运行时长', mgHealth.uptime_ms ? (mgHealth.uptime_ms / 1000).toFixed(1) + 's' : '—'],
+    ['运行时长', mgHealth.uptime_ms ? fmtNum(mgHealth.uptime_ms / 1000) + 's' : '—'],
     ['runtime probe', mgHealth.runtime_probe?.reachable ? '可达 ' + fmtLatency(mgHealth.runtime_probe.latency_ms ?? 0) + 'ms' : '不可达'],
     ['jwt / oidc', `${mgHealth.jwt || 'off'} / ${mgHealth.oidc || 'off'}`],
   ]));
   cards.append(kvCard('监控摘要', [
-    ['请求总数', mon.requests_total ?? '—'], ['SPARQL 请求', mon.sparql_total ?? '—'],
-    ['SPARQL 错误', mon.sparql_errors ?? '—'], ['ingest 总数', mon.ingest_total ?? '—'],
+    ['请求总数', fmtNum(mon.requests_total)], ['SPARQL 请求', fmtNum(mon.sparql_total)],
+    ['SPARQL 错误', fmtNum(mon.sparql_errors)], ['ingest 总数', fmtNum(mon.ingest_total)],
     ['平均延迟', mon.latency_avg_ms !== undefined ? fmtLatency(mon.latency_avg_ms) + 'ms' : '—'],
     ['集群节点', mon.cluster ? `${mon.cluster.healthy}/${mon.cluster.nodes}` : '—'],
   ]));
@@ -260,7 +266,7 @@ async function renderOverview() {
     const parts = line.split(/\s+/);
     if (parts.length < 2) continue;
     const tr = el('tr');
-    tr.append(el('td', null, parts[0]), el('td', null, parts[1]), el('td', null, parts[2] ? fmtTs(parts[2]) : '—'));
+    tr.append(el('td', null, parts[0]), el('td', null, fmtNum(parts[1])), el('td', null, parts[2] ? fmtTs(parts[2]) : '—'));
     tbody.append(tr);
   }
   tbl.append(tbody); m.append(tbl); sec.append(m);
@@ -333,7 +339,7 @@ function drawChart(cv, series, color = cssVar('--accent'), fmt) {
     const pts = s.points;
     if (pts.length < 2) continue;
     const last = pts[pts.length - 1];
-    const text = (fmt ? fmt(last.v) : String(last.v)) + (last.max ? '/' + last.max : '');
+    const text = (fmt ? fmt(last.v) : fmtNum(last.v)) + (last.max ? '/' + last.max : '');
     ctx.fillStyle = s.color;
     labelX -= ctx.measureText(text).width;
     ctx.fillText(text, labelX, h - 2);
