@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.60
+版本: 0.1.61
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-10 | Codex | **console 租户列表固定 2 列（PROG-0001 0.1.60→0.1.61）**：租户卡片网格 `cards tenant-grid` 固定 `repeat(2, 1fr)`，不再随窗口无限向右排（窄屏 ≤760px 回退单列）；创建表单移出网格、整行置顶；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 租户图标细节调整（PROG-0001 0.1.59→0.1.60）**：① 禁用 `icon-ban` 移除常驻红色（删除 `.icon-btn.ban` 规则与 `ban` class 切换），与其他图标一致——默认 muted、hover/focus 才出现 accent 边框色；② 「生成 key」图标与输入框同行——key 行加 `tenant-key-row`，输入框 `flex:1; min-width:0` 不再占满整行把按钮挤到下一行；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 租户操作细节收尾（PROG-0001 0.1.58→0.1.59）**：① 删除对话框居中修复——`confirm-overlay` 动态创建时补 `id` 使 `#confirm-overlay` fixed 居中样式生效（原 class/id 不匹配导致未居中）；删除结果右上角 toast（成功「删除成功：<id>」/失败 bad）② 吊销改 `icon-trash` 图标按钮（danger hover）③ 「生成 key」按钮改 `icon-key` 图标并紧贴 key 标签输入框右侧 ④ 禁用图标由 power 换成 `icon-ban`（圆圈红色斜杠，`icon-btn.ban` 常驻红色），启用仍用 `icon-power`；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 租户卡片右下角图标操作 + 删除输入确认（PROG-0001 0.1.57→0.1.58）**：禁用/启用与删除改卡片右下角图标按钮（`icon-power`/`icon-trash` SVG，`card-actions` flex-end，hover 危险色）；删除弹出自定义确认对话框 `confirmDeleteTenant`（遮罩 + 卡片，须输入租户 id 完全匹配才可点「确认删除」，Enter 确认/Esc 或点遮罩取消，错误提示）；禁用/删除成功改右上角 toast（原 `alert`/`confirm` 移除）；`index.html` 增 `icon-power`/`icon-trash`、`style.css` 增 `.card-actions`/`.confirm-overlay`/`.confirm-card`/`.icon-btn.danger`；`npm run build` 重建 dist，8890 线上验证 |

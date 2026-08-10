@@ -779,7 +779,6 @@ async function renderTraces() {
 async function renderTenant() {
   const sec = $('#tab-tenant');
   sec.replaceChildren();
-  const list = el('div', 'cards');
 
   // Create form (always visible at the top).
   const formCard = el('div', 'card');
@@ -795,7 +794,7 @@ async function renderTenant() {
   const formMsg = el('span', 'muted');
   form.append(idInput, nameInput, descInput, genBox, createBtn, formMsg);
   formCard.append(form);
-  list.append(formCard);
+  sec.append(formCard);
 
   createBtn.addEventListener('click', async () => {
     const id = idInput.value.trim();
@@ -825,6 +824,7 @@ async function renderTenant() {
   const res = await mg('admin/tenants').catch(e => ({ error: e.message }));
   if (res.error) { sec.append(el('p', 'err', '加载失败: ' + res.error)); return; }
 
+  const list = el('div', 'cards tenant-grid');
   for (const t of res.tenants || []) {
     const card = el('div', 'card');
     const head = el('div', 'row');
