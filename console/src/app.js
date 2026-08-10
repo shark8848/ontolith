@@ -883,7 +883,7 @@ async function renderTenant() {
     }
 
     // Add-key row.
-    const keyRow = el('div', 'row');
+    const keyRow = el('div', 'row tenant-key-row');
     const keyInput = el('input'); keyInput.type = 'text'; keyInput.placeholder = 'key 标签（可选）';
     const addKeyBtn = iconBtn('icon-key', '生成 key');
     const keyMsg = el('span', 'muted');
@@ -908,7 +908,6 @@ async function renderTenant() {
     // Lifecycle actions (bottom-right, icon buttons).
     const actRow = el('div', 'card-actions');
     const toggle = iconBtn(t.status === 'active' ? 'icon-ban' : 'icon-power', t.status === 'active' ? '禁用' : '启用');
-    toggle.classList.toggle('ban', t.status === 'active');
     toggle.addEventListener('click', async () => {
       try {
         await mg(`admin/tenants/${t.id}`, {
