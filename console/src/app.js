@@ -39,6 +39,12 @@ const mg = (p, o) => api(`/api/mg/${current.id}/${p}`, o);
 let refreshMs = 5000;
 let activeTab = 'overview';
 let autoTimer = null;
+// Transient outputs preserved across auto-refresh re-renders.
+const REFRESH_TABS = ['overview', 'monitor', 'cluster', 'infer', 'plugins', 'data', 'audit', 'tenant', 'traces', 'config'];
+let lastTenantNote = null;
+let lastShacl = null;
+let lastMat = null;
+let lastTurtle = null;
 
 // ---------- themes / UI settings (bottom-left config menu) ----------
 const THEMES = [
@@ -137,8 +143,16 @@ function switchTab(name) {
   stopAuto();
   render();
 }
-function startAuto(ms) { stopAuto(); if (ms > 0) autoTimer = setInterval(render, ms); }
+function startAuto(ms) {
+  stopAuto();
+  if (ms > 0) autoTimer = setInterval(() => { if (!editingInTab()) render(); }, ms);
+}
 function stopAuto() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+function editingInTab() {
+  const ae = document.activeElement;
+  return !!ae && !!ae.closest && !!ae.closest('.tab.active') &&
+    ['INPUT', 'TEXTAREA', 'SELECT'].includes(ae.tagName);
+}
 
 // ---------- rendering ----------
 async function render() {
@@ -161,7 +175,7 @@ async function render() {
       sec.replaceChildren(el('p', 'err', '加载失败: ' + err.message));
     }
   }
-  if (['overview', 'monitor', 'cluster', 'data', 'tenant'].includes(activeTab)) startAuto(refreshMs);
+  if (REFRESH_TABS.includes(activeTab)) startAuto(refreshMs);
 }
 
 async function probeStatus() {
@@ -377,6 +391,7 @@ async function renderInfer() {
   shaclCard.append(el('h3', null, 'SHACL 校验工作台（POST /validate/shacl）'));
   const ta = el('textarea');
   ta.value = localStorage.getItem('consoleShaclShapes') || DEFAULT_SHACL_SHAPES;
+  ta.addEventListener('input', () => localStorage.setItem('consoleShaclShapes', ta.value));
   shaclCard.append(ta);
   const shaclRow = el('div', 'row');
   const runBtn = el('button', 'run', '运行校验');
@@ -386,6 +401,7 @@ async function renderInfer() {
   const shaclOut = el('pre', 'json');
   shaclOut.textContent = '—';
   shaclCard.append(shaclOut);
+  if (lastShacl) { shaclMsg.textContent = lastShacl.msg; shaclOut.textContent = lastShacl.out; }
   runBtn.addEventListener('click', async () => {
     const body = ta.value.trim();
     if (!body) { shaclMsg.textContent = '请输入 Turtle shapes'; return; }
@@ -393,14 +409,18 @@ async function renderInfer() {
     try {
       const res = await gw('validate/shacl?limit=1000', { method: 'POST', headers: { 'content-type': 'text/turtle' }, body });
       localStorage.setItem('consoleShaclShapes', body);
-      shaclMsg.textContent = res.conforms ? '✓ conforms' : `✗ 不通过（${res.result_count} 条违规）`;
-      shaclOut.textContent = JSON.stringify({
+      const msg = res.conforms ? '✓ conforms' : `✗ 不通过（${res.result_count} 条违规）`;
+      const out = JSON.stringify({
         conforms: res.conforms, result_count: res.result_count,
         shapes: res.shapes, data: res.data, results: (res.results || []).slice(0, 20),
       }, null, 2);
+      shaclMsg.textContent = msg;
+      shaclOut.textContent = out;
+      lastShacl = { msg, out };
     } catch (err) {
       shaclMsg.textContent = '';
       shaclOut.textContent = '加载失败: ' + err.message;
+      lastShacl = { msg: '', out: '加载失败: ' + err.message };
     } finally { runBtn.disabled = false; }
   });
   sec.append(shaclCard);
@@ -415,16 +435,21 @@ async function renderInfer() {
   const matOut = el('pre', 'json');
   matOut.textContent = '—';
   matCard.append(matOut);
+  if (lastMat) { matMsg.textContent = lastMat.msg; matOut.textContent = lastMat.out; }
   matBtn.addEventListener('click', async () => {
     matBtn.disabled = true; matMsg.textContent = '物化中…';
     try {
       const res = await gw('materialize', { method: 'POST' });
       const warn = (res.timed_out ? ' · 超时' : '') + (res.inconsistent ? ' · inconsistent' : '');
-      matMsg.textContent = `${res.derived_triples} 条派生 · ${res.elapsed_ms}ms${warn}`;
-      matOut.textContent = JSON.stringify(res, null, 2);
+      const msg = `${res.derived_triples} 条派生 · ${res.elapsed_ms}ms${warn}`;
+      const out = JSON.stringify(res, null, 2);
+      matMsg.textContent = msg;
+      matOut.textContent = out;
+      lastMat = { msg, out };
     } catch (err) {
       matMsg.textContent = '';
       matOut.textContent = '加载失败: ' + err.message;
+      lastMat = { msg: '', out: '加载失败: ' + err.message };
     } finally { matBtn.disabled = false; }
   });
   sec.append(matCard);
@@ -587,6 +612,8 @@ async function renderData() {
   card.append(el('h3', null, 'Turtle 写入（POST /data/turtle）'));
   const ta = el('textarea');
   ta.placeholder = '@prefix ex: <http://example.org/> .\nex:demo a ex:Thing ; ex:label "demo" .';
+  ta.value = localStorage.getItem('consoleTurtleDraft') || '';
+  ta.addEventListener('input', () => localStorage.setItem('consoleTurtleDraft', ta.value));
   card.append(ta);
   const row = el('div', 'row');
   const btn = el('button', 'run', '写入');
@@ -595,17 +622,21 @@ async function renderData() {
   card.append(row);
   const out = el('pre', 'json');
   card.append(out);
+  if (lastTurtle) { msg.textContent = lastTurtle.msg; out.textContent = lastTurtle.out; }
   btn.addEventListener('click', async () => {
     const body = ta.value.trim();
     if (!body) { msg.textContent = '请输入 Turtle'; return; }
     btn.disabled = true; msg.textContent = '写入中…';
     try {
       const res = await gw('data/turtle', { method: 'POST', headers: { 'content-type': 'text/turtle' }, body });
-      out.textContent = JSON.stringify(res, null, 2);
+      const outText = JSON.stringify(res, null, 2);
+      out.textContent = outText;
       msg.textContent = '写入成功';
+      lastTurtle = { msg: '写入成功', out: outText };
       renderData();
     } catch (err) {
       if (err.message !== 'unauthorized') msg.textContent = '错误: ' + err.message;
+      lastTurtle = { msg: '错误: ' + err.message, out: out.textContent };
     } finally { btn.disabled = false; }
   });
   sec.append(card);
@@ -684,6 +715,7 @@ async function renderTenant() {
   form.append(idInput, nameInput, descInput, genBox, createBtn, formMsg);
   formCard.append(form);
   list.append(formCard);
+  if (lastTenantNote) list.append(el('p', 'ok-text', lastTenantNote));
 
   createBtn.addEventListener('click', async () => {
     const id = idInput.value.trim();
@@ -708,6 +740,7 @@ async function renderTenant() {
         note = `已创建 ${t.id}，新 key（仅显示一次）：${out.api_key}`;
       }
       formMsg.textContent = note;
+      lastTenantNote = note;
       await renderTenant();
     } catch (e) { formMsg.textContent = '创建失败: ' + e.message; }
   });
@@ -768,6 +801,7 @@ async function renderTenant() {
         });
         keyInput.value = '';
         keyMsg.textContent = `新 key（仅显示一次）：${out.api_key}`;
+        lastTenantNote = `租户 ${t.id} 新 key（仅显示一次）：${out.api_key}`;
         await renderTenant();
       } catch (e) { keyMsg.textContent = '生成失败: ' + e.message; }
     });
