@@ -101,6 +101,10 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | console 左下角配置菜单（主题切换 + 退出登录） | 已完成 | 5 套主题 + localStorage 持久化 + 图表颜色联动；8890/8891 实测（2026-08-09） |
 | SPARQL 测试样例入库（loadtest 10 样例 + runner） | 已完成 | docs/sparql-samples-loadtest.md + scripts/sparql-samples-loadtest.mjs，生产复验 10/10 OK（2026-08-09） |
 | 租户管理（注册表 CRUD + 管理面代理 + console 租户页） | 已完成 | L5 2.10.0：`/admin/tenants*` 网关 CRUD + 管理面 ACL 代理 + console 侧边栏租户页，security 29/storage 54/server 65 测（2026-08-10） |
+| console 自动刷新优化（仅监控/集群，模块内定时器） | 已完成 | 全局刷新机制移除，monitor/cluster 模块内 `setInterval` 自管，`switchTab`/`logout` 经 `stopPageAuto` 清理（2026-08-10） |
+| console 数值显示精度统一（3 位小数） | 已完成 | `fmtNum`/`fmtLatency` `toFixed(3)`，指标表/运行时长/图表末值标签生效（2026-08-10） |
+| console 租户管理页交互完善（key 复制/toast/图标操作/删除输入确认/2 列布局） | 已完成 | 一次性 key 卡片内展示+复制图标、右上角 toast（5s 进度条）、图标操作、删除输入 id 确认、2 列网格（2026-08-10） |
+| ikc-log-center Rust SDK 接入（规划中，Python 方案已回退） | 未开始 | 平台服务日志接入 log-center：已评估 Rust SDK 可行性（HTTP /ingest + generic-JSON gRPC），待实施（2026-08-10） |
 
 ## 4. 写入操作（GraphQL）
 

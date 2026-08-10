@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.61
+版本: 0.1.62
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-10 | Codex | **今日任务看板同步 DONE（SYNC-PROJ-0001，PROG-0001 0.1.61→0.1.62）**：GitHub Projects #2 增量同步 5 条 0 失败——新增 4 卡：console 自动刷新优化（仅监控/集群模块内定时器）Done / console 数值精度 3 位小数 Done / console 租户管理页交互完善（key 复制 + toast + 图标操作 + 删除输入确认 + 2 列布局）Done / ikc-log-center Rust SDK 接入（规划中，Python 方案已回退）Todo；回写租户管理卡 Done；回读 total=63；`docs/github-projects-sync.md` 映射表补 4 行 |
 | 2026-08-10 | Codex | **console 租户列表固定 2 列（PROG-0001 0.1.60→0.1.61）**：租户卡片网格 `cards tenant-grid` 固定 `repeat(2, 1fr)`，不再随窗口无限向右排（窄屏 ≤760px 回退单列）；创建表单移出网格、整行置顶；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 租户图标细节调整（PROG-0001 0.1.59→0.1.60）**：① 禁用 `icon-ban` 移除常驻红色（删除 `.icon-btn.ban` 规则与 `ban` class 切换），与其他图标一致——默认 muted、hover/focus 才出现 accent 边框色；② 「生成 key」图标与输入框同行——key 行加 `tenant-key-row`，输入框 `flex:1; min-width:0` 不再占满整行把按钮挤到下一行；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 租户操作细节收尾（PROG-0001 0.1.58→0.1.59）**：① 删除对话框居中修复——`confirm-overlay` 动态创建时补 `id` 使 `#confirm-overlay` fixed 居中样式生效（原 class/id 不匹配导致未居中）；删除结果右上角 toast（成功「删除成功：<id>」/失败 bad）② 吊销改 `icon-trash` 图标按钮（danger hover）③ 「生成 key」按钮改 `icon-key` 图标并紧贴 key 标签输入框右侧 ④ 禁用图标由 power 换成 `icon-ban`（圆圈红色斜杠，`icon-btn.ban` 常驻红色），启用仍用 `icon-power`；`npm run build` 重建 dist，8890 线上验证 |
