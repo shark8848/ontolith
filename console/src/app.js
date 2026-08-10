@@ -38,9 +38,10 @@ const mg = (p, o) => api(`/api/mg/${current.id}/${p}`, o);
 
 let refreshMs = 5000;
 let activeTab = 'overview';
-let autoTimer = null;
-// Transient outputs preserved across auto-refresh re-renders.
-const REFRESH_TABS = ['overview', 'monitor', 'cluster', 'infer', 'plugins', 'data', 'audit', 'tenant', 'traces', 'config'];
+// Page-local auto-refresh timers — only monitor / cluster self-refresh.
+let monitorTimer = null;
+let clusterTimer = null;
+// Transient outputs preserved across re-renders (manual refresh / tab switch).
 let lastTenantNote = null;
 let lastShacl = null;
 let lastMat = null;
@@ -84,7 +85,7 @@ function buildThemeGrid() {
 function openSettings() { buildThemeGrid(); $('#settings-overlay').classList.remove('hidden'); }
 function closeSettings() { $('#settings-overlay').classList.add('hidden'); }
 function logout() {
-  stopAuto();
+  stopPageAuto();
   consoleToken = '';
   localStorage.removeItem('consoleToken');
   closeSettings();
@@ -140,14 +141,13 @@ function switchTab(name) {
   activeTab = name;
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
-  stopAuto();
+  stopPageAuto();
   render();
 }
-function startAuto(ms) {
-  stopAuto();
-  if (ms > 0) autoTimer = setInterval(() => { if (!editingInTab()) render(); }, ms);
+function stopPageAuto() {
+  clearInterval(monitorTimer);
+  clearInterval(clusterTimer);
 }
-function stopAuto() { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
 function editingInTab() {
   const ae = document.activeElement;
   return !!ae && !!ae.closest && !!ae.closest('.tab.active') &&
@@ -175,7 +175,6 @@ async function render() {
       sec.replaceChildren(el('p', 'err', '加载失败: ' + err.message));
     }
   }
-  if (REFRESH_TABS.includes(activeTab)) startAuto(refreshMs);
 }
 
 async function probeStatus() {
@@ -189,7 +188,7 @@ async function probeStatus() {
   setDot('dot-mg', mgOk ? 'ok' : 'bad');
   const note = $('#refresh-note');
   note.textContent = gwOk && mgOk
-    ? `${current.name} 可达 · 自动刷新 ${refreshMs}ms`
+    ? `${current.name} 可达 · 监控/集群自动刷新 ${refreshMs}ms`
     : `${current.name} 部分组件不可达`;
 }
 function setDot(id, state) { $('#' + id).className = 'dot ' + state; }
@@ -266,11 +265,13 @@ async function renderOverview() {
 // ---------- monitor (charts) ----------
 let chartCache = {};
 async function renderMonitor() {
+  clearInterval(monitorTimer);
+  const schedule = () => { monitorTimer = setInterval(() => { if (!editingInTab()) renderMonitor(); }, refreshMs); };
   const sec = $('#tab-monitor');
   sec.replaceChildren();
   const res = await api(`/api/history?cluster=${current.id}`);
   const pts = res.points || [];
-  if (pts.length < 2) { sec.append(el('p', 'muted', '历史采样中（至少需要 2 个采样点）…')); return; }
+  if (pts.length < 2) { sec.append(el('p', 'muted', '历史采样中（至少需要 2 个采样点）…')); schedule(); return; }
   const series = (key) => pts.map((p, i) => ({ t: p.ts, v: p[key] ?? 0 }));
   const charts = el('div', 'charts');
   charts.append(chartCard('请求速率（req/refresh 窗口）', rateSeries(series('requests_total'))));
@@ -280,6 +281,7 @@ async function renderMonitor() {
   charts.append(chartCard('commit_index', series('commit_index')));
   charts.append(chartCard('节点健康（healthy/nodes）', pts.map((p, i) => ({ t: p.ts, v: p.healthy ?? 0, max: p.nodes ?? 1 })), cssVar('--warn')));
   sec.append(charts);
+  schedule();
 }
 function rateSeries(s) {
   return s.map((p, i) => i === 0 ? { t: p.t, v: 0 } : { t: p.t, v: Math.max(0, p.v - s[i - 1].v) });
@@ -337,6 +339,8 @@ function drawChart(cv, series, color = cssVar('--accent')) {
 
 // ---------- cluster ----------
 async function renderCluster() {
+  clearInterval(clusterTimer);
+  const schedule = () => { clusterTimer = setInterval(() => { if (!editingInTab()) renderCluster(); }, refreshMs); };
   const sec = $('#tab-cluster');
   sec.replaceChildren();
   const [st, mon] = await Promise.all([
@@ -358,6 +362,7 @@ async function renderCluster() {
   detail.append(el('h3', null, '集群状态 JSON'));
   detail.append(el('pre', 'json', JSON.stringify(st, null, 2)));
   sec.append(detail);
+  schedule();
 }
 
 // ---------- inference (L6 reasoner) ----------
