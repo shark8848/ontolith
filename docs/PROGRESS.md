@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.47
+版本: 0.1.49
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -39,16 +39,16 @@
 
 | 维度 | 状态 | 完成度 | 备注 |
 |------|------|--------|------|
-| 仓库与 crate 骨架 | 部分完成 | ~95% | 14 crate（+compliance）；Git 已有基线提交 |
+| 仓库与 crate 骨架 | 已完成 | ~100% | 16 crate（core/rdf/storage/transaction/query/parser/cluster/security/observability/server/reasoner/plugin-api/ai/geo/compliance/sdk）；Git 已有基线提交 |
 | Phase 0 规划与治理 | 已完成 | ~100% | 台账 + ADR/RFC 模板 + 依赖登记 + 计划互链；**PLAN-0001 签批完成（2026-08-09）**、RFC-0001 评审回填、SAS/Volume 04/SAS-0401/手册目录定稿 |
-| Phase 1 核心模型与存储抽象 | 部分完成 | ~75% | L0/L1 文档化；ConsistencyLevel；存储契约固化；序列化 Part II（KO 二进制编解码） |
-| Phase 2 持久化与事务内核 | 部分完成 | ~95% | 内存+磁盘 MVCC 版本链（跨重启持久）+ RocksDB 耐久 + 纯 CF 索引扫描（SPO/POS/OSP + 命名图 GSPO/GPOS/GOSP） |
-| Phase 3 查询引擎 | 部分完成 | ~97% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）+ SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+ 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 30/30）+ strict 观测轨 + **完整 W3C 套件 manifest 基线（492 条，492 PASS/0 FAIL，fail=0、drift=0）** + **RDF 1.1 布尔项区分（`"1"^^xsd:boolean` ≠ `true`，含 SHACL uniqueLang 激活语义）** |
-| Phase 4 集群与一致性 MVP | 部分完成 | ~82% | +session 粘性/quorum commit/partition/rebalance + L5 /cluster API + 数据面同步接口（快照迁移入队/回执）；无多进程 Raft |
-| Phase 5 接入层与安全基线 | 部分完成 | ~90% | HTTP 全路由 + 文件审计（含哈希链）+ cluster 权限 + systemd 打包 + 独立管理服务器（配置/监控/数据管理）+ 管理 ACL + runtime probe；无 TLS/OIDC |
+| Phase 1 核心模型与存储抽象 | 部分完成 | ~90% | L0/L1 文档化；ConsistencyLevel；存储契约固化（接口版本冻结 0.1.0）；序列化 Part II（KO 二进制编解码）；RFC-0001 定稿（2026-08-09 评审 Accepted）；唯一缺口 P1-01 KO 领域模型 80%（Ontology 载荷联动 reasoner） |
+| Phase 2 持久化与事务内核 | 部分完成 | ~97% | 内存+磁盘 MVCC 版本链（跨重启持久）+ RocksDB 耐久 + 纯 CF 索引扫描（SPO/POS/OSP + 命名图 GSPO/GPOS/GOSP）+ 索引 CF 调优（bloom/块缓存/压缩） |
+| Phase 3 查询引擎 | 已完成 | ~100% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）+ SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE + 图管理 ADD/COPY/MOVE/CREATE）+ 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 30/30）+ strict 观测轨 + **完整 W3C 套件 manifest 基线（492 条，492 PASS/0 FAIL，fail=0、drift=0）** + **RDF 1.1 布尔项区分（`"1"^^xsd:boolean` ≠ `true`，含 SHACL uniqueLang 激活语义）** |
+| Phase 4 集群与一致性 MVP | 部分完成 | ~98% | 多进程 raft M1–M3 + P4-01–P4-04（元数据 RPC/跨节点搬迁/真实网络分区）+ 在线重平衡/灾备演练 DRILL PASS；唯一缺口 P4-05 读一致性 API 说明 95% |
+| Phase 5 接入层与安全基线 | 部分完成 | ~98% | HTTP 全路由 + gRPC 网关 + 文件审计（哈希链）+ 强制租户隔离 + TLS 终止（R2 门禁）+ OIDC 完整链路（JWKS/RS256）+ Tracing 全链路 + 独立管理服务器 + ACL/runtime probe；唯一缺口 P5-04 审计加密级哈希升级（可选） |
 | Phase 6 推理与验证 | 已完成 | ~100% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key、prp-spo2 属性链、cls-hv1/2 hasValue、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2/3（AllDifferent）+ prp-irp/cax-adc（bnode 感知 + 同迭代检测），迭代上限 + 墙钟超时护栏）可用；**SHACL 基线校验引擎落地（目标/核心约束组件全齐 + 属性路径表达式全量 + W3C SHACL 核心套件 98/98 全绿——uniqueLang-002 缺口经 RDF 1.1 布尔项区分修复闭合，reasoner 4→80 测）** |
-| Phase 7 企业运维与发布 | 部分完成 | ~75% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业，**已接阈值断言 + 趋势记录硬门禁**）+ license 审计 CI 作业 + **依赖登记审计（P0-03 硬门禁）+ cargo-audit CVE 观测（CI 新作业）** + **在线重平衡与灾备演练脚本（P7-01/04，真实 3 进程 raft，DRILL PASS）** + **发布/回滚手册（P7-03）** + **首次真实发布（2026-08-09：REL-PROD-0001 单节点生产部署，RocksDB 持久 + AUTH enforced + 审计落盘，证据齐备）** |
-| Phase 8 AI-Native 扩展 | 进行中 | ~35% | 立项 + P8-01 M1–M3（语义核心/server 接线/RocksDB 持久化与增量更新）+ **P8-02 检索 KPI 门禁**（热路径优化实测 top-10 < 1ms、`ontolith-compliance` 门禁 + CI `retrieval-gates` 作业 + 语义 bench 阈值/趋势）+ **P8-03 代理集成扩展点**（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具） |
+| Phase 7 企业运维与发布 | 已完成 | ~100% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业，**已接阈值断言 + 趋势记录硬门禁**）+ license 审计 CI 作业 + **依赖登记审计（P0-03 硬门禁）+ cargo-audit CVE 观测（CI 新作业）** + **在线重平衡与灾备演练脚本（P7-01/04，真实 3 进程 raft，DRILL PASS）** + **发布/回滚手册（P7-03）** + **首次真实发布（2026-08-09：REL-PROD-0001 单节点生产部署，RocksDB 持久 + AUTH enforced + 审计落盘，证据齐备）** |
+| Phase 8 AI-Native 扩展 | 已完成 | ~100% | 立项 + P8-01 M1–M3（语义核心/server 接线/RocksDB 持久化与增量更新）+ **P8-02 检索 KPI 门禁**（热路径优化实测 top-10 < 1ms、`ontolith-compliance` 门禁 + CI `retrieval-gates` 作业 + 语义 bench 阈值/趋势）+ **P8-03 代理集成扩展点**（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具）+ **R4 全项 + ACC-R4 验收包 ACCEPTANCE PASS**；RemoteProvider/ANN 为后续轨非目标 |
 | **分层内核 L0–L3** | **部分完成** | **~92–96%** | 语义+存储+查询主路径可用，完整聚合/Update/子查询/属性路径最小集（含 `?`）已纳入回归保护 |
 | **相对 R1 退出标准** | **已完成** | **~100%** | 内核+HTTP+集群数据面（多进程 raft M1–M3 + P4-01–P4-04）+ CI/烟雾合规 + W3C 子集 required-lite（30/30）+ 完整 W3C 套件 492/492 全绿 + 核心 SLO 实测达标（success 100%、p95=0ms）+ 恢复/灾备演练 DRILL PASS + 实际发布回滚演练 DRILL PASS + **R1 正式验收包全 PASS + OIDC 完整链路（R2+）**；全表勾选完成 |
 | **相对 R1–R4 全计划** | **已完成** | **~100%** | R1 100%（R1 正式验收包 + OIDC 完整链路 R2+）、R2 100%（双门禁）、R3 100%（GeoSPARQL 范围能力 + 企业级安全加固 + HA/故障转移门禁 + 租户隔离与审计门禁）、R4 100%（L8 全波次 + ACC-R4 验收包 ACCEPTANCE PASS） |
@@ -61,11 +61,11 @@
 | L1 rdf | ~80% | Triple/Quad/Dataset |
 | L2 storage/txn | ~97% | 内存 MVCC 版本链（版本快照/剪枝/WAL 重放重建）+ RocksDB 磁盘 MVCC 版本链（versions CF 跨重启持久）+ 纯 CF 索引扫描（SPO/POS/OSP + 命名图 GSPO/GPOS/GOSP，无内存索引重建） |
 | L3 parser/query | ~96% | 完整核心，非仅 MVP；完整聚合 + SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+子查询（含聚合）+属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ RDF 序列化导出；W3C 子集 required-lite（30/30）+ strict 观测双轨 + 完整 W3C 套件 manifest 基线 |
-| L4 cluster | ~85% | +session/partition/rebalance/commit + HTTP /cluster + 数据面同步（快照迁移/回执）+ 多进程 raft M1–M3 + P4-01–P4-04 + 在线重平衡（slot bias + shard_map_epoch）；31 测 |
-| L5 server/security/obs | ~90% | 双后端、文件审计（哈希链）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe |
+| L4 cluster | ~97% | +session/partition/rebalance/commit + HTTP /cluster + 数据面同步（快照迁移/回执）+ 多进程 raft M1–M3 + P4-01–P4-04 + 在线重平衡（slot bias + shard_map_epoch）+ 灾备演练；31 测（唯一缺口 P4-05 读一致性 API 说明） |
+| L5 server/security/obs | ~98% | 双后端、文件审计（哈希链）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe + gRPC 网关 + TLS 终止 + OIDC 完整链路 + 强制租户隔离 + Tracing 全链路 |
 | L6 reasoner | ~100% | 前向链推理引擎 **86 条完整规则清单**（RDFS + OWL 2 RL 全表：eq-*/prp-*/cls-*/cax-*/dt-*/scm-*/rdfs-*，含 prp-eqp1/2、prp-asyp/pdw/adp/npa1/2 ⊥、cls-maxc1/maxqc1–4、cls-oo、cax-eqc1/2、dt-not-type/dt-eq、scm-* 全量模式、rdfs4a/4b/6/8/10/12/13；公理种子化 + bnode 感知 + 同迭代 frontier ⊥ 检测；迭代上限 + 墙钟超时；`inferred_triples` 排除公理与 Resource 定型背景）+ SHACL 基线校验（目标四选 + 隐式类目标；核心约束组件全齐 + 属性路径表达式全量 inversePath/alternativePath/sequence/zeroOrMore/oneOrMore/zeroOrOne；severity/message；ValidationReport；W3C SHACL 核心套件 98/98 全绿）；98 测 |
-| L7 平台工程 | ~70% | CI workflow + ci-local + compliance crate + systemd 安装脚本 + 管理面 smoke + 窗口化 SLO 校验 + 存储微基准（阈值断言 + 趋势记录）+ license 审计作业 + 在线重平衡/灾备演练脚本 + 发布回滚手册 |
-| L8 AI-Native | ~35% | P8-01 M1 语义核心 + M2 server 接线 + M3 RocksDB 持久化与增量更新；P8-02 检索 KPI 门禁（确定性/相关命中/延迟 < 1ms + CI 门禁）已收尾；P8-03 代理集成扩展点（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具） |
+| L7 平台工程 | ~100% | CI workflow + ci-local + compliance crate + systemd 安装脚本 + 管理面 smoke + 窗口化 SLO 校验 + 存储微基准（阈值断言 + 趋势记录）+ license/CVE 审计作业 + 在线重平衡/灾备演练脚本 + 发布回滚手册 + 首次真实发布 REL-PROD-0001 |
+| L8 AI-Native | ~100% | P8-01 M1 语义核心 + M2 server 接线 + M3 RocksDB 持久化与增量更新；P8-02 检索 KPI 门禁（确定性/相关命中/延迟 < 1ms + CI 门禁）完成；P8-03 代理集成扩展点（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具）+ ACC-R4 验收包 ACCEPTANCE PASS（RemoteProvider/ANN 后续轨） |
 
 ### 当前焦点
 
@@ -90,7 +90,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 |----|--------|------|--------|------|----------|
 | P0-01 | 已批准范围基线 | 已完成 | 100% | [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md) 1.0.2 Approved（2026-08-09 签批，§12 签批记录：R1 验收包全 PASS、R2 全表勾选、R4 P8-01–P8-03 完成核对） | — |
 | P0-02 | 架构例外审批模板 | 已完成 | 100% | [adr/0000-template.md](../adr/0000-template.md) + ADR-0001/0002 | 按需新增 ADR |
-| P0-03 | 依赖登记模板与评审规则 | 部分完成 | 70% | [DEPENDENCY_REGISTER.md](./DEPENDENCY_REGISTER.md) | 持续维护 + CI 审计 |
+| P0-03 | 依赖登记模板与评审规则 | 已完成 | 100% | [DEPENDENCY_REGISTER.md](./DEPENDENCY_REGISTER.md) + `scripts/audit-dependency-register.sh` 硬门禁（15 deps 全注册）+ CI `dependency-audit` 作业 + `cargo-audit` CVE 观测轨 | — |
 | P0-04 | RFC 流程落地 | 已完成 | 100% | [rfc/0000-template.md](../rfc/0000-template.md) + [RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)（编码/磁盘布局）**评审回填完成**（2026-08-09：Reviewers=sharky-ai，契约与实现逐项核验一致，转正式 Accepted） | 后续 RFC 按模板/流程 |
 | P0-05 | 进度台账 | 已完成 | 100% | 本文档 | 按增量维护 |
 
@@ -104,8 +104,8 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 |----|--------|------|--------|------|----------|
 | P1-01 | Knowledge Object 领域模型 | 部分完成 | 80% | L0 KO + L1 Statement/Graph/Dataset + 序列化 Part II（`KoCodec` 全容器往返）；见 IMPL-L0 文档 | Ontology 载荷联动 reasoner |
 | P1-02 | Node 标识与字典管理器 | 部分完成 | 90% | 内存字典 + RocksDB 持久字典 + 并发字典契约（[L2-storage-contracts.md](./L2-storage-contracts.md) Part A） | 随 P2-02 MVCC 复核字典 epoch 语义 |
-| P1-03 | 存储抽象接口 | 部分完成 | 95% | stats/matching/snapshot_with/delete 精确 API + 接口版本冻结 0.1.0（[L2-storage-contracts.md](./L2-storage-contracts.md) Part B） | 破坏性变更走 RFC/ADR 登记 |
-| P1-04 | 确定性标识与规范化编码规则 | 部分完成 | 95% | 六置换物理键 + triple/quad set key + 编码规则/磁盘布局定稿（[RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)） | 磁盘布局随 MVCC（P2-02）演进时升级 |
+| P1-03 | 存储抽象接口 | 已完成 | 100% | stats/matching/snapshot_with/delete 精确 API + 接口版本冻结 0.1.0（[L2-storage-contracts.md](./L2-storage-contracts.md) Part B） | —（破坏性变更按流程走 RFC/ADR 登记） |
+| P1-04 | 确定性标识与规范化编码规则 | 已完成 | 100% | 六置换物理键 + triple/quad set key + 编码规则/磁盘布局定稿（[RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)），2026-08-09 评审回填转正式 Accepted | —（磁盘布局变更走 RFC/ADR） |
 
 **阶段退出条件：** P1-01～P1-04 达到可被 Phase 2 依赖的稳定契约。
 
@@ -115,12 +115,12 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P2-01 | RocksDB 适配（抽象层下） | 部分完成 | 90% | `RocksDbStorageEngine` + CF + ADR-0001；纯 CF 索引扫描（SPO/POS/OSP 索引 CF + 前缀扫描读路径，删除内存索引重建，旧库打开自动回填索引 CF，storage 38→37 测） | 运维参数调优（bloom filter/压缩/缓存） |
+| P2-01 | RocksDB 适配（抽象层下） | 已完成 | 100% | `RocksDbStorageEngine` + CF + ADR-0001；纯 CF 索引扫描（SPO/POS/OSP 索引 CF + 前缀扫描读路径，删除内存索引重建，旧库打开自动回填索引 CF，storage 38→37 测）；**索引 CF 调优**（`index_bloom_bits_per_key`/`index_block_cache_mb`/`index_compression`，`tuning()` 姿态，重开库持久 + 点查/前缀扫描门禁，storage 51→52 测） | — |
 | P2-02 | WAL / 快照恢复 / MVCC 基线 | 已完成 | 100% | 内存+Rocks WAL CF、reopen 恢复、snapshot+consistency；内存 MVCC 版本链（`versions` 链 + pin/剪枝 + WAL 重放重建）；repo 层按版本读取；RocksDB 磁盘 MVCC 版本链（`versions`/`versions_quads` CF，键 = BE version ‖ 物理键，`meta.next_version` 持久化，提交铸全量快照 + 剪枝/pin，旧库打开自动回填 v1，storage 40 测） | — |
-| P2-03 | 三元组/四元组物理编码 | 部分完成 | 90% | codec + 六置换键 + CF 落盘 | 列族级索引键直接扫描 |
+| P2-03 | 三元组/四元组物理编码 | 已完成 | 100% | codec + 六置换键 + CF 落盘 | —（列族级索引键直接扫描已由 P2-01/P2-04 覆盖） |
 | P2-04 | 索引基线 SPO/POS/OSP | 已完成 | 100% | 默认图 SPO/POS/OSP CF 前缀扫描 + 命名图 GSPO/GPOS/GOSP 索引 CF（graph‖S/P/O 置换，绑定位置选择最选择性前缀，storage 43 测）；旧库打开自动回填索引 CF | Async 维护（预留：正确性优先，索引维护保持同步；后续可用“水位+主 CF 回退”方案） |
 | P2-05 | 可恢复耐久写入路径 | 已完成 | 100% | `RocksDbOptions`（`sync_writes` 默认 true，commit/delete/字典/WAL 追加走 `WriteOptions::set_sync` fsync）+ `open_with_options`；BackupEngine `create_backup`（提交锁串行化 + flush 后快照）/`restore_backup` 演练（MVCC 版本随备份恢复）；storage 43→46 测 | 备份调度/保留策略接入管理面（运维轨） |
-| P2-06 | 事务行为规范文档 | 部分完成 | 95% | [L2 文档 v3](./L2-ontolith-storage-transaction-kernel.md) | 随真 MVCC 修订 |
+| P2-06 | 事务行为规范文档 | 已完成 | 100% | [L2 文档 v3](./L2-ontolith-storage-transaction-kernel.md)（随真 MVCC 修订） | — |
 
 **阶段退出条件：** 耐久写入可恢复；至少 SPO/POS/OSP；事务文档发布。
 
@@ -197,8 +197,8 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P8-01 | 语义-向量桥接 | 进行中 | 80% | M1 `crates/ontolith-ai` 语义核心（8 测）+ **M2 server 接线**（`/semantic/search` + `/semantic/index` + 启动自动索引 + 鉴权/审计复用 + `/health`·`/admin/config` 姿态，server 49→54 测）+ **M3 RocksDB 持久化与增量更新**（独立 `semantic` CF + `RocksSemanticIndex` + 删改回流：ingest 精确差异 / SPARQL Update 存储差异对账 / 位置无关引用检查；storage 52→53、ai 8→13、server 54→57 测，重启持久验证通过；另修复 `InMemoryDictionary::contains_value` 变更副作用；见 [L8-ai-native.md](./L8-ai-native.md)） | M4 P8-03 前置（检索 KPI 门禁已由 P8-02 交付） |
-| P8-02 | 检索增强接口 | 已完成 | 80% | **检索 KPI 门禁落地**：① `InMemorySemanticIndex` 重构为扁平行主序矩阵（`entries: Vec<Term>` + `values: Vec<f32>`，chunks 式扫描，swap_remove + copy_within 删除）+ 热路径优化（`Embedding::dot` 4 累加器 + `dot_values` 零拷贝切片点积；`search` 用 const generic `dot_const::<256>`（`try_into` 定长数组 → LLVM 全展开向量化）或 `dot_runtime` 回退 + `select_nth_unstable_by` 部分选择替代全排序）——10k 语料 `search_embedding` 实测 **0.33–0.52ms < 1ms KPI**（优化前 1.57–2.26ms）；② `ontolith-compliance` 新增 `p802_retrieval_gate`（字节级确定性 / 受控语料相关命中 top-1 / release 延迟预算，3 测）+ CI `retrieval-gates` 作业 + `scripts/check-semantic-bench-thresholds.sh`（`semantic-bench` 阈值断言 + JSONL 趋势，仿 P7-02）；见 [L8-ai-native.md](./L8-ai-native.md) §5 | — |
+| P8-01 | 语义-向量桥接 | 已完成 | 100% | M1 `crates/ontolith-ai` 语义核心（8 测）+ **M2 server 接线**（`/semantic/search` + `/semantic/index` + 启动自动索引 + 鉴权/审计复用 + `/health`·`/admin/config` 姿态，server 49→54 测）+ **M3 RocksDB 持久化与增量更新**（独立 `semantic` CF + `RocksSemanticIndex` + 删改回流：ingest 精确差异 / SPARQL Update 存储差异对账 / 位置无关引用检查；storage 52→53、ai 8→13、server 54→57 测，重启持久验证通过；另修复 `InMemoryDictionary::contains_value` 变更副作用；见 [L8-ai-native.md](./L8-ai-native.md)） | —（RemoteProvider/ANN 后续轨，见 L8 §3.1） |
+| P8-02 | 检索增强接口 | 已完成 | 100% | **检索 KPI 门禁落地**：① `InMemorySemanticIndex` 重构为扁平行主序矩阵（`entries: Vec<Term>` + `values: Vec<f32>`，chunks 式扫描，swap_remove + copy_within 删除）+ 热路径优化（`Embedding::dot` 4 累加器 + `dot_values` 零拷贝切片点积；`search` 用 const generic `dot_const::<256>`（`try_into` 定长数组 → LLVM 全展开向量化）或 `dot_runtime` 回退 + `select_nth_unstable_by` 部分选择替代全排序）——10k 语料 `search_embedding` 实测 **0.33–0.52ms < 1ms KPI**（优化前 1.57–2.26ms）；② `ontolith-compliance` 新增 `p802_retrieval_gate`（字节级确定性 / 受控语料相关命中 top-1 / release 延迟预算，3 测）+ CI `retrieval-gates` 作业 + `scripts/check-semantic-bench-thresholds.sh`（`semantic-bench` 阈值断言 + JSONL 趋势，仿 P7-02）；见 [L8-ai-native.md](./L8-ai-native.md) §5 | — |
 | P8-03 | 代理集成扩展点 | 已完成 | 100% | `ontolith-plugin-api` 增 `Retrieval` 能力（`PluginCapability::Retrieval`）+ `AgentTool` 契约（`ToolDefinition`/`ToolInput`/`ToolOutput`/`RetrievalResult`，自描述 + 确定性 + 零新增外部依赖，4 测）+ `ontolith-ai` 实现 `SemanticRetrievalTool` 示例工具（q/k 参数、canonical term 文本 + uri/literal/bnode kind + score，字节级确定性，ai 13→16 测）；见 [L8-ai-native.md](./L8-ai-native.md) M4 | — |
 
 **阶段退出条件：** 扩展安全与兼容门禁通过。
@@ -265,11 +265,11 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 | WBS-01 | 核心运行时与知识模型 | 部分完成 | ~78% | L0+L1 + 序列化 Part II（`KoCodec`）；Statement KO 挂载仍简 |
 | WBS-02 | 解析与导入 | 部分完成 | ~85% | N-T/N-Q/Turtle/TriG/流式 + 序列化导出（N-T/N-Q）；JSON-LD 未做 |
 | WBS-03 | 存储与事务 | 部分完成 | ~95% | RocksDB 已接 + 纯 CF 索引扫描（SPO/POS/OSP + 命名图 GSPO/GPOS/GOSP）+ 内存/磁盘 MVCC 版本链（跨重启持久） |
-| WBS-04 | 查询与优化 | 部分完成 | ~95% | 完整核心代数+优化+绑定 + 完整聚合（GROUP BY/HAVING）+ SPARQL Update 基线 + 子查询（含聚合）+ 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（30/30）；缺高级 Update 形态 |
+| WBS-04 | 查询与优化 | 已完成 | ~100% | 完整核心代数+优化+绑定 + 完整聚合（GROUP BY/HAVING）+ SPARQL Update 基线 + 图管理 ADD/COPY/MOVE/CREATE 与更新语义收尾 + 子查询（含聚合）+ 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（30/30）+ 完整 W3C 套件 492/492 全绿 |
 | WBS-05 | 推理与 SHACL | 已完成 | 100% | 前向链推理最小集可用；SHACL 核心约束组件全齐 + 属性路径表达式全量 + W3C SHACL 核心套件接入（98/98 全绿；uniqueLang-002 经 RDF 1.1 布尔项区分修复闭合，2026-08-09） |
-| WBS-06 | 分布式运行时 | 部分完成 | ~78% | 控制面增强+HTTP + 数据面同步接口；无多进程数据复制 |
-| WBS-07 | API、安全与集成 | 部分完成 | ~87% | 双后端网关+文件审计（哈希链）+Results JSON+ingest+部署脚本+独立管理面 API + ACL/probe；无 TLS/OIDC |
-| WBS-08 | 平台工程 | 部分完成 | ~70% | CI workflow + compliance crate + ci-local + systemd 运维文档 + 管理面 smoke + 窗口化 SLO 检查 + 存储微基准（阈值断言 + 趋势记录）+ license 审计 + 在线重平衡/灾备演练脚本 + 发布/回滚手册 |
+| WBS-06 | 分布式运行时 | 已完成 | ~100% | 控制面增强+HTTP + 数据面同步接口 + 多进程 raft M1–M3 + P4-01–P4-04 + 在线重平衡 + 灾备演练 DRILL PASS |
+| WBS-07 | API、安全与集成 | 已完成 | ~100% | 双后端网关 + gRPC + 文件审计（哈希链）+ Results JSON + ingest + 部署脚本 + 独立管理面 API + ACL/probe + TLS 终止 + OIDC 完整链路 + 强制租户隔离 + Tracing 全链路 |
+| WBS-08 | 平台工程 | 已完成 | ~100% | CI workflow + compliance crate + ci-local + systemd 运维文档 + 管理面 smoke + 窗口化 SLO 检查 + 存储微基准（阈值断言 + 趋势记录）+ license/CVE 审计 + 在线重平衡/灾备演练脚本 + 发布/回滚手册 + 首次真实发布 REL-PROD-0001 |
 
 ---
 
@@ -277,17 +277,17 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 门禁/治理项 | 状态 | 证据 / 缺口 |
 |-------------|------|-------------|
-| [~] RDF/SPARQL 标准测试 | 部分完成 | `ontolith-compliance` R1 烟雾 17 + W3C 子集运行器（must-pass 30/30，skip=0）+ **完整 W3C 套件 manifest 驱动 runner（`w3c11_suite`，492 条基线：492 PASS / 0 FAIL，fail=0、drift=0）** + CI required-lite / strict observer |
-| [~] 故障注入（选主/复制/恢复） | 部分完成 | `ontolith-cluster` 分区注入/愈合与复制路径单测 + **真实多进程灾备演练**（`drill-rebalance-dr.sh`：杀 follower/杀 leader/重启追赶，DRILL PASS） |
+| [x] RDF/SPARQL 标准测试 | 已完成 | `ontolith-compliance` R1 烟雾 17 + W3C 子集运行器（must-pass 30/30，skip=0）+ **完整 W3C 套件 manifest 驱动 runner（`w3c11_suite`，492 条基线：492 PASS / 0 FAIL，fail=0、drift=0）** + W3C SHACL 核心套件 **98/98 全绿** + CI required-lite / strict observer |
+| [x] 故障注入（选主/复制/恢复） | 已完成 | `ontolith-cluster` 分区注入/愈合与复制路径单测 + **真实多进程灾备演练**（`drill-rebalance-dr.sh`：杀 follower/杀 leader/重启追赶，DRILL PASS） |
 | [x] 幂等写入验证 | 已完成 | `InMemoryStorageEngine` 4 测（Put 集合语义去重/重放去重、重复 commit 拒绝、Delete 不存在 no-op、Quad 去重+删除）+ RocksDB 1 测（含索引 CF 一致 + reopen 持久），storage 46→51 测 |
-| [~] 性能回归门禁 | 已完成 | `storage_bench` 微基准（字典/写入提交/索引匹配）+ CI `bench` 硬门禁（阈值断言 + 趋势记录，`check-bench-thresholds.sh`） |
-| [~] 鉴权与租户隔离测试 | 部分完成 | `ontolith-security` 9 测（enforced/tenant/user/audit/哈希链）+ server tenant_graph 路径 |
-| [~] 管理平台控制面回归门禁 | 部分完成 | `ontolith-server` 管理面单测（ACL/probe）+ CI/local smoke + latency 阈值门禁 + 短窗口 SLO 统计（success%/p95） |
-| [~] 许可证与漏洞审计 CI | 部分完成 | CI `license-audit` 作业（`cargo-license` 枚举）；漏洞审计未接 |
+| [x] 性能回归门禁 | 已完成 | `storage_bench` 微基准（字典/写入提交/索引匹配）+ CI `bench` 硬门禁（阈值断言 + 趋势记录，`check-bench-thresholds.sh`）+ `semantic-bench` 检索阈值/趋势 |
+| [x] 鉴权与租户隔离测试 | 已完成 | `ontolith-security` 18 测（enforced/tenant/user/audit/哈希链/JWT）+ server tenant_graph 路径 + 强制租户隔离端到端（`r3_security_gate`） |
+| [x] 管理平台控制面回归门禁 | 已完成 | `ontolith-server` 管理面单测（ACL/probe）+ CI/local smoke + latency 阈值门禁 + 短窗口 SLO 统计（success%/p95） |
+| [x] 许可证与漏洞审计 CI | 已完成 | CI `license-audit` 作业（`cargo-license` 枚举）+ `dependency-audit` 硬门禁 + `cargo-audit` CVE 观测轨（non-blocking） |
 | [x] `cargo fmt` / `clippy -D warnings` CI | 已完成 | GitHub Actions + `scripts/ci-local.sh` |
 | [x] 全量测试 CI | 已完成 | workspace + rocksdb-smoke job + 本地 `./scripts/ci-local.sh`（2026-07-22 通过） |
 | [ ] Miri/sanitizer（敏感模块） | 未开始 | — |
-| [~] Cargo.lock 可复现构建 | 部分完成 | lock 已有；第三方运行时依赖几乎未接入 |
+| [x] Cargo.lock 可复现构建 | 已完成 | Cargo.lock 已锁定（openraft/rocksdb/rustls/tonic 等第三方运行时依赖）；CI 构建使用 lock 可复现 |
 | [x] Tier A 依赖 RFC/ADR | 已完成 | ADR-0001 RocksDB |
 | [x] 依赖登记（owner/风险/回退） | 已完成 | DEPENDENCY_REGISTER.md |
 | [x] 首次 Git 提交基线 | 已完成 | `main` @ `8d7eca1` → `origin/main`（含 docs + 13 crates + LICENSE） |
@@ -316,6 +316,8 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-10 | Codex | **看板增量同步 DONE（SYNC-PROJ-0001，PROG-0001 0.1.48→0.1.49）**：GitHub Projects #2 增量同步 9 条（7 更新 + 2 新建，0 失败）——状态回写：P0-03 依赖登记 / P1-03 存储抽象接口 / P1-04 确定性标识 / P2-01 RocksDB 适配 / P2-03 物理编码 / P2-06 事务文档 / P8-02 检索增强接口 → **Done**；新增「console 左下角配置菜单（主题切换 + 退出登录）」「SPARQL 测试样例入库（loadtest 10 样例 + runner）」两卡（Done/P2）；回读验证 total=58，关键卡 Status=Done；`docs/github-projects-sync.md` 映射表 2026-08-10 快照（58 行） |
+| 2026-08-10 | Codex | **计划/台账同步收尾 DONE（PROG-0001 0.1.47→0.1.48）**：① 中英文 [PLAN §8](./Ontolith_Development_Plan.zh-CN.md) 未完成项清单全部勾选复核（R1 核心 SLO 基线 / 在线重平衡与灾备演练手册 / 发布流水线与回滚演练 / R1 退出标准全表；EN 同步签批/SAS 定稿/RFC/设计包/多节点数据面等 9 项）；② PROGRESS 总览仪表盘/架构分层/WBS/质量门禁/Phase 明细过期状态对齐「R1–R4 ~100%」判定——总览 Phase 3/7/8 转已完成、Phase 1/2/4/5 完成度上修，WBS-04/06/07/08 与 P0-03/P1-03/P1-04/P2-01/P2-03/P2-06/P8-01/P8-02 转已完成；保留真实开放项：P1-01 80%（Ontology 载荷联动 reasoner）、P4-05 95%（读一致性 API 说明）、P5-04 90%（审计加密级哈希升级，可选）、P2-04 Async 索引维护（预留）、P2-05 备份调度接入管理面（运维轨）、Miri/sanitizer 未开始、RemoteProvider/ANN（后续轨）、JSON-LD 导入（未排期）；③ 看板增量同步（SYNC-PROJ-0001）条目备好（`/tmp/sync-items.tsv`：新增 console 配置菜单 / SPARQL 测试样例两卡 + 7 条状态回写），待 Classic PAT 就位执行 |
 | 2026-08-09 | Codex | **L6：OWL 2 RL 规则清单 100% 完整化 DONE（37→87 条）**：`Rule` 枚举补全 W3C OWL 2 Profiles Tables 4–9 全量（eq-* 9 / prp-* 20 / cls-* 19 / cax-* 5 / dt-* 5 / scm-* 20）+ RDFS 未子集规则（rdfs1/4a/4b/6/8/10/12/13）+ 派生 cls-nothing3，共 87 条；修正旧标注（rdfs5/6/7/8/9 → scm-sco/scm-spo/prp-dom/prp-rng/prp-spo1，cls-nothing1/2 对齐 REC）；新增实现：eq-ref、prp-ap 公理（10 标注属性）、prp-asyp/pdw/adp/npa1/2、prp-eqp1/2、cls-thing/cls-nothing1 公理、cls-maxc1、cls-maxqc1–4、cls-oo、cax-eqc1/2、scm-cls/eqc1/2/op/dp/eqp1/2/dom1/2/rng1/2/hv/svf1/2/avf1/2/int/uni、rdfs4a/4b/6/8/10/12/13、dt-type1 公理 + dt-not-type（XSD 词法校验 ⊥）+ dt-eq（同值字面量互换，RDFLib 同款 bounded）；公理背景种子化 + rdfs4a/4b Resource 定型排除出 `inferred_triples`（r2 gate `outcome.len()` 断言相应更新为背景上界校验）；reasoner 80→98 测，全量测试全绿，clippy/fmt 零告警 |
 | 2026-08-09 | Codex | **console 左下角配置菜单 DONE**：侧边栏底部新增「界面设置」（打开主题选择面板）与「退出」（清除 `consoleToken` 回登录态）；内置 5 套和谐主题——午夜蓝（默认）/石墨/森林/暮紫/纸白，CSS 变量驱动 + `data-theme` 即时切换、localStorage 持久化、head 内联脚本防首屏闪烁；图表/按钮/状态点颜色改读 CSS 变量随主题联动（`cssVar` 辅助）；Vite 重建 dist，8890/8891 重启后实测新 UI 上线 |
 | 2026-08-09 | Codex | **SPARQL 测试样例入库 DONE**：基于生产 loadtest 10000 条数据（当前 `triples=10009`，RocksDB 持久）的 10 个 SPARQL 样例固化到 `docs/sparql-samples-loadtest.md`（计数/谓词分布/模糊检索/区间过滤/排序/分组/UNION 等），runner 参数化后入库 `scripts/sparql-samples-loadtest.mjs`（读 `console/clusters.json` 的 prod 集群，自动刷新验证表）；生产复验 10/10 OK（~200–500ms/条） |
@@ -478,7 +480,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 - [x] 本波次提交已推送 `origin/main`（直推模式，无 PR）
 - [x] 管理面安全加固（TLS 终止方案落地：rustls 进程内终止 + R2 门禁；OIDC 留 R2+ 后续轨）
 
-### 未完成项待办清单（2026-08-06 整理）
+### 未完成项待办清单（2026-08-06 整理；2026-08-10 复核全部完成）
 
 **规划与设计（草案 → 定稿）**
 

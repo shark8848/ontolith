@@ -2,8 +2,8 @@
 
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
-数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.47，2026-08-09）
-状态: Active（Classic PAT 已配置，随增量同步）
+数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.48，2026-08-10）
+状态: Active（Classic PAT 已配置，随增量同步；2026-08-10 增量同步完成：9 条 0 失败，回读 total=58）
 
 ## 1. 认证要求（重要，勿重复探索）
 
@@ -36,7 +36,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 字段名与选项以看板实际为准；本契约的映射表按 PROGRESS.md 维护，标题/状态
 不一致时以 PROGRESS.md 为准并回写看板。
 
-## 3. 条目映射（2026-08-09 快照，随 PROGRESS.md 更新）
+## 3. 条目映射（2026-08-10 快照，随 PROGRESS.md 更新）
 
 状态取值：`未开始` / `进行中` / `已完成`。完成度百分比进备注。
 
@@ -44,19 +44,19 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 |--------------|------|------|
 | P0-01 已批准范围基线签批 | 已完成 | PLAN-0001 1.0.2 Approved（2026-08-09 签批，§12 签批记录） |
 | P0-02 架构例外审批模板 | 已完成 | adr/0000-template + ADR-0001/0002 |
-| P0-03 依赖登记模板与评审规则 | 进行中 | 70%，DEPENDENCY_REGISTER.md |
+| P0-03 依赖登记模板与评审规则 | 已完成 | audit-dependency-register.sh 硬门禁 + CI dependency-audit + cargo-audit CVE 观测 |
 | P0-04 RFC 流程落地 | 已完成 | RFC-0001 评审回填完成（2026-08-09：Reviewers=sharky-ai，契约与实现逐项核验，转正式 Accepted） |
 | P0-05 进度台账 | 已完成 | PROG-0001 |
 | P1-01 Knowledge Object 领域模型 | 进行中 | 80%，L0+L1+序列化 Part II |
 | P1-02 Node 标识与字典管理器 | 进行中 | 90% |
-| P1-03 存储抽象接口 | 进行中 | 95%，接口版本 0.1.0 冻结 |
-| P1-04 确定性标识与规范化编码规则 | 进行中 | 95%，RFC-0001 |
-| P2-01 RocksDB 适配 | 进行中 | 90% |
+| P1-03 存储抽象接口 | 已完成 | 接口版本 0.1.0 冻结 |
+| P1-04 确定性标识与规范化编码规则 | 已完成 | RFC-0001 评审回填转正式 Accepted（2026-08-09） |
+| P2-01 RocksDB 适配 | 已完成 | 索引 CF 调优（bloom/块缓存/压缩）+ tuning() 姿态 |
 | P2-02 WAL/快照恢复/MVCC 基线 | 已完成 | 内存+磁盘 MVCC 版本链 |
-| P2-03 三元组/四元组物理编码 | 进行中 | 90% |
+| P2-03 三元组/四元组物理编码 | 已完成 | codec + 六置换键 + CF 落盘 + 索引键直接扫描 |
 | P2-04 索引基线 SPO/POS/OSP | 已完成 | +命名图 GSPO/GPOS/GOSP |
 | P2-05 可恢复耐久写入路径 | 已完成 | sync_writes + BackupEngine 演练 |
-| P2-06 事务行为规范文档 | 进行中 | 95%，L2 文档 v3 |
+| P2-06 事务行为规范文档 | 已完成 | L2 文档 v3（随真 MVCC 修订） |
 | P3-01 SPARQL 核心代数/优化/绑定 | 已完成 | 含属性路径最小集 |
 | P3-02 完整聚合 | 已完成 | GROUP BY/HAVING + 聚合函数 |
 | P3-03 SPARQL Update 基线 | 已完成 | INSERT/DELETE DATA、DELETE·INSERT、DELETE WHERE |
@@ -82,7 +82,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | L8 AI-Native 扩展 | 已完成 | 100%（P8-01 M1–M3 + P8-02 KPI 门禁 + P8-03 扩展点 + ACC-R4 验收包 `=== ACCEPTANCE PASS ===`，2026-08-09） |
 | P8-01 语义-向量桥接 | 已完成 | 100%（M1–M3：语义核心 + server 接线 + RocksDB 持久化与增量更新，2026-08-09） |
 | P8-01 M3 语义索引持久化 + 增量更新 | 已完成 | RocksDB `semantic` CF + `RocksSemanticIndex` + 删改回流，2026-08-09 |
-| P8-02 检索增强接口 | 已完成 | 80%（检索 KPI 门禁：热路径优化 <1ms + compliance 门禁 + CI 作业，2026-08-09） |
+| P8-02 检索增强接口 | 已完成 | 100%（检索 KPI 门禁：热路径优化 <1ms + compliance 门禁 + CI 作业，2026-08-09） |
 | P8-02 检索 KPI 门禁 | 已完成 | 确定性/相关命中/延迟预算（10k 语料实测 0.33–0.52ms < 1ms）+ 语义 bench 阈值/趋势，2026-08-09 |
 | P8-03 代理集成扩展点 | 已完成 | 100%（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具，2026-08-09） |
 | R3 GeoSPARQL 范围能力 | 已完成 | `ontolith-geo`（Point/Rect + WKT/GeoJSON + geof:/sf: 函数 + geo: 属性函数）+ `r3_geo_gate` 5 测，2026-08-09 |
@@ -98,6 +98,8 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | R2 SHACL 97/98 缺口收尾 | 已完成 | 2026-08-09 闭合，98/98 全绿 |
 | R2 退出标准全表勾选 | 已完成 | 2026-08-08 R2 全项（Explain 门禁 + 推理护栏） |
 | RDF 1.1 布尔项区分（uniqueLang-002 闭合） | 已完成 | 2026-08-09 |
+| console 左下角配置菜单（主题切换 + 退出登录） | 已完成 | 5 套主题 + localStorage 持久化 + 图表颜色联动；8890/8891 实测（2026-08-09） |
+| SPARQL 测试样例入库（loadtest 10 样例 + runner） | 已完成 | docs/sparql-samples-loadtest.md + scripts/sparql-samples-loadtest.mjs，生产复验 10/10 OK（2026-08-09） |
 
 ## 4. 写入操作（GraphQL）
 

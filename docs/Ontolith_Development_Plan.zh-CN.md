@@ -393,7 +393,7 @@ sudo -v# Ontolith 开发计划
 - [x] 将窗口化 SLO 检查从短窗门禁扩展到天/周自动统计与告警（2026-08-06：systemd timer 5min 采集 + 每日 24h / 每周 168h 窗口评估，成功率/P95/连续失败/尖峰告警）。
 - [x] 管理平台最小安全加固路径已形成并落地 ADR-0003（TLS-first / OIDC-ready，2026-08-06 转 Accepted）：rustls 进程内 TLS 终止 + 非 loopback 强制 TLS 门禁（R2）。JWT 验证 HS256 基线已落地（P5-02：`Authorization: Bearer` + `ONTOLITH_JWT_SECRET`/`ISSUER`/`AUDIENCE`，`exp`/`iss`/`aud` 校验）；远程 JWKS/OIDC 发现 R2+ 后续轨（2026-08-08：OIDC 完整链路完成——JWKS/RS256/发现文档/TTL 缓存）。
 
-### 未完成项清单（2026-08-06 同步自 PROGRESS §8）
+### 未完成项清单（2026-08-06 同步自 PROGRESS §8；2026-08-10 复核：R1–R4 计划内项全部完成）
 
 **规划与设计（草案 → 定稿）**
 
@@ -427,13 +427,13 @@ sudo -v# Ontolith 开发计划
 
 - [x] 天/周窗口 SLO 自动化与告警（systemd timer：5min 采集 + 每日 24h / 每周 168h 窗口评估，成功率/P95/连续失败/尖峰告警）
 - [x] `benchmarks/` 性能基线用例（P7-02）：`storage_bench` + `benchmarks/README.md` + CI `bench` 作业
-- [ ] 核心 SLO 基线达标（R1）
+- [x] 核心 SLO 基线达标（R1）（2026-08-08：实测 20 样本 success 100%、p95=0ms、max=3ms（阈值 250ms），见 [L5-management-platform-slo.md](./L5-management-platform-slo.md) §5）
 
 **R1 退出标准剩余项**
 
 - [x] 多节点数据面设计定稿（[ADR-0004](../adr/0004-multi-process-raft-data-plane.md)：openraft behind traits，2026-08-06）
 - [x] 多节点数据面实施（**M1–M3 + P4-01–P4-04 完成**，2026-08-08：M1 openraft 适配 + 单节点引导 + trait 适配 + 内存传输；M2 多进程 HTTP RPC（树内 HTTP/1.1 + 共享 secret）+ RocksDB raft CF + snapshot install，cluster 21→26 测，双节点 HTTP+RocksDB 选举/复制/落盘；M3 默认运行时切换 + 真实复制语义 + CI 三进程 smoke，cluster 26→27 测，三节点 HTTP+RocksDB 多数派提交/失一 follower 后仍可提交；P4-01 多进程元数据 RPC：`/internal/raft/apply` + 复制式节点注册表，register/heartbeat/set_node_status 经 raft 提交全节点收敛，cluster 27→28 测；P4-03 跨节点数据搬迁：`DataPlaneSnapshotIo` + `/internal/raft/transfer-snapshot` 真实字节迁移（目标节点导入 + 无 hook 回退模拟回执），cluster 28→29 测；P4-04 真实网络分区：`HttpRaftClient` 对称丢弃分区 RPC + `metadata_mutation` 隔离拒绝/愈合恢复，cluster 29→30 测）
 - [x] 完整 W3C 套件接入（vendored 官方 `w3c/rdf-tests` sparql11 + manifest 驱动 runner + `w3c11_profile.tsv` 492 条基线：127 PASS / 365 FAIL 欠账 profile 化防回归；2026-08-06）
-- [ ] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）
-- [ ] 发布流水线与回滚演练通过
-- [ ] R1 退出标准全表勾选
+- [x] 在线重平衡与灾备演练手册及证据（P7-01 / P7-04）（2026-08-08：`drill-rebalance-dr.sh` 真实 3 进程 raft 走完 7 步 DRILL PASS + [L7-ops-rebalance-dr.md](./L7-ops-rebalance-dr.md)）
+- [x] 发布流水线与回滚演练通过（2026-08-08：`release-rollback-drill.sh` staging 全流程 DRILL PASS；2026-08-09 首次真实发布 REL-PROD-0001）
+- [x] R1 退出标准全表勾选（2026-08-08 全表勾选 + [R1-acceptance-package.md](./R1-acceptance-package.md) 正式验收包 G1–G5 全 PASS）

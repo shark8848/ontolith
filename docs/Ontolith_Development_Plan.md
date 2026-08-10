@@ -387,15 +387,15 @@ Mandatory artifacts per phase:
 - Extend short-window SLO checks to day/week automated tracking and alerting (systemd timer or Prometheus rules).
 - Minimum management-plane hardening path is captured and implemented in ADR-0003 (TLS-first / OIDC-ready; promoted to Accepted on 2026-08-06): in-process rustls TLS termination + mandatory TLS gate for non-loopback binds (R2). OIDC/JWT verification remains on the R2+ track.
 
-### Outstanding Item Checklist (synced 2026-08-06 from PROGRESS §8)
+### Outstanding Item Checklist (synced 2026-08-06 from PROGRESS §8; re-synced 2026-08-10: all R1–R4 items completed)
 
 **Planning and design (draft -> final)**
 
-- [ ] Review and sign off PLAN-0001 to unblock P0-01 (approved scope baseline)
-- [ ] Finalize SAS / Volume 04 / SAS-0401 / Architecture Handbook ToC from Draft status
+- [x] Review and sign off PLAN-0001 to unblock P0-01 (approved scope baseline) (2026-08-09: PLAN-0001 1.0.2 Approved, see §12)
+- [x] Finalize SAS / Volume 04 / SAS-0401 / Architecture Handbook ToC from Draft status (2026-08-09: SAS-0001 1.2.0 / SAS-0400 1.0.0 / SAS-0401 1.0.0 / ToC 1.0 Approved)
 - [x] Promote ADR-0003 from Proposed to Accepted and link it to Phase/WBS rows (2026-08-06)
-- [ ] Run the first substantive RFC (P0-04)
-- [ ] Track and accept the design package (interfaces, constraints, ADR links) per §10
+- [x] Run the first substantive RFC (P0-04) (2026-08-09: RFC-0001 reviewed and promoted to Accepted)
+- [x] Track and accept the design package (interfaces, constraints, ADR links) per §10 (2026-08-09: L0–L8 docs linked to SAS/ADR/RFC in PROGRESS evidence)
 
 **Management-plane security (P0)**
 
@@ -406,13 +406,13 @@ Mandatory artifacts per phase:
 
 - [x] Automate day/week windowed SLO and alerting (systemd timers: 5-min collection + daily 24h / weekly 168h windows; success-rate/P95/consecutive-failure/spike alerts)
 - [x] Add `benchmarks/` performance baseline cases (P7-02): `storage_bench` + `benchmarks/README.md` + CI `bench` job
-- [ ] Meet the core SLO baseline (R1)
+- [x] Meet the core SLO baseline (R1) (2026-08-08: 20 samples success 100%, p95=0ms, max=3ms vs 250ms threshold; see L5-management-platform-slo.md §5)
 
 **Remaining R1 exit criteria**
 
 - [x] Multi-node data plane design finalised ([ADR-0004](../adr/0004-multi-process-raft-data-plane.md): openraft behind traits, 2026-08-06)
-- [ ] Multi-node data plane implementation (M1–M3: openraft adapter → multi-process HTTP RPC + RocksDB raft CF → default runtime switch + CI 3-process smoke)
+- [x] Multi-node data plane implementation (M1–M3: openraft adapter → multi-process HTTP RPC + RocksDB raft CF → default runtime switch + CI 3-process smoke; plus P4-01/P4-03/P4-04, 2026-08-08, cluster 17→30 tests)
 - [x] Full W3C suite integration (vendored official `w3c/rdf-tests` sparql11 + manifest-driven runner + `w3c11_profile.tsv` 492-case baseline: 127 PASS / 365 FAIL, gaps profile-locked; 2026-08-06)
-- [ ] Online rebalance and disaster-recovery drill runbook with evidence (P7-01 / P7-04)
-- [ ] Release pipeline and rollback drill pass
-- [ ] Tick all R1 exit criteria
+- [x] Online rebalance and disaster-recovery drill runbook with evidence (P7-01 / P7-04) (2026-08-08: drill-rebalance-dr.sh 3-process raft DRILL PASS + L7-ops-rebalance-dr.md)
+- [x] Release pipeline and rollback drill pass (2026-08-08: release-rollback-drill.sh staging DRILL PASS; 2026-08-09 first production release REL-PROD-0001)
+- [x] Tick all R1 exit criteria (2026-08-08 all ticked; R1-acceptance-package G1–G5 PASS)
