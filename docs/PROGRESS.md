@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.52
+版本: 0.1.53
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-10 | Codex | **console 延迟显示统一 3 位小数（PROG-0001 0.1.52→0.1.53）**：新增 `fmtLatency`（`Number(ms).toFixed(3)`，非法值回退 `—`），应用于概览「平均延迟」/「runtime probe」与监控图「平均延迟（ms）」末值标签（`chartCard`/`drawChart` 增加可选 `fmt`）；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 刷新收敛为监控/集群双页签 + 模块内定时器（PROG-0001 0.1.51→0.1.52）**：撤销全局刷新机制（移除 `REFRESH_TABS`/`startAuto`/`stopAuto`/`autoTimer`，`render()` 不再启动任何定时器）；自动刷新仅保留「监控」「集群」两页，且各自在模块内部管理 `setInterval`（`monitorTimer`/`clusterTimer`，进入即清旧定时器、渲染完自排下一轮、`editingInTab` 聚焦守卫），`switchTab`/`logout` 通过 `stopPageAuto()` 统一清理；状态栏提示改为「监控/集群自动刷新」；其余页签保持手动加载；草稿/一次性 key 快照保留（跨手动切页不丢）；`npm run build` 重建 dist，8890 线上验证新 bundle |
 | 2026-08-10 | Codex | **console 自动刷新覆盖全部页签（PROG-0001 0.1.50→0.1.51）**：`REFRESH_TABS` 由 5 个（概览/监控/集群/数据/租户）扩展为全部 10 个数据页签（+推理/插件/审计/追踪/配置，SPARQL 交互控制台保持手动）；编辑聚焦守卫 `editingInTab`（输入/文本域/下拉聚焦时跳过本轮刷新，防表单被 5s 重渲染清空）；跨刷新保留——SHACL shapes/Turtle 草稿即时写入 localStorage、SHACL/物化/Turtle 写入结果快照（`lastShacl`/`lastMat`/`lastTurtle`）与租户一次性 key 提示（`lastTenantNote`）重渲染后恢复；`npm run build` 重建 dist，8890 线上已验证新 bundle 生效 |
 | 2026-08-10 | Codex | **租户管理能力 DONE（PROG-0001 0.1.49→0.1.50）**：L5 租户注册表全链路——① `ontolith-security`：`Tenant`/`TenantApiKey`/`TenantStatus` 领域模型 + id 校验（`[a-z0-9_-]` 1..64，`system` 保留）+ 确定性 JSON；`TenantStore`/`MemoryTenantStore`/`TenantService`（create/update/delete/add_key/revoke_key，key 仅存 FNV-1a 摘要、原始 key 一次性返回）；`HeaderAuthenticator` Enforced 分支优先按 key 摘要解析注册表（租户 id 取自注册表、`x-ontolith-tenant` 头若给须匹配、disabled 拒绝、user 缺省 `api`），全局 api_key 退化为 legacy 回退；② `ontolith-storage`：独立 `tenant` CF + `tenant_cf_*` 字节级原语（durable fsync 路径，roundtrip + 重开持久）；③ `ontolith-server`：`RocksTenantStore`（键布局 `t:<id>` 租户 JSON / `k:<digest>` 摘要索引，`create_missing_column_families` 保证既有库自动增 CF）；网关承载 `/admin/tenants*` CRUD（`GET/POST /admin/tenants`、`PUT/DELETE /admin/tenants/<id>`、`POST /admin/tenants/<id>/keys`、`DELETE …/keys/<key_id>`；仅 `system` 租户 + cluster:admin 可管理；鉴权器与注册表同一 `Arc`，CRUD 即时生效）；管理面 `/admin/tenants*` ACL 代理到网关（读 `authorize_admin_view` / 写 `authorize_admin_mutation`，`http_exchange` 最小 HTTP 客户端）；`/health` 暴露 `tenants` 姿态；④ console：侧边栏「租户」页（列表 + 创建表单 + 状态切换 + key 生成/吊销 + 新 key 仅显示一次 + 自动刷新），`server.js` mg 代理通配路由，Vite 重建 dist；⑤ 验证：security 29 测（注册表/服务/唯一 key）、storage 54 测（tenant CF）、server 65 测（网关 CRUD + key 生命周期端到端 + 管理代理集成 + 非 system 403 + digest 不泄漏），workspace 全量 + clippy 零警告 + fmt 对齐；staging 冒烟 8/8（生命周期 + rocks 重启持久）、PROD/STAGING/console 全部重启上线并验证；L5 文档 2.8.0→2.10.0（租户管理 API 契约）；看板同步（SYNC-PROJ-0001）新增「租户管理（注册表 CRUD + 管理面代理 + console 租户页）」卡片 1 条 0 失败 |

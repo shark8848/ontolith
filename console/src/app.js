@@ -192,6 +192,10 @@ async function probeStatus() {
     : `${current.name} 部分组件不可达`;
 }
 function setDot(id, state) { $('#' + id).className = 'dot ' + state; }
+function fmtLatency(ms) {
+  if (ms === undefined || ms === null || isNaN(Number(ms))) return '—';
+  return Number(ms).toFixed(3);
+}
 
 function kvCard(title, entries) {
   const card = el('div', 'card');
@@ -234,13 +238,13 @@ async function renderOverview() {
   cards.append(kvCard('管理面', [
     ['状态', mgHealth.error ? '不可达' : (mgHealth.status || '—')],
     ['运行时长', mgHealth.uptime_ms ? (mgHealth.uptime_ms / 1000).toFixed(1) + 's' : '—'],
-    ['runtime probe', mgHealth.runtime_probe?.reachable ? '可达 ' + (mgHealth.runtime_probe.latency_ms ?? 0) + 'ms' : '不可达'],
+    ['runtime probe', mgHealth.runtime_probe?.reachable ? '可达 ' + fmtLatency(mgHealth.runtime_probe.latency_ms ?? 0) + 'ms' : '不可达'],
     ['jwt / oidc', `${mgHealth.jwt || 'off'} / ${mgHealth.oidc || 'off'}`],
   ]));
   cards.append(kvCard('监控摘要', [
     ['请求总数', mon.requests_total ?? '—'], ['SPARQL 请求', mon.sparql_total ?? '—'],
     ['SPARQL 错误', mon.sparql_errors ?? '—'], ['ingest 总数', mon.ingest_total ?? '—'],
-    ['平均延迟', mon.latency_avg_ms !== undefined ? mon.latency_avg_ms + 'ms' : '—'],
+    ['平均延迟', mon.latency_avg_ms !== undefined ? fmtLatency(mon.latency_avg_ms) + 'ms' : '—'],
     ['集群节点', mon.cluster ? `${mon.cluster.healthy}/${mon.cluster.nodes}` : '—'],
   ]));
   sec.append(cards);
@@ -276,7 +280,7 @@ async function renderMonitor() {
   const charts = el('div', 'charts');
   charts.append(chartCard('请求速率（req/refresh 窗口）', rateSeries(series('requests_total'))));
   charts.append(chartCard('SPARQL 请求 vs 错误', twoSeries(series('sparql_total'), series('sparql_errors'), cssVar('--accent'), cssVar('--bad'))));
-  charts.append(chartCard('平均延迟（ms）', series('latency_avg_ms')));
+  charts.append(chartCard('平均延迟（ms）', series('latency_avg_ms'), undefined, fmtLatency));
   charts.append(chartCard('三元组总量', series('triples'), cssVar('--ok')));
   charts.append(chartCard('commit_index', series('commit_index')));
   charts.append(chartCard('节点健康（healthy/nodes）', pts.map((p, i) => ({ t: p.ts, v: p.healthy ?? 0, max: p.nodes ?? 1 })), cssVar('--warn')));
@@ -289,15 +293,15 @@ function rateSeries(s) {
 function twoSeries(a, b, colorA, colorB) {
   return [{ points: a, color: colorA }, { points: b, color: colorB }];
 }
-function chartCard(title, series, color = cssVar('--accent')) {
+function chartCard(title, series, color = cssVar('--accent'), fmt) {
   const card = el('div', 'chart-card');
   card.append(el('h3', null, title));
   const cv = el('canvas', 'chart');
   card.append(cv);
-  setTimeout(() => drawChart(cv, series, color), 0);
+  setTimeout(() => drawChart(cv, series, color, fmt), 0);
   return card;
 }
-function drawChart(cv, series, color = cssVar('--accent')) {
+function drawChart(cv, series, color = cssVar('--accent'), fmt) {
   const list = series.length > 0 && Array.isArray(series[0].points) ? series : [{ points: series, color }];
   const all = list.flatMap(s => s.points);
   if (all.length < 2) return;
@@ -329,7 +333,7 @@ function drawChart(cv, series, color = cssVar('--accent')) {
     const pts = s.points;
     if (pts.length < 2) continue;
     const last = pts[pts.length - 1];
-    const text = String(last.v) + (last.max ? '/' + last.max : '');
+    const text = (fmt ? fmt(last.v) : String(last.v)) + (last.max ? '/' + last.max : '');
     ctx.fillStyle = s.color;
     labelX -= ctx.measureText(text).width;
     ctx.fillText(text, labelX, h - 2);
