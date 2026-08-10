@@ -64,6 +64,13 @@ textarea { min-height: 120px; resize: vertical; }
 button.run { background: var(--accent); color: var(--on-accent); border: none; border-radius: 6px; padding: 8px 16px; font-weight: 600; cursor: pointer; }
 button.run.secondary { background: var(--panel2); color: var(--text); border: 1px solid var(--border); }
 button.run:disabled { opacity: .5; cursor: wait; }
+button.icon-btn { background: var(--panel2); color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+button.icon-btn svg.icon { width: 15px; height: 15px; }
+button.icon-btn:hover { color: var(--accent); border-color: var(--accent); }
+button.icon-btn.copied { color: var(--ok); border-color: var(--ok); }
+.key-box { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; padding: 10px 12px; border: 1px dashed var(--accent); border-radius: 8px; background: var(--panel2); }
+.key-box-title { font-size: 12px; color: var(--muted); }
+.key-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color: var(--text); word-break: break-all; background: var(--bg); padding: 6px 10px; border-radius: 6px; flex: 1; min-width: 0; }
 table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { background: var(--panel2); color: var(--muted); font-weight: 600; }

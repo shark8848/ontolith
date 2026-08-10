@@ -43,6 +43,7 @@ let monitorTimer = null;
 let clusterTimer = null;
 // Transient outputs preserved across re-renders (manual refresh / tab switch).
 let lastTenantNote = null;
+let lastTenantKey = null; // { tenant, apiKey } — one-time key shown inside the tenant card.
 let lastShacl = null;
 let lastMat = null;
 let lastTurtle = null;
@@ -201,6 +202,30 @@ function fmtNum(v) {
   const n = Number(v);
   if (isNaN(n) || !isFinite(n)) return String(v);
   return Number.isInteger(n) ? String(n) : n.toFixed(3);
+}
+function iconBtn(symbolId, title) {
+  const b = el('button', 'icon-btn');
+  b.type = 'button';
+  b.title = title;
+  b.setAttribute('aria-label', title);
+  b.innerHTML = `<svg class="icon"><use href="#${symbolId}"></use></svg>`;
+  return b;
+}
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = el('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { /* noop */ }
+    ta.remove();
+    return ok;
+  }
 }
 
 function kvCard(title, entries) {
@@ -752,7 +777,7 @@ async function renderTenant() {
       const t = out.tenant || {};
       let note = `已创建 ${t.id}`;
       if (out.api_key) {
-        note = `已创建 ${t.id}，新 key（仅显示一次）：${out.api_key}`;
+        lastTenantKey = { tenant: t.id, apiKey: out.api_key };
       }
       formMsg.textContent = note;
       lastTenantNote = note;
@@ -777,6 +802,24 @@ async function renderTenant() {
     dl.append(el('dt', null, '创建'), el('dd', null, new Date(t.created_at_ms).toLocaleString()));
     dl.append(el('dt', null, '更新'), el('dd', null, new Date(t.updated_at_ms).toLocaleString()));
     card.append(dl);
+
+    if (lastTenantKey && lastTenantKey.tenant === t.id) {
+      const box = el('div', 'key-box');
+      box.append(el('div', 'key-box-title', '一次性 API key（仅显示一次）'));
+      const row = el('div', 'row');
+      row.style.cssText = 'margin:0';
+      const code = el('code', 'key-value', lastTenantKey.apiKey);
+      const copyBtn = iconBtn('icon-copy', '复制');
+      copyBtn.addEventListener('click', async () => {
+        const ok = await copyText(lastTenantKey.apiKey);
+        copyBtn.classList.add('copied');
+        copyBtn.title = ok ? '已复制' : '复制失败';
+        setTimeout(() => { copyBtn.classList.remove('copied'); copyBtn.title = '复制'; }, 1500);
+      });
+      row.append(code, copyBtn);
+      box.append(row);
+      card.append(box);
+    }
 
     if ((t.api_keys || []).length > 0) {
       const tbl = el('table');
@@ -815,8 +858,9 @@ async function renderTenant() {
           body: JSON.stringify({ label: keyInput.value.trim() }),
         });
         keyInput.value = '';
-        keyMsg.textContent = `新 key（仅显示一次）：${out.api_key}`;
-        lastTenantNote = `租户 ${t.id} 新 key（仅显示一次）：${out.api_key}`;
+        keyMsg.textContent = '已生成';
+        lastTenantNote = `已为 ${t.id} 生成新 key`;
+        lastTenantKey = { tenant: t.id, apiKey: out.api_key };
         await renderTenant();
       } catch (e) { keyMsg.textContent = '生成失败: ' + e.message; }
     });
