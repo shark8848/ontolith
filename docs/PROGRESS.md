@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.55
+版本: 0.1.56
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-10 | Codex | **console 操作确认改右上角 toast（PROG-0001 0.1.55→0.1.56）**：新增 `toast(msg)` 消息机制（`#toast-container` 右上角固定、`toast-in` 动画、3s 自动淡出、`bad` 变体），租户「创建成功 / 已生成新 key」等确认提示不再在模块内输出（移除 `lastTenantNote` 与表单内成功文案，仅保留校验/错误消息）；`index.html` 增 `#toast-container`、`style.css` 增 `.toast*`；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 租户 key 卡片内展示 + 复制图标（PROG-0001 0.1.54→0.1.55）**：一次性 API key（仅显示一次）改在所属租户卡片内展示——`lastTenantKey` 快照按 `tenant` 匹配渲染高亮 `key-box`（等宽字体 + 虚线 accent 边框），新增 `iconBtn` 复制按钮（`icon-copy` SVG symbol，点击 `navigator.clipboard` 写入、失败回退 `execCommand('copy')`，成功变绿显示「已复制」1.5s）；创建/生成 key 顶部提示不再重复展示 key 明文；`index.html` 增 `icon-copy` symbol、`style.css` 增 `.icon-btn`/`.key-box`/`.key-value`；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 数值精度全局 3 位小数（PROG-0001 0.1.53→0.1.54）**：新增通用 `fmtNum`（整数原样、浮点 `toFixed(3)`、非法/空回退 `—`），覆盖概览 Prometheus 指标表「值」列（如 `ontolith_http_request_latency_ms_avg 0.0018001800180018`→`0.002`）、运行时长、监控摘要（请求/SPARQL/ingest 计数）、监控图末值标签默认格式化（`drawChart` 无 `fmt` 时回退 `fmtNum`）；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 延迟显示统一 3 位小数（PROG-0001 0.1.52→0.1.53）**：新增 `fmtLatency`（`Number(ms).toFixed(3)`，非法值回退 `—`），应用于概览「平均延迟」/「runtime probe」与监控图「平均延迟（ms）」末值标签（`chartCard`/`drawChart` 增加可选 `fmt`）；`npm run build` 重建 dist，8890 线上验证 |

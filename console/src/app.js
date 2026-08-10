@@ -42,7 +42,6 @@ let activeTab = 'overview';
 let monitorTimer = null;
 let clusterTimer = null;
 // Transient outputs preserved across re-renders (manual refresh / tab switch).
-let lastTenantNote = null;
 let lastTenantKey = null; // { tenant, apiKey } — one-time key shown inside the tenant card.
 let lastShacl = null;
 let lastMat = null;
@@ -210,6 +209,14 @@ function iconBtn(symbolId, title) {
   b.setAttribute('aria-label', title);
   b.innerHTML = `<svg class="icon"><use href="#${symbolId}"></use></svg>`;
   return b;
+}
+function toast(msg, type = 'ok') {
+  const box = $('#toast-container');
+  if (!box) return;
+  const t = el('div', 'toast' + (type === 'bad' ? ' bad' : ''));
+  t.textContent = msg;
+  box.append(t);
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 350); }, 3000);
 }
 async function copyText(text) {
   try {
@@ -755,7 +762,6 @@ async function renderTenant() {
   form.append(idInput, nameInput, descInput, genBox, createBtn, formMsg);
   formCard.append(form);
   list.append(formCard);
-  if (lastTenantNote) list.append(el('p', 'ok-text', lastTenantNote));
 
   createBtn.addEventListener('click', async () => {
     const id = idInput.value.trim();
@@ -775,12 +781,9 @@ async function renderTenant() {
       });
       idInput.value = nameInput.value = descInput.value = '';
       const t = out.tenant || {};
-      let note = `已创建 ${t.id}`;
-      if (out.api_key) {
-        lastTenantKey = { tenant: t.id, apiKey: out.api_key };
-      }
-      formMsg.textContent = note;
-      lastTenantNote = note;
+      if (out.api_key) lastTenantKey = { tenant: t.id, apiKey: out.api_key };
+      formMsg.textContent = '';
+      toast(`已创建 ${t.id}`);
       await renderTenant();
     } catch (e) { formMsg.textContent = '创建失败: ' + e.message; }
   });
@@ -858,9 +861,9 @@ async function renderTenant() {
           body: JSON.stringify({ label: keyInput.value.trim() }),
         });
         keyInput.value = '';
-        keyMsg.textContent = '已生成';
-        lastTenantNote = `已为 ${t.id} 生成新 key`;
         lastTenantKey = { tenant: t.id, apiKey: out.api_key };
+        keyMsg.textContent = '';
+        toast(`已为 ${t.id} 生成新 key`);
         await renderTenant();
       } catch (e) { keyMsg.textContent = '生成失败: ' + e.message; }
     });
