@@ -52,6 +52,10 @@ const CF_RAFT: &str = "raft";
 /// RDF data plane. Accessed only through the `semantic_cf_*` byte-level
 /// primitives below.
 const CF_SEMANTIC: &str = "semantic";
+/// Dedicated column family for the tenant registry (tenant management):
+/// tenant records + API-key digest index, isolated from the RDF data plane.
+/// Accessed only through the `tenant_cf_*` byte-level primitives below.
+const CF_TENANT: &str = "tenant";
 
 const META_NEXT_NODE: &[u8] = b"next_node_id";
 const META_WAL_SEQ: &[u8] = b"wal_seq";
@@ -158,6 +162,14 @@ pub type SemanticCfOp = RaftCfOp;
 /// Owned key/value pair read back from the `semantic` CF scans.
 pub type SemanticCfEntry = RaftCfEntry;
 
+/// One write operation for the `tenant` CF batch API (tenant management).
+/// Shares the same op shape as [`RaftCfOp`]; kept distinct so the tenant
+/// registry stays independent from the RDF data plane and raft metadata.
+pub type TenantCfOp = RaftCfOp;
+
+/// Owned key/value pair read back from the `tenant` CF scans.
+pub type TenantCfEntry = RaftCfEntry;
+
 pub struct RocksDbStorageEngine {
     db: Arc<DB>,
     path: PathBuf,
@@ -229,6 +241,7 @@ impl RocksDbStorageEngine {
             CF_VERSIONS_QUADS,
             CF_RAFT,
             CF_SEMANTIC,
+            CF_TENANT,
         ]
         .into_iter()
         .map(|name| {
@@ -478,6 +491,63 @@ impl RocksDbStorageEngine {
         let mut out = Vec::new();
         for item in iter {
             let (key, value) = item.map_err(rocks_err)?;
+            out.push((key.to_vec(), value.to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// Put one byte blob into the `tenant` CF (durable write).
+    pub fn tenant_cf_put(&self, key: &[u8], value: &[u8]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_TENANT)?;
+        let mut batch = RocksBatch::default();
+        batch.put_cf(cf, key, value);
+        self.durable_write(batch)
+    }
+
+    /// Apply an ordered set of writes to the `tenant` CF in one durable
+    /// batch (atomic within the batch).
+    pub fn tenant_cf_write_batch(&self, ops: &[TenantCfOp]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_TENANT)?;
+        let mut batch = RocksBatch::default();
+        for op in ops {
+            match op {
+                TenantCfOp::Put(key, value) => batch.put_cf(cf, key, value),
+                TenantCfOp::Delete(key) => batch.delete_cf(cf, key),
+                TenantCfOp::DeleteRange(from, to) => batch.delete_range_cf(cf, from, to),
+            }
+        }
+        self.durable_write(batch)
+    }
+
+    /// Read one byte blob from the `tenant` CF.
+    pub fn tenant_cf_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, OntolithError> {
+        let cf = self.cf(CF_TENANT)?;
+        self.db.get_cf(cf, key).map_err(rocks_err)
+    }
+
+    /// Delete one key from the `tenant` CF (durable write).
+    pub fn tenant_cf_delete(&self, key: &[u8]) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_TENANT)?;
+        let mut batch = RocksBatch::default();
+        batch.delete_cf(cf, key);
+        self.durable_write(batch)
+    }
+
+    /// Scan the `tenant` CF for keys with the given prefix (byte order).
+    pub fn tenant_cf_scan_prefix(
+        &self,
+        prefix: &[u8],
+    ) -> Result<Vec<TenantCfEntry>, OntolithError> {
+        let cf = self.cf(CF_TENANT)?;
+        let iter = self
+            .db
+            .iterator_cf(cf, IteratorMode::From(prefix, Direction::Forward));
+        let mut out = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(rocks_err)?;
+            if !key.as_ref().starts_with(prefix) {
+                break;
+            }
             out.push((key.to_vec(), value.to_vec()));
         }
         Ok(out)
@@ -2734,5 +2804,34 @@ mod tests {
         );
         assert!(engine.semantic_cf_get(key_b).unwrap().is_none());
         assert_eq!(engine.semantic_cf_scan_all().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn tenant_cf_roundtrip_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let prefix = b"t:";
+        {
+            let engine = RocksDbStorageEngine::open(&path).expect("open");
+            engine
+                .tenant_cf_put(b"t:acme", br#"{"id":"acme"}"#)
+                .unwrap();
+            engine
+                .tenant_cf_put(b"t:globex", br#"{"id":"globex"}"#)
+                .unwrap();
+            engine.tenant_cf_put(b"k:digest123", b"acme").unwrap();
+            assert_eq!(
+                engine.tenant_cf_get(b"t:acme").unwrap().as_deref(),
+                Some(&br#"{"id":"acme"}"#[..])
+            );
+            assert_eq!(engine.tenant_cf_scan_prefix(prefix).unwrap().len(), 2);
+            engine.tenant_cf_delete(b"t:globex").unwrap();
+            assert!(engine.tenant_cf_get(b"t:globex").unwrap().is_none());
+        }
+        // Reopen: surviving entries persist across restart.
+        let engine = RocksDbStorageEngine::open(&path).expect("reopen");
+        assert!(engine.tenant_cf_get(b"t:acme").unwrap().is_some());
+        assert!(engine.tenant_cf_get(b"t:globex").unwrap().is_none());
+        assert_eq!(engine.tenant_cf_scan_prefix(prefix).unwrap().len(), 1);
     }
 }

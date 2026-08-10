@@ -3,6 +3,11 @@
 use ontolith_core::domain::TimestampMs;
 use ontolith_core::error::OntolithError;
 
+pub mod tenant;
+pub use tenant::{
+    Tenant, TenantApiKey, TenantStatus, tenant_from_json, tenant_to_json, validate_tenant_id,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TenantId(pub String);
 

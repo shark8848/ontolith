@@ -258,7 +258,19 @@ async function route(req, res) {
     if (byId.has(parts[0])) { cluster = byId.get(parts[0]); path = parts.slice(1).join('/'); }
     else { cluster = defaultCluster; path = rest; }
     const routes = kind === 'gw' ? GW_ROUTES : MG_ROUTES;
-    const allowed = routes.get(path);
+    let allowed = null;
+    // Tenant management routes carry path variables:
+    //   admin/tenants (GET/POST), admin/tenants/<id> (PUT/DELETE),
+    //   admin/tenants/<id>/keys (POST), admin/tenants/<id>/keys/<key_id> (DELETE)
+    if (kind === 'mg' && (path === 'admin/tenants' || path.startsWith('admin/tenants/'))) {
+      const segs = path.split('/');
+      if (segs.length === 2 && segs[1] === 'tenants') allowed = ['GET', 'POST'];
+      else if (segs.length === 3 && segs[1] === 'tenants') allowed = ['PUT', 'DELETE'];
+      else if (segs.length === 4 && segs[1] === 'tenants' && segs[3] === 'keys') allowed = ['POST'];
+      else if (segs.length === 5 && segs[1] === 'tenants' && segs[3] === 'keys') allowed = ['DELETE'];
+    } else {
+      allowed = routes.get(path);
+    }
     if (!allowed || !allowed.includes(method)) return sendJson(res, 404, { error: 'no such route' });
     return await proxy(req, res, cluster, path, method);
   }

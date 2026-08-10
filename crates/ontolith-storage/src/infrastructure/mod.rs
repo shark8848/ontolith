@@ -26,6 +26,8 @@ pub use codec::{decode_term, encode_term};
 pub use rocks::{RaftCfOp, RocksDbStorageEngine, open_rocksdb_engine};
 #[cfg(feature = "rocksdb-backend")]
 pub use rocks::{SemanticCfEntry, SemanticCfOp};
+#[cfg(feature = "rocksdb-backend")]
+pub use rocks::{TenantCfEntry, TenantCfOp};
 
 #[derive(Default)]
 struct DictionaryState {

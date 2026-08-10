@@ -1,13 +1,19 @@
 //! Security application services (L5).
 
-use crate::domain::{AuditEvent, AuditOutcome, AuthContext, AuthMode, Permission, TenantId};
+use crate::domain::{
+    AuditEvent, AuditOutcome, AuthContext, AuthMode, Permission, TenantId, TenantStatus,
+};
 use crate::infrastructure::{
     FileAuditLog, JwksVerifier, JwtVerifyOptions, OidcConfig, auth_context_from_claims,
     verify_hs256, verify_oidc_token,
 };
 use ontolith_core::domain::TimestampMs;
 use ontolith_core::error::OntolithError;
-use std::sync::Mutex;
+use std::fmt;
+use std::sync::{Arc, Mutex};
+
+pub mod tenant;
+pub use tenant::{MemoryTenantStore, TenantService, TenantStore};
 
 /// Extract / build auth context from transport headers.
 pub trait Authenticator: Send + Sync {
@@ -33,7 +39,7 @@ pub trait Authenticator: Send + Sync {
 }
 
 /// Simple header/API-key authenticator for R1 baseline.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HeaderAuthenticator {
     pub mode: AuthMode,
     /// When set, `api_key` must match in Enforced mode (demo secret).
@@ -54,6 +60,29 @@ pub struct HeaderAuthenticator {
     pub jwt_leeway_secs: u64,
     /// Default permissions granted to authenticated tenants.
     pub default_permissions: Vec<Permission>,
+    /// Optional tenant registry (tenant management): when present and
+    /// non-empty, API keys resolve to their owning tenant and the global
+    /// `api_key` becomes a legacy fallback. Disabled tenants are rejected.
+    pub tenants: Option<Arc<dyn TenantStore>>,
+}
+
+impl fmt::Debug for HeaderAuthenticator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeaderAuthenticator")
+            .field("mode", &self.mode)
+            .field("api_key", &self.api_key.as_deref().map(|_| "[redacted]"))
+            .field(
+                "jwt_secret",
+                &self.jwt_secret.as_deref().map(|_| "[redacted]"),
+            )
+            .field("jwt_issuer", &self.jwt_issuer)
+            .field("jwt_audience", &self.jwt_audience)
+            .field("jwt_oidc", &self.jwt_oidc)
+            .field("jwt_leeway_secs", &self.jwt_leeway_secs)
+            .field("default_permissions", &self.default_permissions)
+            .field("tenants", &self.tenants.as_ref().map(|_| "[tenant-store]"))
+            .finish()
+    }
 }
 
 impl Default for HeaderAuthenticator {
@@ -74,6 +103,7 @@ impl Default for HeaderAuthenticator {
                 Permission::new("data", "write"),
                 Permission::new("cluster", "admin"),
             ],
+            tenants: None,
         }
     }
 }
@@ -96,6 +126,36 @@ impl Authenticator for HeaderAuthenticator {
         match self.mode {
             AuthMode::Disabled => Ok(AuthContext::system_admin()),
             AuthMode::Enforced => {
+                // Per-tenant API keys (tenant management): resolve the key to
+                // its owning tenant; the tenant is taken from the registry,
+                // and the optional `x-ontolith-tenant` header (if present)
+                // must match. Disabled tenants are rejected.
+                if let Some(store) = &self.tenants
+                    && let Some(raw) = api_key.filter(|k| !k.is_empty())
+                    && let Ok(Some(rec)) = store.resolve_key(raw)
+                {
+                    if rec.status != TenantStatus::Active {
+                        return Err(OntolithError::Failed(format!(
+                            "unauthorized: tenant {} is disabled",
+                            rec.id.as_str()
+                        )));
+                    }
+                    if let Some(hint) = tenant.filter(|h| !h.is_empty())
+                        && hint != rec.id.as_str()
+                    {
+                        return Err(OntolithError::Failed(format!(
+                            "forbidden: api key belongs to tenant {}, header says {hint}",
+                            rec.id.as_str()
+                        )));
+                    }
+                    let user = user.filter(|u| !u.is_empty()).unwrap_or("api").to_owned();
+                    return Ok(AuthContext::tenant_user(
+                        rec.id.as_str(),
+                        user,
+                        self.default_permissions.clone(),
+                    ));
+                }
+                // Legacy path: global API key + tenant/user headers.
                 if let Some(expected) = &self.api_key {
                     match api_key {
                         Some(k) if k == expected => {}

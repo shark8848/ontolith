@@ -222,13 +222,31 @@ fn audit_fields_json(
 }
 
 /// FNV-1a 64-bit (deterministic, dependency-free; integrity level only).
-fn fnv1a64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+/// Hex digest of a raw API key (FNV-1a 64, 16 hex chars). Keys are stored
+/// only by digest in the tenant registry; the raw value is shown once at
+/// creation.
+pub fn api_key_digest(raw: &str) -> String {
+    format!("{:016x}", fnv1a64(raw.as_bytes()))
+}
+
+/// Generate a tenant-bound API key: `ontk_<16 hex>`. Deterministic per
+/// (tenant, now, counter) triple; the counter keeps same-millisecond calls
+/// distinct within a process.
+pub fn generate_api_key(tenant: &str, now_ms: u64, counter: u64) -> String {
+    let mut buf = Vec::with_capacity(tenant.len() + 16);
+    buf.extend_from_slice(tenant.as_bytes());
+    buf.extend_from_slice(&now_ms.to_le_bytes());
+    buf.extend_from_slice(&counter.to_le_bytes());
+    format!("ontk_{:016x}", fnv1a64(&buf))
 }
 
 fn chain_hash(prev: u64, payload: &[u8]) -> u64 {

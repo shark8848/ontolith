@@ -11,6 +11,7 @@ pub mod http;
 pub mod management;
 pub mod reasoning;
 pub mod runtime;
+pub mod tenants;
 
 pub const CRATE_ID: &str = "ontolith-server";
 pub const LAYER: &str = "L5-access-security";

@@ -151,6 +151,7 @@ async function render() {
       case 'plugins': await renderPlugins(); break;
       case 'data': await renderData(); break;
       case 'audit': await renderAudit(); break;
+      case 'tenant': await renderTenant(); break;
       case 'traces': await renderTraces(); break;
       case 'config': await renderConfig(); break;
     }
@@ -160,7 +161,7 @@ async function render() {
       sec.replaceChildren(el('p', 'err', '加载失败: ' + err.message));
     }
   }
-  if (['overview', 'monitor', 'cluster', 'data'].includes(activeTab)) startAuto(refreshMs);
+  if (['overview', 'monitor', 'cluster', 'data', 'tenant'].includes(activeTab)) startAuto(refreshMs);
 }
 
 async function probeStatus() {
@@ -659,6 +660,146 @@ async function renderTraces() {
   }
   sec.append(list);
   btn.addEventListener('click', renderTraces);
+}
+
+
+// ---------- tenants ----------
+async function renderTenant() {
+  const sec = $('#tab-tenant');
+  sec.replaceChildren();
+  const list = el('div', 'cards');
+
+  // Create form (always visible at the top).
+  const formCard = el('div', 'card');
+  formCard.append(el('h3', null, '创建租户'));
+  const form = el('div', 'row');
+  const idInput = el('input'); idInput.type = 'text'; idInput.placeholder = 'id（[a-z0-9_-]，≤64）';
+  const nameInput = el('input'); nameInput.type = 'text'; nameInput.placeholder = '名称';
+  const descInput = el('input'); descInput.type = 'text'; descInput.placeholder = '描述';
+  const genBox = el('label'); genBox.style.cssText = 'display:flex;gap:6px;align-items:center;font-size:13px;color:var(--muted)';
+  const genCb = document.createElement('input'); genCb.type = 'checkbox'; genCb.checked = true;
+  genBox.append(genCb, document.createTextNode('生成 API key'));
+  const createBtn = el('button', 'run', '创建');
+  const formMsg = el('span', 'muted');
+  form.append(idInput, nameInput, descInput, genBox, createBtn, formMsg);
+  formCard.append(form);
+  list.append(formCard);
+
+  createBtn.addEventListener('click', async () => {
+    const id = idInput.value.trim();
+    if (!id) { formMsg.textContent = '请输入租户 id'; return; }
+    formMsg.textContent = '创建中…';
+    try {
+      const out = await mg('admin/tenants', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id,
+          name: nameInput.value.trim(),
+          description: descInput.value.trim(),
+          status: 'active',
+          generate_key: genCb.checked,
+        }),
+      });
+      idInput.value = nameInput.value = descInput.value = '';
+      const t = out.tenant || {};
+      let note = `已创建 ${t.id}`;
+      if (out.api_key) {
+        note = `已创建 ${t.id}，新 key（仅显示一次）：${out.api_key}`;
+      }
+      formMsg.textContent = note;
+      await renderTenant();
+    } catch (e) { formMsg.textContent = '创建失败: ' + e.message; }
+  });
+
+  const res = await mg('admin/tenants').catch(e => ({ error: e.message }));
+  if (res.error) { sec.append(el('p', 'err', '加载失败: ' + res.error)); return; }
+
+  for (const t of res.tenants || []) {
+    const card = el('div', 'card');
+    const head = el('div', 'row');
+    head.style.cssText = 'justify-content:space-between;margin:0 0 6px';
+    const title = el('h3', null, `${t.name || t.id} · ${t.id}`);
+    title.style.cssText = 'margin:0;color:var(--text);text-transform:none;letter-spacing:0';
+    head.append(title);
+    head.append(el('span', 'tag ' + (t.status === 'active' ? 'ok' : 'bad'), t.status));
+    card.append(head);
+    card.append(el('p', 'muted', t.description || '—'));
+    const dl = el('dl', 'kv');
+    dl.append(el('dt', null, '创建'), el('dd', null, new Date(t.created_at_ms).toLocaleString()));
+    dl.append(el('dt', null, '更新'), el('dd', null, new Date(t.updated_at_ms).toLocaleString()));
+    card.append(dl);
+
+    if ((t.api_keys || []).length > 0) {
+      const tbl = el('table');
+      const thead = el('thead'); const hr = el('tr');
+      ['key', '标签', '创建', ''].forEach(h => hr.append(el('th', null, h)));
+      thead.append(hr); tbl.append(thead);
+      const tbody = el('tbody');
+      for (const k of t.api_keys || []) {
+        const tr = el('tr');
+        tr.append(el('td', null, k.id), el('td', null, k.label || '—'), el('td', null, new Date(k.created_at_ms).toLocaleString()));
+        const revoke = el('button', 'run secondary', '吊销');
+        revoke.addEventListener('click', async () => {
+          try {
+            await mg(`admin/tenants/${t.id}/keys/${k.id}`, { method: 'DELETE' });
+            await renderTenant();
+          } catch (e) { alert('吊销失败: ' + e.message); }
+        });
+        const td = el('td'); td.append(revoke); tr.append(td);
+        tbody.append(tr);
+      }
+      tbl.append(tbody);
+      card.append(tbl);
+    }
+
+    // Add-key row.
+    const keyRow = el('div', 'row');
+    const keyInput = el('input'); keyInput.type = 'text'; keyInput.placeholder = 'key 标签（可选）';
+    const addKeyBtn = el('button', 'run secondary', '生成 key');
+    const keyMsg = el('span', 'muted');
+    addKeyBtn.addEventListener('click', async () => {
+      keyMsg.textContent = '';
+      try {
+        const out = await mg(`admin/tenants/${t.id}/keys`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ label: keyInput.value.trim() }),
+        });
+        keyInput.value = '';
+        keyMsg.textContent = `新 key（仅显示一次）：${out.api_key}`;
+        await renderTenant();
+      } catch (e) { keyMsg.textContent = '生成失败: ' + e.message; }
+    });
+    keyRow.append(keyInput, addKeyBtn, keyMsg);
+    card.append(keyRow);
+
+    // Lifecycle actions.
+    const actRow = el('div', 'row');
+    const toggle = el('button', 'run secondary', t.status === 'active' ? '禁用' : '启用');
+    toggle.addEventListener('click', async () => {
+      try {
+        await mg(`admin/tenants/${t.id}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ status: t.status === 'active' ? 'disabled' : 'active' }),
+        });
+        await renderTenant();
+      } catch (e) { alert('状态切换失败: ' + e.message); }
+    });
+    const del = el('button', 'run secondary', '删除');
+    del.addEventListener('click', async () => {
+      if (!confirm(`确认删除租户 ${t.id}？其 API key 将立即失效。`)) return;
+      try {
+        await mg(`admin/tenants/${t.id}`, { method: 'DELETE' });
+        await renderTenant();
+      } catch (e) { alert('删除失败: ' + e.message); }
+    });
+    actRow.append(toggle, del);
+    card.append(actRow);
+    list.append(card);
+  }
+  sec.append(list);
 }
 
 // ---------- config ----------

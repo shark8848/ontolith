@@ -335,6 +335,7 @@ mod tests {
             triples,
             "127.0.0.1:8080".to_owned(),
             HeaderAuthenticator::default(),
+            None,
             StorageBackendKind::Memory,
             None,
             default_cluster(),

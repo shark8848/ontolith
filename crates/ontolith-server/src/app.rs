@@ -2,6 +2,8 @@
 
 use crate::http::{HttpRequest, HttpResponse, now_ms};
 use crate::reasoning::{InferenceConfig, ReasoningReadService, base_read_service, reasoning_input};
+#[cfg(feature = "rocksdb-backend")]
+use crate::tenants::RocksTenantStore;
 use ontolith_ai::application::SemanticSearchService;
 use ontolith_ai::domain::MAX_TOP_K;
 use ontolith_ai::infrastructure::FeatureHashEmbedding;
@@ -32,9 +34,12 @@ use ontolith_reasoner::application::{Reasoner, ShaclValidator};
 use ontolith_reasoner::domain::{InferenceMode, ReasoningReport, ReasoningTask};
 use ontolith_reasoner::infrastructure::{ForwardChainReasoner, ShaclEngine};
 use ontolith_security::application::{
-    Authenticator, HeaderAuthenticator, InMemoryAuditLog, authorize,
+    Authenticator, HeaderAuthenticator, InMemoryAuditLog, MemoryTenantStore, TenantService,
+    TenantStore, authorize,
 };
-use ontolith_security::domain::{AuditOutcome, AuthContext, AuthMode, TenantMode, TenantNamespace};
+use ontolith_security::domain::{
+    AuditOutcome, AuthContext, AuthMode, Tenant, TenantMode, TenantNamespace, TenantStatus,
+};
 use ontolith_storage::application::{DictionaryCodec, StorageEngine, TripleRepository};
 use ontolith_storage::domain::{StorageStats, WriteBatch, WriteOperation};
 use ontolith_storage::infrastructure::{
@@ -43,6 +48,7 @@ use ontolith_storage::infrastructure::{
 use ontolith_transaction::application::TransactionManager;
 use ontolith_transaction::domain::TxnMode;
 use ontolith_transaction::infrastructure::InMemoryTransactionManager;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -206,6 +212,13 @@ pub struct AppState {
     /// Tenant isolation posture (P5-03): `Enforced` scopes every read/write
     /// to the caller's tenant namespace.
     pub tenant_mode: TenantMode,
+    /// Tenant registry (tenant management): wired into the authenticator so
+    /// per-tenant API keys resolve immediately after management-plane CRUD.
+    /// `None` when the binary is built without a tenant store (tests).
+    pub tenants: Option<Arc<dyn TenantStore>>,
+    /// Tenant lifecycle service over [`Self::tenants`] (tenant management).
+    /// Present whenever a tenant registry is wired.
+    pub tenant_service: Option<TenantService>,
     /// L6 reasoning posture (P6-03): inference mode + materialization guards
     /// applied to the shared SPARQL execution path.
     pub inference: InferenceConfig,
@@ -237,12 +250,14 @@ impl AppState {
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
         let semantic = build_semantic_service(&*triples, &*dictionary, &SemanticConfig::default());
+        let tenants: Option<Arc<dyn TenantStore>> = Some(Arc::new(MemoryTenantStore::new()));
         Self::from_parts(
             storage,
             dictionary,
             triples,
             bind_address,
             auth,
+            tenants,
             StorageBackendKind::Memory,
             None,
             default_cluster(),
@@ -270,12 +285,14 @@ impl AppState {
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
         let semantic = build_semantic_service(&*triples, &*dictionary, &semantic_config);
+        let tenants: Option<Arc<dyn TenantStore>> = Some(Arc::new(MemoryTenantStore::new()));
         Self::from_parts(
             storage,
             dictionary,
             triples,
             bind_address,
             auth,
+            tenants,
             StorageBackendKind::Memory,
             None,
             cluster,
@@ -320,12 +337,15 @@ impl AppState {
             &*dictionary,
             &SemanticConfig::default(),
         );
+        let tenants: Option<Arc<dyn TenantStore>> =
+            Some(Arc::new(RocksTenantStore::new(Arc::clone(&engine))?));
         Ok(Self::from_parts(
             storage,
             dictionary,
             triples,
             bind_address,
             auth,
+            tenants,
             StorageBackendKind::RocksDb,
             Some(path),
             default_cluster(),
@@ -360,12 +380,15 @@ impl AppState {
             &*dictionary,
             &semantic_config,
         );
+        let tenants: Option<Arc<dyn TenantStore>> =
+            Some(Arc::new(RocksTenantStore::new(Arc::clone(&engine))?));
         Ok(Self::from_parts(
             storage,
             dictionary,
             triples,
             bind_address,
             auth,
+            tenants,
             StorageBackendKind::RocksDb,
             Some(path),
             cluster,
@@ -382,7 +405,8 @@ impl AppState {
         dictionary: Arc<dyn DictionaryCodec>,
         triples: Arc<dyn TripleRepository>,
         bind_address: String,
-        auth: HeaderAuthenticator,
+        mut auth: HeaderAuthenticator,
+        tenants: Option<Arc<dyn TenantStore>>,
         backend: StorageBackendKind,
         data_dir: Option<PathBuf>,
         cluster: Arc<dyn ClusterRuntime>,
@@ -392,6 +416,14 @@ impl AppState {
         semantic: Option<SemanticSearchService>,
     ) -> Arc<Self> {
         let semantic = semantic.map(std::sync::Mutex::new);
+        // Keep the tenant registry and the gateway authenticator on the same
+        // store so CRUD takes effect immediately.
+        let tenant_service = tenants
+            .as_ref()
+            .map(|store| TenantService::new(Arc::clone(store)));
+        if let Some(store) = &tenants {
+            auth.tenants = Some(Arc::clone(store));
+        }
         Arc::new(Self {
             storage,
             dictionary,
@@ -409,6 +441,8 @@ impl AppState {
             latency_count: AtomicU64::new(0),
             status_counts: std::sync::Mutex::new(HashMap::new()),
             bind_address,
+            tenants,
+            tenant_service,
             backend,
             data_dir,
             tenant_mode,
@@ -431,12 +465,14 @@ impl AppState {
         let triples: Arc<dyn TripleRepository> =
             Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
         let semantic = build_semantic_service(&*triples, &*dictionary, &config);
+        let tenants: Option<Arc<dyn TenantStore>> = Some(Arc::new(MemoryTenantStore::new()));
         Self::from_parts(
             storage,
             dictionary,
             triples,
             bind_address,
             auth,
+            tenants,
             StorageBackendKind::Memory,
             None,
             default_cluster(),
@@ -501,6 +537,14 @@ impl AppState {
             ("GET", "/inference") => self.inference(&req),
             ("POST", "/validate/shacl") => self.validate_shacl(&req),
             ("POST", "/materialize") => self.materialize(&req),
+            ("GET", "/admin/tenants") => self.admin_tenants_list(&req),
+            ("POST", "/admin/tenants") => self.admin_tenants_create(&req),
+            ("PUT", p) if p.starts_with("/admin/tenants/") => self.admin_tenants_update(&req, p),
+            ("DELETE", p) if p.starts_with("/admin/tenants/") && p.contains("/keys/") => {
+                self.admin_tenants_revoke_key(&req, p)
+            }
+            ("DELETE", p) if p.starts_with("/admin/tenants/") => self.admin_tenants_delete(&req, p),
+            ("POST", p) if p.starts_with("/admin/tenants/") => self.admin_tenants_add_key(&req, p),
             _ => Ok(HttpResponse::json(
                 404,
                 "Not Found",
@@ -810,7 +854,7 @@ impl AppState {
             200,
             "OK",
             format!(
-                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"jwt":{},"oidc":{},"semantic":{},"tracing":"on","data_dir":{}}}"#,
+                r#"{{"status":"ok","layer":"L5","bind":{},"backend":{},"triples":{},"quads":{},"pending_txns":{},"auth_mode":{},"tenant_mode":{},"tenants":{},"jwt":{},"oidc":{},"semantic":{},"tracing":"on","data_dir":{}}}"#,
                 json_string(&self.bind_address),
                 json_string(self.backend.as_str()),
                 stats.triple_count,
@@ -821,6 +865,11 @@ impl AppState {
                     AuthMode::Enforced => "enforced",
                 }),
                 json_string(self.tenant_mode.as_str()),
+                json_string(if self.tenant_service.is_some() {
+                    "on"
+                } else {
+                    "off"
+                }),
                 json_string(match &self.authenticator.jwt_secret {
                     Some(_) => "on",
                     None => "off",
@@ -1752,6 +1801,218 @@ impl AppState {
         ))
     }
 
+    /// Tenant registry (tenant management). The gateway owns the durable
+    /// store and shares it with the authenticator, so CRUD applies to
+    /// `/sparql` etc. immediately. Only the built-in `system` tenant may
+    /// manage the registry (per-tenant keys stay scoped to their namespace).
+    fn admin_tenant_auth(&self, req: &HttpRequest) -> Result<AuthContext, OntolithError> {
+        let ctx = self.auth(req)?;
+        authorize(&self.audit, &ctx, "cluster", "admin", now_ms())?;
+        if ctx.tenant.as_str() != "system" {
+            return Err(OntolithError::Failed(
+                "forbidden: tenant management requires the system tenant".into(),
+            ));
+        }
+        Ok(ctx)
+    }
+
+    fn admin_tenants_list(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let _ = self.admin_tenant_auth(req)?;
+        let service = self
+            .tenant_service
+            .as_ref()
+            .ok_or(OntolithError::Unsupported("tenant registry disabled"))?;
+        let tenants = service.list()?;
+        let body = tenants
+            .iter()
+            .map(Self::tenant_summary_json)
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(r#"{{"total":{},"tenants":[{}]}}"#, tenants.len(), body),
+        ))
+    }
+
+    fn admin_tenants_create(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let _ = self.admin_tenant_auth(req)?;
+        let service = self
+            .tenant_service
+            .as_ref()
+            .ok_or(OntolithError::Unsupported("tenant registry disabled"))?;
+        let value: Value = serde_json::from_str(req.body_str())
+            .map_err(|e| OntolithError::failed(format!("invalid JSON body: {e}")))?;
+        let id = value.get("id").and_then(Value::as_str).unwrap_or_default();
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let description = value
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let status = TenantStatus::parse(
+            value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("active"),
+        );
+        let generate_key = value
+            .get("generate_key")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let (tenant, raw_key) =
+            service.create(id, name, description, status, generate_key, now_ms())?;
+        let summary = Self::tenant_summary_json(&tenant);
+        let resp = match raw_key {
+            Some(raw) => format!(
+                r#"{{"tenant":{},"api_key":{},"api_key_shown_once":true}}"#,
+                summary,
+                json_string(&raw)
+            ),
+            None => format!(r#"{{"tenant":{summary}}}"#),
+        };
+        Ok(HttpResponse::json(201, "Created", resp))
+    }
+
+    fn admin_tenants_update(
+        &self,
+        req: &HttpRequest,
+        path: &str,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.admin_tenant_auth(req)?;
+        let service = self
+            .tenant_service
+            .as_ref()
+            .ok_or(OntolithError::Unsupported("tenant registry disabled"))?;
+        let id = tenant_path_id(path, 3)?;
+        let existing = service
+            .get(&id)?
+            .ok_or(OntolithError::NotFound("tenant not found"))?;
+        let value: Value = serde_json::from_str(req.body_str())
+            .map_err(|e| OntolithError::failed(format!("invalid JSON body: {e}")))?;
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or(existing.name);
+        let description = value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or(existing.description);
+        let status = match value.get("status").and_then(Value::as_str) {
+            Some(raw) => TenantStatus::parse(raw),
+            None => existing.status,
+        };
+        let tenant = service.update(&id, &name, &description, status, now_ms())?;
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            Self::tenant_summary_json(&tenant),
+        ))
+    }
+
+    fn admin_tenants_delete(
+        &self,
+        req: &HttpRequest,
+        path: &str,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.admin_tenant_auth(req)?;
+        let service = self
+            .tenant_service
+            .as_ref()
+            .ok_or(OntolithError::Unsupported("tenant registry disabled"))?;
+        let id = tenant_path_id(path, 3)?;
+        service.delete(&id)?;
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(r#"{{"deleted":{}}}"#, json_string(&id)),
+        ))
+    }
+
+    fn admin_tenants_add_key(
+        &self,
+        req: &HttpRequest,
+        path: &str,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.admin_tenant_auth(req)?;
+        let service = self
+            .tenant_service
+            .as_ref()
+            .ok_or(OntolithError::Unsupported("tenant registry disabled"))?;
+        let id = tenant_path_id(path, 4)?;
+        let value: Value = serde_json::from_str(req.body_str())
+            .map_err(|e| OntolithError::failed(format!("invalid JSON body: {e}")))?;
+        let label = value
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let (key_id, raw) = service.add_key(&id, label, now_ms())?;
+        Ok(HttpResponse::json(
+            201,
+            "Created",
+            format!(
+                r#"{{"tenant":{},"key_id":{},"api_key":{},"api_key_shown_once":true}}"#,
+                json_string(&id),
+                json_string(&key_id),
+                json_string(&raw)
+            ),
+        ))
+    }
+
+    fn admin_tenants_revoke_key(
+        &self,
+        req: &HttpRequest,
+        path: &str,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.admin_tenant_auth(req)?;
+        let service = self
+            .tenant_service
+            .as_ref()
+            .ok_or(OntolithError::Unsupported("tenant registry disabled"))?;
+        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() != 5 {
+            return Err(OntolithError::failed("invalid tenant key path"));
+        }
+        let tenant = service.revoke_key(segs[2], segs[4], now_ms())?;
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            Self::tenant_summary_json(&tenant),
+        ))
+    }
+
+    /// Admin wire format for a tenant: metadata + key ids/labels only — key
+    /// digests stay server-side (raw keys are shown once at issuance).
+    fn tenant_summary_json(t: &Tenant) -> String {
+        let keys = t
+            .api_keys
+            .iter()
+            .map(|k| {
+                format!(
+                    r#"{{"id":{},"label":{},"created_at_ms":{}}}"#,
+                    json_string(&k.id),
+                    json_string(&k.label),
+                    k.created_at_ms,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"id":{},"name":{},"description":{},"status":{},"api_keys":[{}],"created_at_ms":{},"updated_at_ms":{}}}"#,
+            json_string(t.id.as_str()),
+            json_string(&t.name),
+            json_string(&t.description),
+            json_string(t.status.as_str()),
+            keys,
+            t.created_at_ms,
+            t.updated_at_ms,
+        )
+    }
+
     fn cluster_partition(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
         let ctx = self.auth(req)?;
         authorize(&self.audit, &ctx, "cluster", "admin", now_ms())?;
@@ -2304,6 +2565,18 @@ fn cors(mut resp: HttpResponse) -> HttpResponse {
     resp
 }
 
+/// Parse `/admin/tenants/<id>` (plus optional `/keys[/<key_id>]`) and return
+/// the tenant id; `expected` is the total non-empty segment count.
+fn tenant_path_id(path: &str, expected: usize) -> Result<String, OntolithError> {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() != expected || segs.first() != Some(&"admin") || segs.get(1) != Some(&"tenants") {
+        return Err(OntolithError::failed(format!(
+            "invalid tenant path: {path}"
+        )));
+    }
+    Ok(segs[2].to_owned())
+}
+
 fn escape_json(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -2481,6 +2754,7 @@ mod tests {
             triples,
             "127.0.0.1:8080".to_owned(),
             HeaderAuthenticator::default(),
+            None,
             StorageBackendKind::Memory,
             None,
             default_cluster(),
@@ -2507,6 +2781,7 @@ mod tests {
                 api_key: Some("s3cret".to_owned()),
                 ..HeaderAuthenticator::default()
             },
+            None,
             StorageBackendKind::Memory,
             None,
             default_cluster(),
@@ -2722,6 +2997,167 @@ mod tests {
             String::from_utf8_lossy(&resp.body)
         );
         assert!(String::from_utf8_lossy(&resp.body).contains("urn:tenant:acme:sub"));
+    }
+
+    #[test]
+    fn tenant_admin_crud_and_key_lifecycle_on_gateway() {
+        let state = enforced_tenant_state();
+        let sys =
+            |m: &str, p: &str, b: &[u8]| tenant_req(m, p, HashMap::new(), b, "system", "admin");
+        let raw_of = |body: &str| -> String {
+            let start = body.find("\"api_key\":\"").expect("api_key") + "\"api_key\":\"".len();
+            let end = body[start..].find('"').expect("closing quote");
+            body[start..start + end].to_owned()
+        };
+
+        // Non-system callers (legacy key with a tenant header) are forbidden.
+        let resp = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/admin/tenants",
+                HashMap::new(),
+                br#"{"id":"x"}"#,
+                "acme",
+                "u1",
+            ),
+        );
+        assert_eq!(
+            resp.status, 403,
+            "scoped tenant must not manage the registry"
+        );
+
+        // Create returns the raw key exactly once.
+        let resp = dispatch_for_test(
+            &state,
+            sys(
+                "POST",
+                "/admin/tenants",
+                br#"{"id":"acme","name":"Acme","description":"demo","generate_key":true}"#,
+            ),
+        );
+        assert_eq!(
+            resp.status,
+            201,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        assert!(body.contains("\"api_key\":\"ontk_"), "body={body}");
+        assert!(body.contains("\"api_key_shown_once\":true"), "body={body}");
+        let raw = raw_of(&body);
+
+        // The new key authenticates on the same gateway (shared store) and
+        // defaults to the `api` user.
+        let ctx = state
+            .authenticator
+            .authenticate(None, None, Some(&raw))
+            .expect("tenant key authenticates");
+        assert_eq!(ctx.tenant.as_str(), "acme");
+        assert_eq!(ctx.user.as_str(), "api");
+
+        // List: system-only, no key digests exposed.
+        let resp = dispatch_for_test(&state, sys("GET", "/admin/tenants", b""));
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        assert!(body.contains("\"id\":\"acme\""), "body={body}");
+        assert!(
+            !body.contains("\"digest\""),
+            "digests must not leak: {body}"
+        );
+
+        // Add a second key, authenticate, then revoke it.
+        let resp = dispatch_for_test(
+            &state,
+            sys("POST", "/admin/tenants/acme/keys", br#"{"label":"ops"}"#),
+        );
+        assert_eq!(
+            resp.status,
+            201,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        let raw2 = raw_of(&body);
+        let kid_start = body.find("\"key_id\":\"").expect("key_id") + "\"key_id\":\"".len();
+        let kid_end = body[kid_start..].find('"').expect("closing quote");
+        let kid = &body[kid_start..kid_start + kid_end];
+        let ctx2 = state
+            .authenticator
+            .authenticate(None, None, Some(&raw2))
+            .expect("second key authenticates");
+        assert_eq!(ctx2.tenant.as_str(), "acme");
+        let resp = dispatch_for_test(
+            &state,
+            sys("DELETE", &format!("/admin/tenants/acme/keys/{kid}"), b""),
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        assert!(
+            state
+                .authenticator
+                .authenticate(None, None, Some(&raw2))
+                .is_err(),
+            "revoked key must be rejected"
+        );
+
+        // Disable -> key rejected; re-enable -> key accepted again.
+        let resp = dispatch_for_test(
+            &state,
+            sys("PUT", "/admin/tenants/acme", br#"{"status":"disabled"}"#),
+        );
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        assert!(
+            state
+                .authenticator
+                .authenticate(None, None, Some(&raw))
+                .is_err(),
+            "disabled tenant must be rejected"
+        );
+        let _re = dispatch_for_test(
+            &state,
+            sys("PUT", "/admin/tenants/acme", br#"{"status":"active"}"#),
+        );
+        assert!(
+            state
+                .authenticator
+                .authenticate(None, None, Some(&raw))
+                .is_ok(),
+            "re-enabled tenant must authenticate"
+        );
+
+        // Delete -> key rejected and list empty.
+        let resp = dispatch_for_test(&state, sys("DELETE", "/admin/tenants/acme", b""));
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        assert!(
+            state
+                .authenticator
+                .authenticate(None, None, Some(&raw))
+                .is_err(),
+            "deleted tenant key must be rejected"
+        );
+        let resp = dispatch_for_test(&state, sys("GET", "/admin/tenants", b""));
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        assert!(body.contains("\"total\":0"), "body={body}");
     }
 
     fn jwt_state() -> Arc<AppState> {
@@ -3587,6 +4023,7 @@ mod tests {
                 triples,
                 "127.0.0.1:8080".to_owned(),
                 HeaderAuthenticator::default(),
+                None,
                 StorageBackendKind::Memory,
                 None,
                 default_cluster(),

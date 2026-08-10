@@ -1,8 +1,8 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.8.0  
-状态: Implemented (HTTP + gRPC + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC 完整链路 R2+（JWKS 校验 + TTL 缓存刷新）+ full-chain tracing P5-05)  
+版本: 2.10.0  
+状态: Implemented (HTTP + gRPC + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC 完整链路 R2+（JWKS 校验 + TTL 缓存刷新）+ full-chain tracing P5-05 + 租户管理（注册表 CRUD + 管理面代理）)  
 日期: 2026-07-23  
 对应 crate:
 
@@ -47,7 +47,27 @@ ontolith-management-server (L5 management plane)
 | POST | `/data` `/data/nt` `/data/turtle` `/data/trig` `/data/nq` | data:write | 完整 L3 解析写入 |
 | GET | `/cluster` `/cluster/status` `/cluster/membership` `/cluster/shards` `/cluster/route` `/cluster/failover` | health:read | L4 控制面只读 |
 | POST | `/cluster/heartbeat` `/tick` `/replicate` `/rebalance` `/partition` `/heal` | cluster:admin | L4 控制面变更 |
+| GET/POST | `/admin/tenants` | cluster:admin | 租户列表 / 创建（仅 `system` 租户可管理，见 §2.1） |
+| PUT/DELETE | `/admin/tenants/<id>` | cluster:admin | 更新（名称/描述/状态）/ 删除租户 |
+| POST | `/admin/tenants/<id>/keys` | cluster:admin | 生成 API key（原始值仅返回一次，落库存摘要） |
+| DELETE | `/admin/tenants/<id>/keys/<key_id>` | cluster:admin | 吊销租户 API key |
 | OPTIONS | * | — | CORS |
+
+### 2.1 租户管理（网关 `/admin/tenants*`）
+
+租户注册表由网关承载（RocksDB 后端时落独立 `tenant` CF，`ONTOLITH_STORAGE=memory`
+时走内存实现），管理面与 console 均通过代理访问网关——**RocksDB 只能被单一进程
+打开**，因此管理面不直连注册表存储。
+
+- 鉴权：仅 `x-ontolith-tenant: system` + `cluster:admin` 可管理；非 `system`
+  租户请求返回 403（防租户自管理）。
+- 存储布局（RocksDB）：`t:<id>` → 租户 JSON；`k:<key_digest>` → 租户 id（digest
+  为 FNV-1a 64 十六进制，原始 key 不落盘）。
+- API key 格式：`ontk_<16 hex>`；生成时校验唯一性（摘要碰撞即拒绝重发）。
+- 租户 JSON 字段：`id`、`name`、`description`、`status`（`active`/`disabled`）、
+  `api_keys`（`key_id`/`label`/`digest`/`created_at_ms`）、`created_at_ms`、
+  `updated_at_ms`；id 校验 `[a-z0-9_-]` 1..64，`system` 保留不可创建。
+- CRUD 即时生效：鉴权器与注册表共享同一 `Arc`，无需重启。
 
 ### 管理面 API（`ontolith-management-server`）
 
@@ -61,6 +81,8 @@ ontolith-management-server (L5 management plane)
 | GET | `/admin/data/audit` | metrics:read | 审计事件检索（`?limit=`） |
 | POST | `/admin/data/replicate` | cluster:admin | 触发 follower 复制对齐 |
 | POST | `/admin/data/rebalance` | cluster:admin | 触发 slot 重平衡 |
+| GET | `/admin/tenants` `/admin/tenants/<id>` | authorize_admin_view | 租户列表/详情（ACL 代理到网关） |
+| POST/PUT/DELETE | `/admin/tenants*` | authorize_admin_mutation | 租户变更（ACL 代理到网关） |
 
 管理面监控会探测运行时地址 `ONTOLITH_BIND` 的连通性（TCP connect），并在
 `/admin/health` 与 `/admin/monitoring` 返回 `runtime_probe` 信息（reachable/latency/error）。
@@ -153,6 +175,17 @@ ONTOLITH_JWT_SECRET=...        # 启用 JWT Bearer 鉴权
 ONTOLITH_JWT_ISSUER=ontolith   # 可选：iss 精确匹配
 ONTOLITH_JWT_AUDIENCE=ontolith-server  # 可选：aud 精确匹配
 ```
+
+#### 租户注册表（tenant registry）
+
+配置/部署租户管理后（网关持注册表），Enforced 鉴权优先按 `X-API-Key` 的
+FNV-1a 摘要解析注册表（`k:<digest>` 索引）：
+
+- 命中注册表：租户 id 取自注册表；`X-Ontolith-Tenant` 若提供须与注册表一致
+  （不一致 401）；`status=disabled` 拒绝；`X-Ontolith-User` 缺省为 `api`。
+- 未命中：回退 legacy 路径——匹配全局 `ONTOLITH_API_KEY` + `X-Ontolith-Tenant`
+  传输头（兼容既有部署）。
+- `/health` 暴露 `tenants` 姿态（`on`/`off`），gRPC `HealthResponse` 同步字段。
 
 #### OIDC 完整链路（R2+）
 
@@ -289,8 +322,8 @@ systemctl --user status ontolith-server
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
-| ontolith-security | **24** | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权）+ **OIDC 完整链路**（RFC 7515 A.2.1 RS256 官方向量、RFC 7517 JWKS 解析/kid 选键/不可用键过滤、发现文档 issuer 强制匹配、oct 往返 + 篡改/过期/iss/aud 拒绝、TTL 缓存刷新与坏响应保留旧钥） |
-| ontolith-server | **49** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**OIDC 链路（file:// 加载 + Bearer 认证往返、http:// JWKS 抓取、https 拒绝启动、`/health` jwt/oidc 姿态）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）**、**gRPC 网关（roundtrip insert/select + `traceparent` 回带、enforced 401、跨租户 403、health+oidc）** |
+| ontolith-security | **29** | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权）+ **OIDC 完整链路**（RFC 7515 A.2.1 RS256 官方向量、RFC 7517 JWKS 解析/kid 选键/不可用键过滤、发现文档 issuer 强制匹配、oct 往返 + 篡改/过期/iss/aud 拒绝、TTL 缓存刷新与坏响应保留旧钥）+ **租户注册表**（`Tenant`/`TenantApiKey`/`TenantStatus`、id 校验与 `system` 保留、确定性 JSON、`MemoryTenantStore`/`TenantService` create/update/delete/add_key/revoke_key、key 仅存摘要、摘要碰撞拒绝） |
+| ontolith-server | **65** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**OIDC 链路（file:// 加载 + Bearer 认证往返、http:// JWKS 抓取、https 拒绝启动、`/health` jwt/oidc 姿态）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）**、**gRPC 网关（roundtrip insert/select + `traceparent` 回带、enforced 401、跨租户 403、health+oidc）**、**租户管理（网关 CRUD + key 生命周期 + 鉴权即时生效 + digest 不泄漏、非 `system` 403、管理面代理 + ACL）** |
 
 ---
 
@@ -340,3 +373,4 @@ ONTOLITH_API_KEY=...
 | 2026-08-08 | 2.7.0 | **P5-05 Tracing 全链路**：`ontolith-observability` 追踪域模型 + `InMemoryTraceStore` + W3C `traceparent` 解析/生成 + 线程本地 `TraceScope`；server 网关 `http.request` 根 span + `http.auth`/`sparql.execute`/`data.ingest` 子 span、响应回带 `Traceparent`、`/health`+`/admin/config` 暴露 `tracing` 姿态、`GET /admin/traces`；observability 6→11、server 26→29 测 |
 | 2026-08-08 | 2.8.0 | **P5-01 gRPC 网关接入**：tonic 0.12 + prost 0.13 + `protoc-bin-vendored` 3（`grpc-backend` feature 默认开，`--no-default-features` 回退构建通过）；`proto/ontolith/v1/sparql.proto` `SparqlService{Query,Health}`；`SparqlGateway` 复用 HTTP 共享执行路径 + metadata 鉴权（enforced 401/跨租户 403）+ `traceparent` 延续/回带 + 根/子 span；`serve_grpc` 独立 tokio runtime 线程；`ONTOLITH_GRPC_BIND`（默认 `127.0.0.1:50051`），`ontolith-server` bin 升级为真实 HTTP+gRPC 双网关；server 29→33 测 |
 | 2026-08-08 | 2.9.0 | **OIDC 完整链路（R2+）**：`oidc.rs` 树内 JWKS/JWK（RFC 7517）+ RS256（RFC 7515 A.2.1 官方向量背书，自研无依赖大整数 RSA）+ HS256 + `exp`/`nbf`/`iss`/`aud` 策略 + RFC 8414 发现文档 issuer 强制匹配 + `JwksFetcher`/`CachingJwks`/`JwksVerifier` TTL 缓存刷新；server 接线 `ONTOLITH_OIDC_ISSUER`/`AUDIENCE`/`JWKS_URL`/`CACHE_TTL_SECS` + `ONTOLITH_JWT_LEEWAY_SECS`（file:///http:// 注入式传输，https 明确拒绝并文档化）；`/health`（HTTP+管理面）与 gRPC `HealthResponse` 暴露 `oidc` 姿态；security 18→24、server 44→49 测；R1 唯一剩余项勾选完成 |
+| 2026-08-10 | 2.10.0 | **租户管理（注册表 CRUD + 管理面代理）**：`ontolith-security` 新增 `Tenant`/`TenantApiKey`/`TenantStatus` + `TenantStore`/`MemoryTenantStore`/`TenantService`（create/update/delete/add_key/revoke_key，key 仅存 FNV-1a 摘要、原始值一次性返回），Enforced 鉴权按 key 摘要解析注册表（头匹配/disabled 拒绝/user 缺省 `api`，全局 key 退化为 legacy 回退）；`ontolith-storage` 独立 `tenant` CF + `tenant_cf_*` 字节级原语；网关承载 `/admin/tenants*` CRUD（仅 `system` 租户 + cluster:admin，RocksDB 键布局 `t:<id>`/`k:<digest>`，`create_missing_column_families` 自动增 CF）；管理面 `/admin/tenants*` ACL 代理到网关（读 `authorize_admin_view`/写 `authorize_admin_mutation`，`http_exchange` 最小 HTTP 客户端）；`/health` 暴露 `tenants` 姿态；security 24→29、storage 51→54、server 49→65 测 |

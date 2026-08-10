@@ -7,3 +7,6 @@ target/
 
 # Local production deployment (secrets; never commit)
 prod/
+
+# Local RocksDB scratch data (drill leftovers; never commit)
+data/

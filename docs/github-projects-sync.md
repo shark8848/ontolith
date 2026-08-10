@@ -100,6 +100,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | RDF 1.1 布尔项区分（uniqueLang-002 闭合） | 已完成 | 2026-08-09 |
 | console 左下角配置菜单（主题切换 + 退出登录） | 已完成 | 5 套主题 + localStorage 持久化 + 图表颜色联动；8890/8891 实测（2026-08-09） |
 | SPARQL 测试样例入库（loadtest 10 样例 + runner） | 已完成 | docs/sparql-samples-loadtest.md + scripts/sparql-samples-loadtest.mjs，生产复验 10/10 OK（2026-08-09） |
+| 租户管理（注册表 CRUD + 管理面代理 + console 租户页） | 已完成 | L5 2.10.0：`/admin/tenants*` 网关 CRUD + 管理面 ACL 代理 + console 侧边栏租户页，security 29/storage 54/server 65 测（2026-08-10） |
 
 ## 4. 写入操作（GraphQL）
 

@@ -136,6 +136,14 @@ impl ManagementState {
             ("GET", "/admin/data/audit") => self.admin_data_audit(&req),
             ("POST", "/admin/data/replicate") => self.admin_data_replicate(&req),
             ("POST", "/admin/data/rebalance") => self.admin_data_rebalance(&req),
+            ("GET", "/admin/tenants") => self.admin_tenants_list(&req),
+            ("POST", "/admin/tenants") => self.admin_tenants_create(&req),
+            ("PUT", p) if p.starts_with("/admin/tenants/") => self.admin_tenants_update(&req, p),
+            ("DELETE", p) if p.starts_with("/admin/tenants/") && p.contains("/keys/") => {
+                self.admin_tenants_revoke_key(&req, p)
+            }
+            ("DELETE", p) if p.starts_with("/admin/tenants/") => self.admin_tenants_delete(&req, p),
+            ("POST", p) if p.starts_with("/admin/tenants/") => self.admin_tenants_add_key(&req, p),
             _ => Ok(HttpResponse::json(
                 404,
                 "Not Found",
@@ -602,6 +610,93 @@ impl ManagementState {
             ),
         ))
     }
+
+    /// Management-plane tenant registry (tenant management). The durable
+    /// registry lives in the gateway process (single RocksDB owner, shared
+    /// with the gateway authenticator); the management plane enforces the
+    /// admin ACL here and proxies the request to the gateway, which enforces
+    /// the system-tenant + cluster-admin check.
+    fn admin_tenants_list(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_view(req)?;
+        self.proxy_tenant_gateway(req, "GET", "/admin/tenants")
+    }
+
+    fn admin_tenants_create(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_mutation(req)?;
+        self.proxy_tenant_gateway(req, "POST", "/admin/tenants")
+    }
+
+    fn admin_tenants_update(
+        &self,
+        req: &HttpRequest,
+        path: &str,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_mutation(req)?;
+        self.proxy_tenant_gateway(req, "PUT", path)
+    }
+
+    fn admin_tenants_delete(
+        &self,
+        req: &HttpRequest,
+        path: &str,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_mutation(req)?;
+        self.proxy_tenant_gateway(req, "DELETE", path)
+    }
+
+    fn admin_tenants_add_key(
+        &self,
+        req: &HttpRequest,
+        path: &str,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_mutation(req)?;
+        self.proxy_tenant_gateway(req, "POST", path)
+    }
+
+    fn admin_tenants_revoke_key(
+        &self,
+        req: &HttpRequest,
+        path: &str,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_mutation(req)?;
+        self.proxy_tenant_gateway(req, "DELETE", path)
+    }
+
+    /// Forward a tenant-management request to the gateway process with the
+    /// gateway's own credentials (legacy API key + `system` tenant).
+    fn proxy_tenant_gateway(
+        &self,
+        req: &HttpRequest,
+        method: &str,
+        path: &str,
+    ) -> Result<HttpResponse, OntolithError> {
+        let api_key = self
+            .app
+            .authenticator
+            .api_key
+            .as_deref()
+            .ok_or_else(|| OntolithError::Failed("tenant gateway auth unavailable".into()))?;
+        let headers = [
+            ("x-api-key", api_key),
+            ("x-ontolith-tenant", "system"),
+            ("x-ontolith-user", "management"),
+            ("content-type", "application/json"),
+        ];
+        let body = if matches!(method, "POST" | "PUT") {
+            req.body.as_slice()
+        } else {
+            &[][..]
+        };
+        let (status, text) = http_exchange(
+            method,
+            &format!("http://{}{}", self.app.bind_address, path),
+            &headers,
+            body,
+        )
+        .map_err(|e| OntolithError::Failed(format!("tenant gateway proxy: {e}")))?;
+        let reason = if status >= 400 { "Error" } else { "OK" };
+        Ok(HttpResponse::json(status, reason, text))
+    }
 }
 
 pub fn shared_management_handler(state: Arc<ManagementState>) -> Handler {
@@ -898,6 +993,96 @@ fn fetch_http_get_with_headers(url: &str, headers: &[(&str, &str)]) -> Result<St
     }
     body.truncate(content_length);
     String::from_utf8(body).map_err(|e| format!("jwks body not utf8: {e}"))
+}
+
+/// Minimal HTTP/1.1 exchange for the management→gateway tenant proxy
+/// (arbitrary method + body; returns upstream status and body).
+fn http_exchange(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<(u16, String), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("unsupported scheme in {url:?}"))?;
+    let (host_port, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    let addr = host_port
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next())
+        .ok_or_else(|| format!("cannot resolve host {host_port:?}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .map_err(|e| format!("connect {host_port}: {e}"))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nAccept: application/json\r\nConnection: close\r\n"
+    );
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if !body.is_empty() {
+        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    head.push_str("\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body))
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("write request: {e}"))?;
+
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let header_end = loop {
+        if let Some(pos) = find_header_end(&buf) {
+            break pos;
+        }
+        if buf.len() > 64 * 1024 {
+            return Err("response headers too large".into());
+        }
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| format!("read response: {e}"))?;
+        if n == 0 {
+            return Err("unexpected EOF before response headers".into());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    };
+
+    let head = String::from_utf8_lossy(&buf[..header_end]);
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap_or_default();
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.parse::<u16>().ok())
+        .ok_or_else(|| format!("malformed status line: {status_line}"))?;
+    let mut content_length = 0usize;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim().eq_ignore_ascii_case("content-length")
+        {
+            content_length = v.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body_buf = buf[header_end + 4..].to_vec();
+    while body_buf.len() < content_length {
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| format!("read body: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        body_buf.extend_from_slice(&tmp[..n]);
+    }
+    body_buf.truncate(content_length);
+    String::from_utf8(body_buf)
+        .map(|b| (status, b))
+        .map_err(|e| format!("body not utf8: {e}"))
 }
 
 /// Live gateway counters snapshot, parsed from the runtime `/metrics`
@@ -1210,6 +1395,8 @@ fn error_response(err: OntolithError) -> HttpResponse {
         OntolithError::InvalidArgument(_) | OntolithError::InvalidState(_)
     ) {
         (400, "Bad Request")
+    } else if matches!(err, OntolithError::NotFound(_)) {
+        (404, "Not Found")
     } else if matches!(err, OntolithError::Unsupported(_)) {
         (501, "Not Implemented")
     } else {
@@ -1796,5 +1983,129 @@ mod tests {
             parse_backend_from_health(health).as_deref(),
             Some("rocksdb")
         );
+    }
+
+    fn req_body(method: &str, path: &str, body: &str, key: Option<&str>) -> HttpRequest {
+        let mut headers = HashMap::new();
+        if let Some(k) = key {
+            headers.insert("X-Ontolith-Management-Key".to_owned(), k.to_owned());
+        }
+        HttpRequest {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            query: HashMap::new(),
+            headers,
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    /// Management tenant routes proxy to the gateway process (the single
+    /// owner of the durable registry). Spins up a real gateway HTTP server
+    /// so the proxy path + shared-store auth are exercised end to end.
+    #[test]
+    fn tenant_admin_proxies_to_gateway_and_acl_holds() {
+        let gateway_key = "gw-secret";
+        let gateway = AppState::new_memory_with_audit(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator {
+                mode: AuthMode::Enforced,
+                api_key: Some(gateway_key.to_owned()),
+                ..HeaderAuthenticator::default()
+            },
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        let bind = format!("127.0.0.1:{}", addr.port());
+        let server = HttpServer::new(crate::app::shared_handler(Arc::clone(&gateway)));
+        let stop = server.stop_flag();
+        let bind_for_server = bind.clone();
+        let handle =
+            std::thread::spawn(move || server.serve(&bind_for_server).expect("serve gateway"));
+        // Wait for the gateway listener to accept before proxying.
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(&bind).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let gate = Arc::clone(&gateway);
+
+        // Management state points its runtime probe at the live gateway.
+        // Management plane authenticates its own clients; the gateway key is
+        // kept for the proxy hop. Disabled mode here isolates the ACL check.
+        let mg_app = AppState::new_memory_with_audit(
+            bind.clone(),
+            HeaderAuthenticator {
+                mode: AuthMode::Disabled,
+                api_key: Some(gateway_key.to_owned()),
+                ..HeaderAuthenticator::default()
+            },
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+        );
+        let acl = ManagementAcl {
+            read_key: Some("r".to_owned()),
+            write_key: Some("w".to_owned()),
+        };
+        let state = ManagementState::new(mg_app, "127.0.0.1:9091".to_owned(), acl, 10, false);
+
+        // Read key cannot mutate.
+        let resp = dispatch_for_test(
+            &state,
+            req_body(
+                "POST",
+                "/admin/tenants",
+                r#"{"id":"acme","name":"Acme","generate_key":true}"#,
+                Some("r"),
+            ),
+        );
+        assert_eq!(resp.status, 403, "read key must not mutate");
+
+        // Write key proxies to the gateway; the created key authenticates
+        // against the gateway's own authenticator (same store).
+        let resp = dispatch_for_test(
+            &state,
+            req_body(
+                "POST",
+                "/admin/tenants",
+                r#"{"id":"acme","name":"Acme","generate_key":true}"#,
+                Some("w"),
+            ),
+        );
+        assert_eq!(
+            resp.status,
+            201,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        let start = body.find("\"api_key\":\"").expect("api_key") + "\"api_key\":\"".len();
+        let end = body[start..].find('"').expect("closing quote");
+        let raw = &body[start..start + end];
+        assert!(raw.starts_with("ontk_"));
+
+        let ctx = gate
+            .authenticator
+            .authenticate(None, None, Some(raw))
+            .expect("gateway resolves tenant key");
+        assert_eq!(ctx.tenant.as_str(), "acme");
+
+        // Read path proxies too.
+        let resp = dispatch_for_test(&state, req_with_key("GET", "/admin/tenants", "r"));
+        assert_eq!(
+            resp.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        assert!(String::from_utf8_lossy(&resp.body).contains("\"id\":\"acme\""));
+
+        stop.store(false, Ordering::SeqCst);
+        // Wake the blocked `accept` so the serve loop observes the stop flag.
+        let _ = std::net::TcpStream::connect(&bind);
+        handle.join().expect("gateway server thread");
     }
 }
