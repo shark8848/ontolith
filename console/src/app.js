@@ -223,6 +223,7 @@ function toast(msg, type = 'ok') {
 function confirmDeleteTenant(t) {
   return new Promise(resolve => {
     const ov = el('div', 'confirm-overlay');
+    ov.id = 'confirm-overlay';
     const card = el('div', 'confirm-card');
     card.append(el('h2', null, '删除租户'));
     card.append(el('p', 'muted', `确认删除租户 ${t.id}？其 API key 将立即失效。请输入租户 id 以确认：`));
@@ -866,12 +867,13 @@ async function renderTenant() {
       for (const k of t.api_keys || []) {
         const tr = el('tr');
         tr.append(el('td', null, k.id), el('td', null, k.label || '—'), el('td', null, new Date(k.created_at_ms).toLocaleString()));
-        const revoke = el('button', 'run secondary', '吊销');
+        const revoke = iconBtn('icon-trash', '吊销');
+        revoke.classList.add('danger');
         revoke.addEventListener('click', async () => {
           try {
             await mg(`admin/tenants/${t.id}/keys/${k.id}`, { method: 'DELETE' });
             await renderTenant();
-          } catch (e) { alert('吊销失败: ' + e.message); }
+          } catch (e) { toast('吊销失败: ' + e.message, 'bad'); }
         });
         const td = el('td'); td.append(revoke); tr.append(td);
         tbody.append(tr);
@@ -883,7 +885,7 @@ async function renderTenant() {
     // Add-key row.
     const keyRow = el('div', 'row');
     const keyInput = el('input'); keyInput.type = 'text'; keyInput.placeholder = 'key 标签（可选）';
-    const addKeyBtn = el('button', 'run secondary', '生成 key');
+    const addKeyBtn = iconBtn('icon-key', '生成 key');
     const keyMsg = el('span', 'muted');
     addKeyBtn.addEventListener('click', async () => {
       keyMsg.textContent = '';
@@ -905,8 +907,8 @@ async function renderTenant() {
 
     // Lifecycle actions (bottom-right, icon buttons).
     const actRow = el('div', 'card-actions');
-    const toggle = iconBtn('icon-power', t.status === 'active' ? '禁用' : '启用');
-    toggle.classList.toggle('danger', t.status === 'active');
+    const toggle = iconBtn(t.status === 'active' ? 'icon-ban' : 'icon-power', t.status === 'active' ? '禁用' : '启用');
+    toggle.classList.toggle('ban', t.status === 'active');
     toggle.addEventListener('click', async () => {
       try {
         await mg(`admin/tenants/${t.id}`, {
@@ -924,7 +926,7 @@ async function renderTenant() {
       if (!(await confirmDeleteTenant(t))) return;
       try {
         await mg(`admin/tenants/${t.id}`, { method: 'DELETE' });
-        toast(`已删除 ${t.id}`);
+        toast(`删除成功：${t.id}`);
         await renderTenant();
       } catch (e) { toast('删除失败: ' + e.message, 'bad'); }
     });

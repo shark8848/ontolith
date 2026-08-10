@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.58
+版本: 0.1.59
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-10 | Codex | **console 租户操作细节收尾（PROG-0001 0.1.58→0.1.59）**：① 删除对话框居中修复——`confirm-overlay` 动态创建时补 `id` 使 `#confirm-overlay` fixed 居中样式生效（原 class/id 不匹配导致未居中）；删除结果右上角 toast（成功「删除成功：<id>」/失败 bad）② 吊销改 `icon-trash` 图标按钮（danger hover）③ 「生成 key」按钮改 `icon-key` 图标并紧贴 key 标签输入框右侧 ④ 禁用图标由 power 换成 `icon-ban`（圆圈红色斜杠，`icon-btn.ban` 常驻红色），启用仍用 `icon-power`；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 租户卡片右下角图标操作 + 删除输入确认（PROG-0001 0.1.57→0.1.58）**：禁用/启用与删除改卡片右下角图标按钮（`icon-power`/`icon-trash` SVG，`card-actions` flex-end，hover 危险色）；删除弹出自定义确认对话框 `confirmDeleteTenant`（遮罩 + 卡片，须输入租户 id 完全匹配才可点「确认删除」，Enter 确认/Esc 或点遮罩取消，错误提示）；禁用/删除成功改右上角 toast（原 `alert`/`confirm` 移除）；`index.html` 增 `icon-power`/`icon-trash`、`style.css` 增 `.card-actions`/`.confirm-overlay`/`.confirm-card`/`.icon-btn.danger`；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console toast 增加 5s 消失进度条（PROG-0001 0.1.56→0.1.57）**：toast 拆为 `.toast-msg` + `.toast-bar`，底部进度条 `toast-bar` 动画 5s linear 100%→0（`TOAST_MS=5000`），到时淡出移除；`bad` 变体进度条随红缘变色；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 操作确认改右上角 toast（PROG-0001 0.1.55→0.1.56）**：新增 `toast(msg)` 消息机制（`#toast-container` 右上角固定、`toast-in` 动画、3s 自动淡出、`bad` 变体），租户「创建成功 / 已生成新 key」等确认提示不再在模块内输出（移除 `lastTenantNote` 与表单内成功文案，仅保留校验/错误消息）；`index.html` 增 `#toast-container`、`style.css` 增 `.toast*`；`npm run build` 重建 dist，8890 线上验证 |
