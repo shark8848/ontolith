@@ -220,6 +220,37 @@ function toast(msg, type = 'ok') {
   box.append(t);
   setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 350); }, TOAST_MS);
 }
+function confirmDeleteTenant(t) {
+  return new Promise(resolve => {
+    const ov = el('div', 'confirm-overlay');
+    const card = el('div', 'confirm-card');
+    card.append(el('h2', null, '删除租户'));
+    card.append(el('p', 'muted', `确认删除租户 ${t.id}？其 API key 将立即失效。请输入租户 id 以确认：`));
+    const input = el('input'); input.type = 'text'; input.placeholder = t.id;
+    const err = el('p', 'err');
+    const row = el('div', 'row');
+    const cancel = el('button', 'run secondary', '取消');
+    const confirm = el('button', 'run', '确认删除');
+    confirm.disabled = true;
+    const close = (ok) => { ov.remove(); resolve(ok); };
+    input.addEventListener('input', () => { confirm.disabled = input.value !== t.id; err.textContent = ''; });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !confirm.disabled) confirm.click();
+      if (e.key === 'Escape') close(false);
+    });
+    cancel.addEventListener('click', () => close(false));
+    confirm.addEventListener('click', () => {
+      if (input.value !== t.id) { err.textContent = '输入与租户 id 不匹配'; return; }
+      close(true);
+    });
+    ov.addEventListener('click', e => { if (e.target === ov) close(false); });
+    row.append(cancel, confirm);
+    card.append(input, err, row);
+    ov.append(card);
+    document.body.append(ov);
+    input.focus();
+  });
+}
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -872,9 +903,10 @@ async function renderTenant() {
     keyRow.append(keyInput, addKeyBtn, keyMsg);
     card.append(keyRow);
 
-    // Lifecycle actions.
-    const actRow = el('div', 'row');
-    const toggle = el('button', 'run secondary', t.status === 'active' ? '禁用' : '启用');
+    // Lifecycle actions (bottom-right, icon buttons).
+    const actRow = el('div', 'card-actions');
+    const toggle = iconBtn('icon-power', t.status === 'active' ? '禁用' : '启用');
+    toggle.classList.toggle('danger', t.status === 'active');
     toggle.addEventListener('click', async () => {
       try {
         await mg(`admin/tenants/${t.id}`, {
@@ -882,16 +914,19 @@ async function renderTenant() {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ status: t.status === 'active' ? 'disabled' : 'active' }),
         });
+        toast(`已${t.status === 'active' ? '禁用' : '启用'} ${t.id}`);
         await renderTenant();
-      } catch (e) { alert('状态切换失败: ' + e.message); }
+      } catch (e) { toast('状态切换失败: ' + e.message, 'bad'); }
     });
-    const del = el('button', 'run secondary', '删除');
+    const del = iconBtn('icon-trash', '删除');
+    del.classList.add('danger');
     del.addEventListener('click', async () => {
-      if (!confirm(`确认删除租户 ${t.id}？其 API key 将立即失效。`)) return;
+      if (!(await confirmDeleteTenant(t))) return;
       try {
         await mg(`admin/tenants/${t.id}`, { method: 'DELETE' });
+        toast(`已删除 ${t.id}`);
         await renderTenant();
-      } catch (e) { alert('删除失败: ' + e.message); }
+      } catch (e) { toast('删除失败: ' + e.message, 'bad'); }
     });
     actRow.append(toggle, del);
     card.append(actRow);

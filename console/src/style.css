@@ -68,6 +68,8 @@ button.icon-btn { background: var(--panel2); color: var(--muted); border: 1px so
 button.icon-btn svg.icon { width: 15px; height: 15px; }
 button.icon-btn:hover { color: var(--accent); border-color: var(--accent); }
 button.icon-btn.copied { color: var(--ok); border-color: var(--ok); }
+button.icon-btn.danger:hover { color: var(--bad); border-color: var(--bad); }
+.card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .key-box { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; padding: 10px 12px; border: 1px dashed var(--accent); border-radius: 8px; background: var(--panel2); }
 .key-box-title { font-size: 12px; color: var(--muted); }
 .key-value { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color: var(--text); word-break: break-all; background: var(--bg); padding: 6px 10px; border-radius: 6px; flex: 1; min-width: 0; }
@@ -80,6 +82,11 @@ button.icon-btn.copied { color: var(--ok); border-color: var(--ok); }
 .toast.out { opacity: 0; transition: opacity .3s ease; }
 @keyframes toast-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
 @keyframes toast-bar { from { width: 100%; } to { width: 0; } }
+#confirm-overlay { position: fixed; inset: 0; background: var(--scrim); display: flex; align-items: center; justify-content: center; z-index: 20; }
+.confirm-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 22px; width: 380px; max-width: calc(100vw - 32px); }
+.confirm-card h2 { margin: 0 0 10px; font-size: 16px; }
+.confirm-card p { margin: 0 0 12px; font-size: 13px; }
+.confirm-card .row { justify-content: flex-end; margin-top: 14px; }
 table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { background: var(--panel2); color: var(--muted); font-weight: 600; }
