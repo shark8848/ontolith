@@ -210,13 +210,15 @@ function iconBtn(symbolId, title) {
   b.innerHTML = `<svg class="icon"><use href="#${symbolId}"></use></svg>`;
   return b;
 }
+const TOAST_MS = 5000;
 function toast(msg, type = 'ok') {
   const box = $('#toast-container');
   if (!box) return;
   const t = el('div', 'toast' + (type === 'bad' ? ' bad' : ''));
-  t.textContent = msg;
+  t.append(el('div', 'toast-msg', msg));
+  t.append(el('div', 'toast-bar'));
   box.append(t);
-  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 350); }, 3000);
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 350); }, TOAST_MS);
 }
 async function copyText(text) {
   try {
