@@ -602,6 +602,7 @@ impl AppState {
             elapsed,
             resp.body.len()
         );
+        crate::logcenter::emit_access(&method, path, resp.status, elapsed, resp.body.len());
         resp
     }
 

@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.62
+版本: 0.1.63
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-10 | Codex | **平台日志接入 ikc-log-center（Rust SDK，PROG-0001 0.1.62→0.1.63）**：集成已发布 crate `log-center-sdk` 0.1.0（Tier B 登记）——新增 `crates/ontolith-server/src/logcenter.rs`（`LogCenterClient` 共享客户端 + `emit`/`emit_access`，环境变量 `LOG_CENTER_URL/TOKEN/TIMEOUT/QUEUE/BATCH` 与 Python/Java SDK 对齐，未配置时静默禁用）；gateway 启动/指标/就绪/错误与 access 日志（method/path/status/latency_ms/bytes + W3C trace_id/span_id）结构化上报，management 启动/配置日志同接入；`LOG_CENTER_URL=http://127.0.0.1:9315` 写入 prod/staging 四份 env；server 65→68 测全绿，冒烟实测日志带 `app=ontolith-server` 与 trace_id 进入 log-center `/search` |
 | 2026-08-10 | Codex | **今日任务看板同步 DONE（SYNC-PROJ-0001，PROG-0001 0.1.61→0.1.62）**：GitHub Projects #2 增量同步 5 条 0 失败——新增 4 卡：console 自动刷新优化（仅监控/集群模块内定时器）Done / console 数值精度 3 位小数 Done / console 租户管理页交互完善（key 复制 + toast + 图标操作 + 删除输入确认 + 2 列布局）Done / ikc-log-center Rust SDK 接入（规划中，Python 方案已回退）Todo；回写租户管理卡 Done；回读 total=63；`docs/github-projects-sync.md` 映射表补 4 行 |
 | 2026-08-10 | Codex | **console 租户列表固定 2 列（PROG-0001 0.1.60→0.1.61）**：租户卡片网格 `cards tenant-grid` 固定 `repeat(2, 1fr)`，不再随窗口无限向右排（窄屏 ≤760px 回退单列）；创建表单移出网格、整行置顶；`npm run build` 重建 dist，8890 线上验证 |
 | 2026-08-10 | Codex | **console 租户图标细节调整（PROG-0001 0.1.59→0.1.60）**：① 禁用 `icon-ban` 移除常驻红色（删除 `.icon-btn.ban` 规则与 `ban` class 切换），与其他图标一致——默认 muted、hover/focus 才出现 accent 边框色；② 「生成 key」图标与输入框同行——key 行加 `tenant-key-row`，输入框 `flex:1; min-width:0` 不再占满整行把按钮挤到下一行；`npm run build` 重建 dist，8890 线上验证 |

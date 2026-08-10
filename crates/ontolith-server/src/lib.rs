@@ -8,6 +8,7 @@ pub mod bootstrap;
 #[cfg(feature = "grpc-backend")]
 pub mod grpc;
 pub mod http;
+pub mod logcenter;
 pub mod management;
 pub mod reasoning;
 pub mod runtime;

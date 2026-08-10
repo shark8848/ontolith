@@ -708,6 +708,9 @@ pub fn dispatch_for_test(state: &Arc<ManagementState>, req: HttpRequest) -> Http
 }
 
 pub fn run() -> Result<(), String> {
+    // ikc-log-center Rust SDK：LOG_CENTER_URL 配置时启用管理面日志上报。
+    crate::logcenter::init("ontolith-management-server");
+
     let management_bind = env::var(MGMT_BIND_ENV).unwrap_or_else(|_| DEFAULT_MGMT_BIND.to_owned());
     let acl = load_management_acl_from_env();
     let runtime_probe_timeout_ms = load_runtime_probe_timeout_ms();
@@ -742,6 +745,30 @@ pub fn run() -> Result<(), String> {
         } else {
             "off"
         },
+    );
+    crate::logcenter::emit(
+        "INFO",
+        "ontolith-management-server",
+        &format!(
+            "starting: bind={}, runtime_bind={}, backend={}, acl_read_key={}, acl_write_key={}, probe_timeout_ms={}, tls={}, jwt={}, oidc={}",
+            management_bind,
+            state.app.bind_address,
+            state.app.backend.as_str(),
+            acl.read_key.is_some(),
+            acl.write_key.is_some(),
+            runtime_probe_timeout_ms,
+            if tls.is_some() { "on" } else { "off" },
+            if state.app.authenticator.jwt_enabled() {
+                "on"
+            } else {
+                "off"
+            },
+            if state.app.authenticator.jwt_oidc.is_some() {
+                "on"
+            } else {
+                "off"
+            },
+        ),
     );
 
     let server = match tls {

@@ -36,6 +36,7 @@ ontolith-sdk = { path = "../ontolith-sdk" }
 ontolith-rdf = { path = "../ontolith-rdf" }
 ontolith-parser = { path = "../ontolith-parser" }
 ontolith-ai = { path = "../ontolith-ai" }
+log-center-sdk = "0.1"
 serde_json = "1"
 
 [build-dependencies]

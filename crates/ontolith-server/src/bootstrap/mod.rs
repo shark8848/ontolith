@@ -19,6 +19,9 @@ const GRPC_BIND_ENV: &str = "ONTOLITH_GRPC_BIND";
 const DEFAULT_GRPC_BIND: &str = "127.0.0.1:50051";
 
 pub fn run() {
+    // ikc-log-center Rust SDK：LOG_CENTER_URL 配置时启用平台日志上报。
+    crate::logcenter::init("ontolith-server");
+
     // Startup diagnostics: one-shot runtime metrics snapshot (legacy bootstrap
     // behavior) so the process logs the same probe as before.
     let tx_manager = InMemoryTransactionManager::new();
@@ -38,6 +41,15 @@ pub fn run() {
         "ontolith-server bootstrap ready: api={}, runtime={}",
         api::status(),
         runtime::status()
+    );
+    crate::logcenter::emit(
+        "INFO",
+        "ontolith-server",
+        &format!(
+            "bootstrap ready: api={}, runtime={}",
+            api::status(),
+            runtime::status()
+        ),
     );
 
     println!(
@@ -60,11 +72,40 @@ pub fn run() {
         exported_points.len(),
         prometheus_line_count,
     );
+    crate::logcenter::emit(
+        "INFO",
+        "ontolith-server",
+        &format!(
+            "bootstrap metrics: rounds={}, interval_ms={}, ts_ms={}, tx_active={}, tx_begun={}, tx_committed={}, tx_aborted={}, storage_pending={}, storage_ops(triple/quad/delete)={}/{}/{}, storage_write_failures(stage/commit/abort)={}/{}/{}, wal_records={}, points={}, prom_lines={}",
+            snapshots.len(),
+            sampling_config.interval_ms,
+            snapshot.timestamp_ms,
+            snapshot.transaction.active,
+            snapshot.transaction.begun,
+            snapshot.transaction.committed,
+            snapshot.transaction.aborted,
+            snapshot.storage.pending_transactions,
+            snapshot.storage.committed_put_triple_operations,
+            snapshot.storage.committed_put_quad_operations,
+            snapshot.storage.committed_delete_key_operations,
+            snapshot.storage.failed_stage_batches,
+            snapshot.storage.failed_commit_transactions,
+            snapshot.storage.failed_abort_transactions,
+            snapshot.storage.wal_records,
+            exported_points.len(),
+            prometheus_line_count,
+        ),
+    );
 
     // Real gateway (P5-01): shared L5 AppState from the same environment
     // contract as the management server, then HTTP + gRPC access boundaries.
     let app = management::build_gateway_app_state_from_env().unwrap_or_else(|err| {
         eprintln!("ontolith-server startup failed: {err}");
+        crate::logcenter::emit(
+            "ERROR",
+            "ontolith-server",
+            &format!("startup failed: {err}"),
+        );
         std::process::exit(1);
     });
 
@@ -85,10 +126,30 @@ pub fn run() {
         },
         app.tenant_mode.as_str(),
     );
+    crate::logcenter::emit(
+        "INFO",
+        "ontolith-server",
+        &format!(
+            "gateway ready: http={}, grpc={}, backend={}, auth_mode={}, tenant_mode={}",
+            app.bind_address,
+            grpc_bind,
+            app.backend.as_str(),
+            match app.authenticator.mode {
+                AuthMode::Disabled => "disabled",
+                AuthMode::Enforced => "enforced",
+            },
+            app.tenant_mode.as_str(),
+        ),
+    );
 
     let server = http::HttpServer::new(app::shared_handler(app.clone()));
     if let Err(err) = server.serve(&app.bind_address) {
         eprintln!("ontolith-server http listen {}: {err}", app.bind_address);
+        crate::logcenter::emit(
+            "ERROR",
+            "ontolith-server",
+            &format!("http listen {}: {err}", app.bind_address),
+        );
         std::process::exit(1);
     }
 }
