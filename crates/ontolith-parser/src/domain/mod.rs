@@ -28,7 +28,7 @@ impl ParseFormat {
     }
 
     pub const fn is_implemented(self) -> bool {
-        !matches!(self, Self::JsonLd)
+        true
     }
 }
 
@@ -65,8 +65,17 @@ impl ParseRequest {
         Self::new(ParseFormat::TriG, source_name)
     }
 
+    pub fn json_ld(source_name: impl Into<String>) -> Self {
+        Self::new(ParseFormat::JsonLd, source_name)
+    }
+
     pub fn with_base(mut self, base: impl Into<String>) -> Self {
         self.base_iri = Some(base.into());
+        self
+    }
+
+    pub fn with_base_opt(mut self, base: Option<String>) -> Self {
+        self.base_iri = base;
         self
     }
 }

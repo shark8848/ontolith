@@ -1286,6 +1286,7 @@ dependencies = [
  "ontolith-core",
  "ontolith-rdf",
  "ontolith-storage",
+ "serde_json",
 ]
 
 [[package]]

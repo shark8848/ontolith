@@ -97,7 +97,7 @@ impl PrefixMap {
     }
 }
 
-fn resolve_against_base(base: &str, relative: &str) -> String {
+pub(crate) fn resolve_against_base(base: &str, relative: &str) -> String {
     if relative.is_empty() {
         return base.to_owned();
     }

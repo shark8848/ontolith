@@ -2,8 +2,8 @@
 
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
-数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.66，2026-08-29）
-状态: Active（Classic PAT 已配置，随增量同步；2026-08-29 全量同步完成：65 条（63 更新 + 2 新建）0 失败，回读 total=65）
+数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.67，2026-08-30）
+状态: Active（Classic PAT 已配置，随增量同步；2026-08-29 全量同步完成：65 条（63 更新 + 2 新建）0 失败，回读 total=65；2026-08-30 新增 WBS-02 JSON-LD 导入卡（已完成/P1），回读 total=66）
 
 ## 1. 认证要求（重要，勿重复探索）
 
@@ -107,6 +107,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | console 数值显示精度统一（3 位小数） | 已完成 | `fmtNum`/`fmtLatency` `toFixed(3)`，指标表/运行时长/图表末值标签生效（2026-08-10） |
 | console 租户管理页交互完善（key 复制/toast/图标操作/删除输入确认/2 列布局） | 已完成 | 一次性 key 卡片内展示+复制图标、右上角 toast（5s 进度条）、图标操作、删除输入 id 确认、2 列网格（2026-08-10） |
 | ikc-log-center Rust SDK 接入（规划中，Python 方案已回退） | 已完成 | 平台服务日志接入 log-center：crate `log-center-sdk` 0.1.0 集成（logcenter 模块 + gateway/management 启动与 access 日志结构化上报 + W3C trace_id），server 65→68 测，冒烟实测入库；PROG-0001 0.1.62→0.1.63（2026-08-10） |
+| WBS-02 JSON-LD 导入 | 已完成 | 2026-08-30，`ontolith-parser` JSON-LD 1.0/1.1 务实子集（`@context` 展开/值对象/容器/嵌套节点/命名图 quads），server ingest 接通 `/data/json-ld`；parser 17→26、server 70→71 测；PROG-0001 0.1.66→0.1.67 |
 
 ## 4. 写入操作（GraphQL）
 

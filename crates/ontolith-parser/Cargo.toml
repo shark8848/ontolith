@@ -7,3 +7,4 @@ edition = "2024"
 ontolith-core = { path = "../ontolith-core" }
 ontolith-rdf = { path = "../ontolith-rdf" }
 ontolith-storage = { path = "../ontolith-storage", default-features = false }
+serde_json = "1"

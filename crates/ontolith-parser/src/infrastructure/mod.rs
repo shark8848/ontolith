@@ -1,5 +1,6 @@
 //! Parser infrastructure adapters (L3 — full syntax surface).
 
+mod json_ld;
 mod nt;
 pub mod term_lex;
 mod turtle;
@@ -9,6 +10,7 @@ use crate::domain::{DatasetSink, ParseFormat, ParseOutput, ParseRequest, RdfEven
 use ontolith_core::error::OntolithError;
 use ontolith_storage::application::DictionaryCodec;
 
+use self::json_ld::parse_json_ld;
 use self::nt::{LineFormat, parse_document_streaming};
 use self::turtle::{parse_trig, parse_turtle};
 
@@ -72,7 +74,7 @@ impl RdfParser for BasicRdfParser {
             }
             ParseFormat::Turtle => parse_turtle(input, dictionary, request.base_iri.clone(), sink),
             ParseFormat::TriG => parse_trig(input, dictionary, request.base_iri.clone(), sink),
-            ParseFormat::JsonLd => Err(OntolithError::Unsupported("json-ld")),
+            ParseFormat::JsonLd => parse_json_ld(input, dictionary, request.base_iri.clone(), sink),
         }
     }
 }
@@ -103,6 +105,18 @@ pub fn parse_trig_doc(
     dictionary: &dyn DictionaryCodec,
 ) -> Result<ParseOutput, OntolithError> {
     BasicRdfParser::new().parse(&ParseRequest::trig("inline"), input, dictionary)
+}
+
+pub fn parse_json_ld_doc(
+    input: &str,
+    dictionary: &dyn DictionaryCodec,
+    base_iri: Option<String>,
+) -> Result<ParseOutput, OntolithError> {
+    BasicRdfParser::new().parse(
+        &ParseRequest::json_ld("inline").with_base_opt(base_iri),
+        input,
+        dictionary,
+    )
 }
 
 pub fn status() -> &'static str {
@@ -362,12 +376,16 @@ ex:g {
     }
 
     #[test]
-    fn unsupported_jsonld() {
+    fn parses_empty_jsonld_doc() {
         let dict = InMemoryDictionary::new();
-        let err = BasicRdfParser::new()
-            .parse(&ParseRequest::new(ParseFormat::JsonLd, "x"), "{}", &dict)
-            .unwrap_err();
-        assert_eq!(err, OntolithError::Unsupported("json-ld"));
+        let out = BasicRdfParser::new()
+            .parse(
+                &ParseRequest::new(ParseFormat::JsonLd, "x").with_base("urn:base:"),
+                r#"{"@context": {"name": "http://example.org/name"}, "@id": "urn:a", "name": "A"}"#,
+                &dict,
+            )
+            .unwrap();
+        assert_eq!(out.dataset.triple_count(), 1);
     }
 
     #[test]

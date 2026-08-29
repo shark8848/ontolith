@@ -25,7 +25,7 @@ use ontolith_observability::infrastructure::{
 };
 use ontolith_parser::domain::ParseFormat;
 use ontolith_parser::infrastructure::{
-    parse_nquads, parse_ntriples, parse_trig_doc, parse_turtle_doc,
+    parse_json_ld_doc, parse_nquads, parse_ntriples, parse_trig_doc, parse_turtle_doc,
 };
 use ontolith_query::domain::{
     BoundValue, PatternCost, QueryExplain, QueryKind, QueryRequest, QueryResult,
@@ -533,7 +533,9 @@ impl AppState {
             | ("POST", "/data/nt")
             | ("POST", "/data/turtle")
             | ("POST", "/data/trig")
-            | ("POST", "/data/nq") => self.ingest(&req, path),
+            | ("POST", "/data/nq")
+            | ("POST", "/data/jsonld")
+            | ("POST", "/data/json-ld") => self.ingest(&req, path),
             ("GET", "/cluster") | ("GET", "/cluster/status") => self.cluster_status(&req),
             ("GET", "/cluster/membership") => self.cluster_membership(&req),
             ("GET", "/cluster/shards") => self.cluster_shards(&req),
@@ -1306,9 +1308,7 @@ impl AppState {
                 ParseFormat::NQuads => parse_nquads(text, dict)?,
                 ParseFormat::Turtle => parse_turtle_doc(text, dict)?,
                 ParseFormat::TriG => parse_trig_doc(text, dict)?,
-                ParseFormat::JsonLd => {
-                    return Err(OntolithError::Unsupported("json-ld"));
-                }
+                ParseFormat::JsonLd => parse_json_ld_doc(text, dict, None)?,
             };
 
             // Tenant isolation at write path (P5-03): enforced mode ALWAYS
@@ -2235,11 +2235,15 @@ fn detect_ingest_format(req: &HttpRequest, path: &str) -> Result<ParseFormat, On
         if ct.contains("n-triples") || ct.contains("ntriples") {
             return Ok(ParseFormat::NTriples);
         }
+        if ct.contains("json-ld") || ct.contains("ld+json") {
+            return Ok(ParseFormat::JsonLd);
+        }
     }
     Ok(match path {
         "/data/turtle" => ParseFormat::Turtle,
         "/data/trig" => ParseFormat::TriG,
         "/data/nq" => ParseFormat::NQuads,
+        "/data/jsonld" | "/data/json-ld" => ParseFormat::JsonLd,
         _ => ParseFormat::NTriples,
     })
 }
@@ -2250,6 +2254,7 @@ fn parse_format_name(name: &str) -> Result<ParseFormat, OntolithError> {
         "nq" | "nquads" | "n-quads" => Ok(ParseFormat::NQuads),
         "ttl" | "turtle" => Ok(ParseFormat::Turtle),
         "trig" => Ok(ParseFormat::TriG),
+        "jsonld" | "json-ld" | "json" => Ok(ParseFormat::JsonLd),
         other => Err(OntolithError::Failed(format!(
             "unsupported ingest format: {other}"
         ))),
@@ -3557,6 +3562,42 @@ mod tests {
         );
         assert_eq!(read.status, 200);
         assert!(String::from_utf8_lossy(&read.body).contains("\"c\""));
+    }
+
+    #[test]
+    fn jsonld_ingest_via_http() {
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let body = br#"{
+          "@context": {
+            "name": "http://ex.org/name",
+            "knows": {"@id": "http://ex.org/knows", "@type": "@id"}
+          },
+          "@id": "http://ex.org/alice",
+          "name": "Alice",
+          "knows": "http://ex.org/bob"
+        }"#;
+        let resp = dispatch_for_test(
+            &state,
+            HttpRequest {
+                method: "POST".to_owned(),
+                path: "/data/json-ld".to_owned(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: body.to_vec(),
+            },
+        );
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+
+        let read = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "SELECT ?n WHERE { <http://ex.org/alice> <http://ex.org/name> ?n }",
+            ),
+        );
+        let rbody = String::from_utf8_lossy(&read.body);
+        assert!(rbody.contains("Alice"), "read: {rbody}");
     }
 
     #[test]

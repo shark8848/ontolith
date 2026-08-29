@@ -50,7 +50,7 @@ SPARQL / RDF text
 | 经 L2 SPO/POS/OSP 访问 | ✅ |
 | 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`） | ✅ |
 | RDF 序列化导出（N-Triples / N-Quads 写出，`SerializeFormat`） | ✅ |
-| JSON-LD | ❌ 明确 Unsupported |
+| JSON-LD（`@context` 子集：term/前缀/`@vocab`/`@base`/`@language`/keyword 别名、`@id`/`@type`/`@value`/`@list`/`@set`/`@language`/`@index` 容器、命名图 `@graph`、嵌套节点） | ✅（RDF 1.0/1.1 务实子集） |
 | SPARQL Update（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE） | ✅ |
 | SPARQL Update 高级形态（CLEAR/DROP 图作用域、WITH 图作用域 DELETE·INSERT…WHERE、LOAD 本地图复制） / DESCRIBE 执行 | ✅（LOAD 为本地命名图复制子集，远程 HTTP 抓取未实现） |
 | 属性路径扩展（分组/嵌套更完整 1.1 语法） | ❌ 后续增强 |
@@ -104,7 +104,10 @@ infrastructure/
 
 #### JSON-LD
 
-- 返回 `OntolithError::Unsupported("json-ld")`
+- 解析 `@context` 对象/数组（自左向右合并）、term → IRI 映射与 `@prefix:` 展开、`@vocab`/`@base`/`@language` 默认值、keyword 别名（`"id": "@id"`）
+- 节点对象：`@id`（IRI / `_:` blank）、`@type`、属性值为 string/number/boolean/object/array/null、嵌套节点（自动 mint blank node）、值对象（`@value` + `@language`/`@type`）、`@list`/`@set`/`@language`/`@index` 容器
+- `{"@id": g, "@graph": [...]}` 命名图 → 四元组（quads）
+- 不支持的形态显式报错：远程 `@context` URL、`@reverse`、`@nest`、`@included`、`@json`
 
 ### 2.3 流式契约
 
@@ -266,7 +269,7 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 
 | Crate | 测试数 | 覆盖 |
 |-------|--------|------|
-| parser | 11 | NT/NQ/Turtle/TriG/集合/blank 属性表/流式/定位错误/JSON-LD |
+| parser | 26 | NT/NQ/Turtle/TriG/集合/blank 属性表/流式/定位错误/JSON-LD（`@context` 展开/值对象/容器/命名图/错误路径） |
 | query | 46 | SELECT/JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/ASK/DISTINCT/ORDER/LIMIT/PREFIX/完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）/SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）/子查询基线/属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）/Explain/timeout/cancel/txn/hint |
 | storage 回归 | 24 | 绿 |
 | core 回归 | 11 | 绿 |
@@ -277,7 +280,7 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 
 1. **属性路径扩展（分组/嵌套更完整 1.1 语法）**、**高级子查询（相关子查询等）**、**EXISTS/NOT EXISTS**、**SERVICE** 未实现（已支持完整聚合 GROUP BY/HAVING、嵌套 SELECT+LIMIT 子查询、子查询聚合与属性路径最小集 `p1/p2`、`+`、`*`、`?`、`|`、`^`）。HAVING 中聚合调用需匹配投影聚合表达式（重写为别名求值）。  
 2. **SPARQL Update 高级形态**：已支持 `CLEAR/DROP [SILENT] DEFAULT|NAMED|ALL|GRAPH <g>`、`WITH <g>` 作用于 DELETE·INSERT…WHERE / DELETE WHERE（WHERE 以图 `g` 为默认图匹配，模板写入图 `g`）、`LOAD [SILENT] <src> [INTO GRAPH <g>]`（离线子集：`<src>` 为库内已有命名图，复制到默认图或目标图；远程 HTTP 抓取留待网络层）。`WITH` 仅组合 modify 形态（与规范一致）；DELETE/INSERT 模板中的 blank 节点按未绑定处理（跳过该三元组）；无匹配的更新为空操作不报错。  
-3. **JSON-LD** 未实现。  
+3. **JSON-LD** 为务实子集：不支持远程 `@context` URL、`@reverse`、`@nest`、`@included`、`@json`（显式报错），`@context` 无完整 term 定义（`@id` 为相对 IRI 的 `@type` 语义等边缘）按文档声明处理。  
 4. JOIN 为嵌套循环式 solution merge；BGP 模式序由代价优化器按实时统计（triple/predicate/subject/object 计数）做贪心选序 + 绑定传播（`EngineQueryStatistics` + `CostBasedOptimizer`），统计为均匀选择性启发式，尚无采样/直方图。  
 5. CONSTRUCT 模板中的 blank 生成语义为绑定投影，非全规范 blank 唯一化。  
 6. 网络流式结果属于 **L5 server**，本层交付内存 `QueryResult`。  
