@@ -343,6 +343,7 @@ mod tests {
             TenantMode::Disabled,
             InferenceConfig::new(InferenceMode::ForwardChaining, 64, None),
             semantic,
+            None,
         )
     }
 

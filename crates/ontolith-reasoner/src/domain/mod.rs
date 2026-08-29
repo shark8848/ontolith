@@ -1,7 +1,9 @@
 use ontolith_query::domain::QueryPlanId;
 
+mod ontology;
 mod shacl;
 
+pub use ontology::*;
 pub use shacl::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

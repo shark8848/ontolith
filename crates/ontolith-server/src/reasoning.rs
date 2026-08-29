@@ -2,12 +2,14 @@
 //! inference mode + materialization guards, wired into the shared SPARQL
 //! execution path through a read-service overlay.
 
-use ontolith_core::domain::{Iri, NodeId};
+use ontolith_core::domain::{GraphId, Iri, NodeId, ObjectId, OntologyObject, TimestampMs};
 use ontolith_core::error::OntolithError;
 use ontolith_query::application::QueryReadService;
 use ontolith_query::domain::{QueryPlanId, TenantScope};
 use ontolith_rdf::domain::{Term, Triple};
-use ontolith_reasoner::domain::{InferenceMode, ReasoningTask};
+use ontolith_reasoner::domain::{
+    InferenceMode, OntologyGraphReader, ReasoningTask, load_ontology_payload,
+};
 use ontolith_storage::application::{
     DictionaryCodec, QuadRepository, StorageEngine, TripleRepository,
 };
@@ -19,6 +21,12 @@ use std::sync::Arc;
 const INFERENCE_MODE_ENV: &str = "ONTOLITH_INFERENCE_MODE";
 const INFERENCE_MAX_ITERATIONS_ENV: &str = "ONTOLITH_INFERENCE_MAX_ITERATIONS";
 const INFERENCE_MAX_ELAPSED_MS_ENV: &str = "ONTOLITH_INFERENCE_MAX_ELAPSED_MS";
+
+const ONTOLOGY_TBOX_ENV: &str = "ONTOLITH_ONTOLOGY_TBOX";
+const ONTOLOGY_ABOX_ENV: &str = "ONTOLITH_ONTOLOGY_ABOX";
+const ONTOLOGY_ANNOTATION_ENV: &str = "ONTOLITH_ONTOLOGY_ANNOTATION";
+const ONTOLOGY_RULE_ENV: &str = "ONTOLITH_ONTOLOGY_RULE";
+const ONTOLOGY_PROVENANCE_ENV: &str = "ONTOLITH_ONTOLOGY_PROVENANCE";
 
 const DEFAULT_MAX_ITERATIONS: u32 = 64;
 
@@ -122,6 +130,30 @@ pub fn reasoning_input(
     base: &dyn QueryReadService,
     scope: Option<&TenantScope>,
 ) -> Result<Vec<Triple>, OntolithError> {
+    reasoning_input_with_ontology(base, scope, None)
+}
+
+/// Materialization input with the configured ontology payload (P1-01): the
+/// tenant-scoped triples plus every role graph referenced by `ontology`.
+/// Shared ontology graphs are included regardless of tenant ownership so a
+/// single ontology can be reasoned over by multiple tenants.
+pub fn reasoning_input_with_ontology(
+    base: &dyn QueryReadService,
+    scope: Option<&TenantScope>,
+    ontology: Option<&OntologyObject>,
+) -> Result<Vec<Triple>, OntolithError> {
+    let mut out = tenant_scoped_input(base, scope)?;
+    if let Some(ontology) = ontology {
+        let reader = QueryReadOntologyReader { base };
+        out.extend(load_ontology_payload(&reader, ontology)?.all());
+    }
+    Ok(out)
+}
+
+fn tenant_scoped_input(
+    base: &dyn QueryReadService,
+    scope: Option<&TenantScope>,
+) -> Result<Vec<Triple>, OntolithError> {
     let Some(scope) = scope else {
         return base.all_triples(None);
     };
@@ -132,6 +164,63 @@ pub fn reasoning_input(
         }
     }
     Ok(out)
+}
+
+/// Build a KO [`OntologyObject`] from the environment contract
+/// (`ONTOLITH_ONTOLOGY_{TBOX,ABOX,ANNOTATION,RULE,PROVENANCE}` = graph IRIs).
+/// Returns `None` when no role graph is configured (the default).
+pub fn ontology_from_env() -> Option<OntologyObject> {
+    let mut ontology = OntologyObject::new(
+        ObjectId::from_validated("ontology:configured"),
+        TimestampMs::default(),
+    )
+    .ok()?;
+    if let Ok(value) = env::var(ONTOLOGY_TBOX_ENV) {
+        ontology.tbox_graph = Some(GraphId::named(Iri::new(value)));
+    }
+    if let Ok(value) = env::var(ONTOLOGY_ABOX_ENV) {
+        ontology.abox_graph = Some(GraphId::named(Iri::new(value)));
+    }
+    if let Ok(value) = env::var(ONTOLOGY_ANNOTATION_ENV) {
+        ontology.annotation_graph = Some(GraphId::named(Iri::new(value)));
+    }
+    if let Ok(value) = env::var(ONTOLOGY_RULE_ENV) {
+        ontology.rule_graph = Some(GraphId::named(Iri::new(value)));
+    }
+    if let Ok(value) = env::var(ONTOLOGY_PROVENANCE_ENV) {
+        ontology.provenance_graph = Some(GraphId::named(Iri::new(value)));
+    }
+    let configured = [
+        ontology.tbox_graph.as_ref(),
+        ontology.abox_graph.as_ref(),
+        ontology.annotation_graph.as_ref(),
+        ontology.rule_graph.as_ref(),
+        ontology.provenance_graph.as_ref(),
+    ]
+    .iter()
+    .any(Option::is_some);
+    configured.then_some(ontology)
+}
+
+/// [`OntologyGraphReader`] over a [`QueryReadService`]: named graphs resolve
+/// through `quads_in_graph`, the default graph through `all_triples`.
+pub struct QueryReadOntologyReader<'a> {
+    base: &'a dyn QueryReadService,
+}
+
+impl<'a> QueryReadOntologyReader<'a> {
+    pub fn new(base: &'a dyn QueryReadService) -> Self {
+        Self { base }
+    }
+}
+
+impl OntologyGraphReader for QueryReadOntologyReader<'_> {
+    fn graph_triples(&self, graph: &GraphId) -> Result<Vec<Triple>, OntolithError> {
+        match graph {
+            GraphId::Named(name) => Ok(self.base.quads_in_graph(name, None)),
+            GraphId::Default => self.base.all_triples(None),
+        }
+    }
 }
 
 /// Read-service overlay serving the base store plus a materialized inference

@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.63
+版本: 0.1.64
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -41,11 +41,11 @@
 |------|------|--------|------|
 | 仓库与 crate 骨架 | 已完成 | ~100% | 16 crate（core/rdf/storage/transaction/query/parser/cluster/security/observability/server/reasoner/plugin-api/ai/geo/compliance/sdk）；Git 已有基线提交 |
 | Phase 0 规划与治理 | 已完成 | ~100% | 台账 + ADR/RFC 模板 + 依赖登记 + 计划互链；**PLAN-0001 签批完成（2026-08-09）**、RFC-0001 评审回填、SAS/Volume 04/SAS-0401/手册目录定稿 |
-| Phase 1 核心模型与存储抽象 | 部分完成 | ~90% | L0/L1 文档化；ConsistencyLevel；存储契约固化（接口版本冻结 0.1.0）；序列化 Part II（KO 二进制编解码）；RFC-0001 定稿（2026-08-09 评审 Accepted）；唯一缺口 P1-01 KO 领域模型 80%（Ontology 载荷联动 reasoner） |
+| Phase 1 核心模型与存储抽象 | 已完成 | ~100% | L0/L1 文档化；ConsistencyLevel；存储契约固化（接口版本冻结 0.1.0）；序列化 Part II（KO 二进制编解码）；RFC-0001 定稿（2026-08-09 评审 Accepted）；**P1-01 Ontology 载荷联动 reasoner 完成**（2026-08-29：`OntologyPayload`/`load_ontology_payload` 按 tbox/abox/annotation/rule/provenance 图引用物化 KO 载荷 + server 推理输入合并，reasoner 98→102 测） |
 | Phase 2 持久化与事务内核 | 部分完成 | ~97% | 内存+磁盘 MVCC 版本链（跨重启持久）+ RocksDB 耐久 + 纯 CF 索引扫描（SPO/POS/OSP + 命名图 GSPO/GPOS/GOSP）+ 索引 CF 调优（bloom/块缓存/压缩） |
 | Phase 3 查询引擎 | 已完成 | ~100% | Turtle/TriG + SPARQL 核心代数/优化/绑定 + 完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）+ SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE + 图管理 ADD/COPY/MOVE/CREATE）+ 子查询基线 + 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ W3C 子集门禁（required-lite，must-pass 30/30）+ strict 观测轨 + **完整 W3C 套件 manifest 基线（492 条，492 PASS/0 FAIL，fail=0、drift=0）** + **RDF 1.1 布尔项区分（`"1"^^xsd:boolean` ≠ `true`，含 SHACL uniqueLang 激活语义）** |
-| Phase 4 集群与一致性 MVP | 部分完成 | ~98% | 多进程 raft M1–M3 + P4-01–P4-04（元数据 RPC/跨节点搬迁/真实网络分区）+ 在线重平衡/灾备演练 DRILL PASS；唯一缺口 P4-05 读一致性 API 说明 95% |
-| Phase 5 接入层与安全基线 | 部分完成 | ~98% | HTTP 全路由 + gRPC 网关 + 文件审计（哈希链）+ 强制租户隔离 + TLS 终止（R2 门禁）+ OIDC 完整链路（JWKS/RS256）+ Tracing 全链路 + 独立管理服务器 + ACL/runtime probe；唯一缺口 P5-04 审计加密级哈希升级（可选） |
+| Phase 4 集群与一致性 MVP | 已完成 | ~100% | 多进程 raft M1–M3 + P4-01–P4-04（元数据 RPC/跨节点搬迁/真实网络分区）+ 在线重平衡/灾备演练 DRILL PASS；**P4-05 读一致性级别与 API 说明完成**（2026-08-29：L4 v2.8.0 §4 固化 ConsistencyLevel 语义矩阵 + Rust/HTTP API 契约） |
+| Phase 5 接入层与安全基线 | 已完成 | ~100% | HTTP 全路由 + gRPC 网关 + 文件审计（SHA-256 哈希链）+ 强制租户隔离 + TLS 终止（R2 门禁）+ OIDC 完整链路（JWKS/RS256）+ Tracing 全链路 + 独立管理服务器 + ACL/runtime probe；**P5-04 审计加密级哈希升级完成**（2026-08-29：链哈希 FNV-1a→SHA-256，legacy 文件兼容续链，security 29→30 测） |
 | Phase 6 推理与验证 | 已完成 | ~100% | 前向链推理引擎（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key、prp-spo2 属性链、cls-hv1/2 hasValue、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2/3（AllDifferent）+ prp-irp/cax-adc（bnode 感知 + 同迭代检测），迭代上限 + 墙钟超时护栏）可用；**SHACL 基线校验引擎落地（目标/核心约束组件全齐 + 属性路径表达式全量 + W3C SHACL 核心套件 98/98 全绿——uniqueLang-002 缺口经 RDF 1.1 布尔项区分修复闭合，reasoner 4→80 测）** |
 | Phase 7 企业运维与发布 | 已完成 | ~100% | GitHub Actions CI + 本地 ci-local + systemd 部署脚本（含 management server）+ 管理面 smoke + 窗口化 SLO 门禁 + 存储微基准（CI bench 作业，**已接阈值断言 + 趋势记录硬门禁**）+ license 审计 CI 作业 + **依赖登记审计（P0-03 硬门禁）+ cargo-audit CVE 观测（CI 新作业）** + **在线重平衡与灾备演练脚本（P7-01/04，真实 3 进程 raft，DRILL PASS）** + **发布/回滚手册（P7-03）** + **首次真实发布（2026-08-09：REL-PROD-0001 单节点生产部署，RocksDB 持久 + AUTH enforced + 审计落盘，证据齐备）** |
 | Phase 8 AI-Native 扩展 | 已完成 | ~100% | 立项 + P8-01 M1–M3（语义核心/server 接线/RocksDB 持久化与增量更新）+ **P8-02 检索 KPI 门禁**（热路径优化实测 top-10 < 1ms、`ontolith-compliance` 门禁 + CI `retrieval-gates` 作业 + 语义 bench 阈值/趋势）+ **P8-03 代理集成扩展点**（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具）+ **R4 全项 + ACC-R4 验收包 ACCEPTANCE PASS**；RemoteProvider/ANN 为后续轨非目标 |
@@ -57,13 +57,13 @@
 
 | 层 | 完成度 | 状态 |
 |----|--------|------|
-| L0 core | ~90% | KO/Canonical/Error/ConsistencyLevel/序列化 Part II（20 测） |
+| L0 core | ~95% | KO/Canonical/Error/ConsistencyLevel/序列化 Part II + **OntologyObject 载荷联动契约**（2026-08-29：`OntologyPayload`/`load_ontology_payload` 按角色图引用物化，reasoner 侧 102 测） |
 | L1 rdf | ~80% | Triple/Quad/Dataset |
 | L2 storage/txn | ~97% | 内存 MVCC 版本链（版本快照/剪枝/WAL 重放重建）+ RocksDB 磁盘 MVCC 版本链（versions CF 跨重启持久）+ 纯 CF 索引扫描（SPO/POS/OSP + 命名图 GSPO/GPOS/GOSP，无内存索引重建） |
 | L3 parser/query | ~96% | 完整核心，非仅 MVP；完整聚合 + SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）+子查询（含聚合）+属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）+ RDF 序列化导出；W3C 子集 required-lite（30/30）+ strict 观测双轨 + 完整 W3C 套件 manifest 基线 |
-| L4 cluster | ~97% | +session/partition/rebalance/commit + HTTP /cluster + 数据面同步（快照迁移/回执）+ 多进程 raft M1–M3 + P4-01–P4-04 + 在线重平衡（slot bias + shard_map_epoch）+ 灾备演练；31 测（唯一缺口 P4-05 读一致性 API 说明） |
-| L5 server/security/obs | ~98% | 双后端、文件审计（哈希链）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe + gRPC 网关 + TLS 终止 + OIDC 完整链路 + 强制租户隔离 + Tracing 全链路 |
-| L6 reasoner | ~100% | 前向链推理引擎 **86 条完整规则清单**（RDFS + OWL 2 RL 全表：eq-*/prp-*/cls-*/cax-*/dt-*/scm-*/rdfs-*，含 prp-eqp1/2、prp-asyp/pdw/adp/npa1/2 ⊥、cls-maxc1/maxqc1–4、cls-oo、cax-eqc1/2、dt-not-type/dt-eq、scm-* 全量模式、rdfs4a/4b/6/8/10/12/13；公理种子化 + bnode 感知 + 同迭代 frontier ⊥ 检测；迭代上限 + 墙钟超时；`inferred_triples` 排除公理与 Resource 定型背景）+ SHACL 基线校验（目标四选 + 隐式类目标；核心约束组件全齐 + 属性路径表达式全量 inversePath/alternativePath/sequence/zeroOrMore/oneOrMore/zeroOrOne；severity/message；ValidationReport；W3C SHACL 核心套件 98/98 全绿）；98 测 |
+| L4 cluster | ~100% | +session/partition/rebalance/commit + HTTP /cluster + 数据面同步（快照迁移/回执）+ 多进程 raft M1–M3 + P4-01–P4-04 + 在线重平衡（slot bias + shard_map_epoch）+ 灾备演练；31 测 + **P4-05 读一致性级别与 API 说明（L4 v2.8.0）** |
+| L5 server/security/obs | ~100% | 双后端、文件审计（**SHA-256 哈希链**）、Results JSON、ingest、增强指标、部署脚本、管理面二进制与管理 API + ACL + runtime probe + gRPC 网关 + TLS 终止 + OIDC 完整链路 + 强制租户隔离 + Tracing 全链路 + **P5-04 审计加密级哈希升级（legacy FNV-1a 兼容续链）** |
+| L6 reasoner | ~100% | 前向链推理引擎 **86 条完整规则清单**（RDFS + OWL 2 RL 全表：eq-*/prp-*/cls-*/cax-*/dt-*/scm-*/rdfs-*，含 prp-eqp1/2、prp-asyp/pdw/adp/npa1/2 ⊥、cls-maxc1/maxqc1–4、cls-oo、cax-eqc1/2、dt-not-type/dt-eq、scm-* 全量模式、rdfs4a/4b/6/8/10/12/13；公理种子化 + bnode 感知 + 同迭代 frontier ⊥ 检测；迭代上限 + 墙钟超时；`inferred_triples` 排除公理与 Resource 定型背景）+ SHACL 基线校验（目标四选 + 隐式类目标；核心约束组件全齐 + 属性路径表达式全量 inversePath/alternativePath/sequence/zeroOrMore/oneOrMore/zeroOrOne；severity/message；ValidationReport；W3C SHACL 核心套件 98/98 全绿）+ **Ontology 载荷联动（P1-01：`OntologyPayload` 角色图物化，2026-08-29）**；102 测 |
 | L7 平台工程 | ~100% | CI workflow + ci-local + compliance crate + systemd 安装脚本 + 管理面 smoke + 窗口化 SLO 校验 + 存储微基准（阈值断言 + 趋势记录）+ license/CVE 审计作业 + 在线重平衡/灾备演练脚本 + 发布回滚手册 + 首次真实发布 REL-PROD-0001 |
 | L8 AI-Native | ~100% | P8-01 M1 语义核心 + M2 server 接线 + M3 RocksDB 持久化与增量更新；P8-02 检索 KPI 门禁（确定性/相关命中/延迟 < 1ms + CI 门禁）完成；P8-03 代理集成扩展点（plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例工具）+ ACC-R4 验收包 ACCEPTANCE PASS（RemoteProvider/ANN 后续轨） |
 
@@ -102,7 +102,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
-| P1-01 | Knowledge Object 领域模型 | 部分完成 | 80% | L0 KO + L1 Statement/Graph/Dataset + 序列化 Part II（`KoCodec` 全容器往返）；见 IMPL-L0 文档 | Ontology 载荷联动 reasoner |
+| P1-01 | Knowledge Object 领域模型 | 已完成 | 100% | L0 KO + L1 Statement/Graph/Dataset + 序列化 Part II（`KoCodec` 全容器往返）；**Ontology 载荷联动 reasoner 完成**（2026-08-29：`ontolith-reasoner::domain::ontology` —— `OntologyPayload`（tbox/abox/annotation/rule/provenance 角色拆分）+ `load_ontology_payload`（经 `OntologyGraphReader` 按 `OntologyObject` 图引用物化）+ server 接线（`reasoning_input_with_ontology` 合并载荷、`ONTOLITH_ONTOLOGY_{TBOX,ABOX,ANNOTATION,RULE,PROVENANCE}` env 契约、`/materialize` 同接入），reasoner 98→102 测 + server +2 测） | —（载荷联动闭环） |
 | P1-02 | Node 标识与字典管理器 | 部分完成 | 90% | 内存字典 + RocksDB 持久字典 + 并发字典契约（[L2-storage-contracts.md](./L2-storage-contracts.md) Part A） | 随 P2-02 MVCC 复核字典 epoch 语义 |
 | P1-03 | 存储抽象接口 | 已完成 | 100% | stats/matching/snapshot_with/delete 精确 API + 接口版本冻结 0.1.0（[L2-storage-contracts.md](./L2-storage-contracts.md) Part B） | —（破坏性变更按流程走 RFC/ADR 登记） |
 | P1-04 | 确定性标识与规范化编码规则 | 已完成 | 100% | 六置换物理键 + triple/quad set key + 编码规则/磁盘布局定稿（[RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)），2026-08-09 评审回填转正式 Accepted | —（磁盘布局变更走 RFC/ADR） |
@@ -148,7 +148,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 | P4-02 | Raft 控制基线 | **完成** | 100% | 任期/日志 + **commit_index 多数派**；[ADR-0004](../adr/0004-multi-process-raft-data-plane.md) **M1 openraft 适配 + M2 多进程 HTTP RPC + RocksDB raft CF + snapshot install + M3 默认运行时切换 + CI 三进程 smoke**（cluster 26→27 测，三节点 HTTP+RocksDB 多数派提交/失一 follower 后仍可提交） | 无（P4-02 全项落地） |
 | P4-03 | 单区域分片与复制 | **完成** | 100% | hash slot + lag + **rebalance** + **跨节点数据搬迁**（`DataPlaneSnapshotIo` export/import + `/internal/raft/transfer-snapshot` 真实字节迁移，cluster 28→29 测） | 无（P4-03 全项落地） |
 | P4-04 | 故障转移基线 | **完成** | 100% | failover + **partition 注入/愈合** + **真实网络分区**（`HttpRaftClient` 对称丢弃 + `metadata_mutation` 隔离拒绝/愈合恢复，cluster 29→30 测） | 无（P4-04 全项落地） |
-| P4-05 | 读一致性级别与 API 说明 | 部分完成 | 95% | Session 粘性 + [L4 文档 v2](./L4-ontolith-cluster-consistency.md) + **/cluster HTTP** | — |
+| P4-05 | 读一致性级别与 API 说明 | 已完成 | 100% | Session 粘性 + [L4 文档 v2.8.0](./L4-ontolith-cluster-consistency.md) §4（**ConsistencyLevel strong/session/eventual 语义矩阵 + Rust 读路由 API（`route_read`/`route_read_session`/`QueryRequest::with_consistency`）+ L5 HTTP 契约（`/cluster/route?consistency=&session=`、`/query`·`/explain` 的 `x-ontolith-consistency` 头、权限与回退）+ 分区下 session 回退语义**） + **/cluster HTTP** | —（2026-08-29 闭合） |
 
 **阶段退出条件：** 单区域复制 + 选主/故障转移可演示。
 
@@ -161,7 +161,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 | P5-01 | 网关与服务接入边界 | **完成** | 100% | 全路由 + memory/rocksdb 工厂 + SPARQL Results JSON + 独立 `ontolith-management-server` 管理面 + 健康探测 + **gRPC 网关**（tonic+prost：`SparqlService{Query,Health}` 真实 HTTP/2，metadata 鉴权同构 HTTP（enforced 401/跨租户 403）+ `traceparent` 延续/回带 + 根/子 span + `ONTOLITH_GRPC_BIND`（默认 `127.0.0.1:50051`），`ontolith-server` bin 双网关可执行，server 29→33 测） | 无（P5-01 全项落地） |
 | P5-02 | 鉴权 / 授权 | **完成** | 100% | Header/API-Key + Permission + `cluster:admin` + 管理面 read/write ACL + **OIDC-ready JWT**（树内 HS256：`Authorization: Bearer` + `ONTOLITH_JWT_SECRET`/`ONTOLITH_JWT_ISSUER`/`ONTOLITH_JWT_AUDIENCE`，`exp`/`iss`/`aud` 校验、JWT tenant claim 优先，security 12→18 测、server 24→26 测） | 无（远程 JWKS 留 OIDC 后续轨） |
 | P5-03 | 租户隔离 | **完成** | 100% | 审计租户过滤 + `tenant_graph` 写入命名图 + **强制分库/行级**（`ONTOLITH_TENANT_MODE=enforced`：`TenantNamespace` + 执行器 `TenantScopedRead/Write`，默认图重指向租户图、越权图引用 403，security 9→12 测、query 83→86 测、server 22→24 测） | 无（P5-03 全项落地） |
-| P5-04 | 审计日志 | 部分完成 | 90% | 内存 + `FileAuditLog` JSONL（`ONTOLITH_AUDIT_PATH`）+ 哈希链（`prev`/`hash` + `verify_chain`） | 加密级哈希升级（可选） |
+| P5-04 | 审计日志 | 已完成 | 100% | 内存 + `FileAuditLog` JSONL（`ONTOLITH_AUDIT_PATH`）+ **SHA-256 哈希链**（`prev`/`hash` + `verify_chain`，2026-08-29 由 FNV-1a 升级：链哈希 `sha256(prev‖payload)`，legacy 文件按摘要长度判别兼容续链，schema 不变；security 29→30 测 + R3 门禁 3 测保持全绿） | —（P5-04 闭合） |
 | P5-05 | 指标 / 追踪 / 日志基线 | **完成** | 100% | 延迟/状态码/错误计数 + access log + 管理面监控聚合视图（`/admin/monitoring`）+ runtime probe + **Tracing 全链路**（`traceparent` 延续 + `http.request` 根 span + `http.auth`/`sparql.execute`/`data.ingest` 子 span + `Traceparent` 回带 + `/admin/traces`，observability 6→11 测、server 26→29 测） | 无（P5-05 全项落地） |
 
 **阶段退出条件：** 安全基线挂在真实请求路径；统一遥测可用。
@@ -304,10 +304,10 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 | ontolith-query | SELECT/ASK/CONSTRUCT、JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES、完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）、SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）、子查询基线、属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）、Explain/timeout、租户作用域（`TenantScopedRead/Write` 默认图重指向 + 越权 403）（86 测） | `crates/ontolith-query/src/infrastructure/**` |
 | ontolith-parser | N-Triples/N-Quads/Turtle/TriG、流式事件、错误定位、Unsupported 格式、RDF 序列化导出、Turtle 数字字面量完整文法（17 测） | `crates/ontolith-parser/src/infrastructure/**` |
 | ontolith-cluster | 选主、分区、复制、commit、rebalance（含 initial_slot_bias 偏斜→均衡）、session sticky、数据面同步 + raft M1（内存存储/传输）+ raft M4（HTTP RPC + RocksDB raft CF + snapshot + 默认运行时切换 + 三进程 smoke + 多进程元数据 RPC + 跨节点数据搬迁 + 真实网络分区）（31 测） | `crates/ontolith-cluster/src/infrastructure/{mod,raft}/**` |
-| ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）+ 哈希链验证/篡改检测 + `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT 验证**（sign/verify、`exp`/`iss`/`aud`、Bearer 鉴权）+ **租户注册表**（`Tenant`/`TenantApiKey`/`TenantStatus`、id 校验（`system` 保留）、确定性 JSON、`TenantStore`/`MemoryTenantStore`/`TenantService`（create/update/delete/add_key/revoke_key，key 仅存 FNV-1a 摘要）+ Enforced 鉴权按 key 摘要解析租户/禁用拒绝/头匹配）（29 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
+| ontolith-security | disabled/enforced、tenant/user、audit（内存+文件）+ **SHA-256 哈希链验证/篡改检测**（2026-08-29 FNV-1a→SHA-256 升级，legacy 文件兼容续链）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT 验证**（sign/verify、`exp`/`iss`/`aud`、Bearer 鉴权）+ **租户注册表**（`Tenant`/`TenantApiKey`/`TenantStatus`、id 校验（`system` 保留）、确定性 JSON、`TenantStore`/`MemoryTenantStore`/`TenantService`（create/update/delete/add_key/revoke_key，key 仅存 FNV-1a 摘要）+ Enforced 鉴权按 key 摘要解析租户/禁用拒绝/头匹配）（30 测） | `crates/ontolith-security/src/{application,infrastructure}/mod.rs` |
 | ontolith-observability | sink、导出、采样循环、Prometheus 文本 + **Tracing 全链路**（span 存储/淘汰、确定性 id、W3C `traceparent` 解析生成、线程本地 `TraceScope`、`/admin/traces` JSON 渲染）（11 测） | `crates/ontolith-observability/src/**` |
-| ontolith-server | metrics、采样配置、HTTP query decode + 管理面 API/ACL/probe + 强制租户隔离（`ONTOLITH_TENANT_MODE` 写路径盖章/越权 403、读路径 tenant scope、`/health` 姿态）+ **JWT Bearer 鉴权** + **Tracing 全链路** + **gRPC 网关**（tonic+prost，HTTP/2 metadata 鉴权、`traceparent` 延续、`ONTOLITH_GRPC_BIND`）+ **租户管理**（网关承载 `/admin/tenants*`（`RocksTenantStore` 持久注册表 + `tenant` CF，鉴权器同 Arc 即时生效；仅 `system` 租户可管理）+ 管理面 `/admin/tenants*` ACL 代理到网关 + `/health` `tenants` 姿态）（65 测） | `crates/ontolith-server/src/{api,app,bootstrap,grpc,http,management,tenants}.rs` |
-| ontolith-reasoner | 前向链推理（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key、prp-spo2 属性链、cls-hv1/2 hasValue、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2/3 + prp-irp/cax-adc、`InferenceMode` 开关 + 迭代/超时护栏 + `ReasoningReport.inconsistent`）+ SHACL 基线校验（目标选择/核心约束组件全齐（含 languageIn/uniqueLang/xone）/逻辑形状/数值范围/属性对/qualified 计数/语言标签管道/报告/独立与嵌套属性形状/dateTime 比较/词法合法性/自定义 severity/**属性路径表达式全量（inverse/alternative/sequence/zeroOrMore/oneOrMore/zeroOrOne，集合去重 + 闭包护栏）**，80 测；`ShaclEngine` 接入 W3C SHACL 核心套件 98/98 全绿） | `crates/ontolith-reasoner/src/infrastructure/{mod,shacl}.rs` |
+| ontolith-server | metrics、采样配置、HTTP query decode + 管理面 API/ACL/probe + 强制租户隔离（`ONTOLITH_TENANT_MODE` 写路径盖章/越权 403、读路径 tenant scope、`/health` 姿态）+ **JWT Bearer 鉴权** + **Tracing 全链路** + **gRPC 网关**（tonic+prost，HTTP/2 metadata 鉴权、`traceparent` 延续、`ONTOLITH_GRPC_BIND`）+ **租户管理**（网关承载 `/admin/tenants*`（`RocksTenantStore` 持久注册表 + `tenant` CF，鉴权器同 Arc 即时生效；仅 `system` 租户可管理）+ 管理面 `/admin/tenants*` ACL 代理到网关 + `/health` `tenants` 姿态）+ **Ontology 载荷联动推理输入**（P1-01，2026-08-29：`reasoning_input_with_ontology` 合并 tbox/abox 角色图）（70 测） | `crates/ontolith-server/src/{api,app,bootstrap,grpc,http,management,reasoning,tenants}.rs` |
+| ontolith-reasoner | 前向链推理（rdfs5/6/7/8/9 + prp-inv1/2、prp-symp/trp、prp-fp/ifp、cax-sco、cls-svf1/2、cls-avf、cls-int1/2、cls-uni、cls-maxc2、eq-sym/trans、eq-rep-s/p/o、prp-key、prp-spo2 属性链、cls-hv1/2 hasValue、一致性 ⊥ 检测 cax-dw/cls-com/cls-nothing1/2/eq-diff1/2/3 + prp-irp/cax-adc、`InferenceMode` 开关 + 迭代/超时护栏 + `ReasoningReport.inconsistent`）+ SHACL 基线校验（目标选择/核心约束组件全齐（含 languageIn/uniqueLang/xone）/逻辑形状/数值范围/属性对/qualified 计数/语言标签管道/报告/独立与嵌套属性形状/dateTime 比较/词法合法性/自定义 severity/**属性路径表达式全量（inverse/alternative/sequence/zeroOrMore/oneOrMore/zeroOrOne，集合去重 + 闭包护栏）**，80 测；`ShaclEngine` 接入 W3C SHACL 核心套件 98/98 全绿）+ **Ontology 载荷联动**（`OntologyPayload`/`load_ontology_payload` 按 `OntologyObject` 图引用物化，2026-08-29）（102 测） | `crates/ontolith-reasoner/src/{domain/ontology,infrastructure/{mod,shacl}}.rs` |
 | ontolith-compliance | R1 烟雾 17 + W3C 子集 profile 1（must-pass 30/30，skip=0）+ 完整 W3C 套件 manifest runner（`w3c11_suite`，492 条基线 profile 锁定）+ W3C SHACL 核心套件 runner（`shacl_suite`，vendored `w3c-shacl/` 121 个 sht:Validate/98 可运行，`w3c-shacl_profile.tsv` 97 PASS/1 FAIL 基线锁定） | `crates/ontolith-compliance/tests/**` |
 
 ---
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-29 | Codex | **开放项闭合 DONE（PROG-0001 0.1.63→0.1.64）**：① **P5-04 审计加密级哈希升级**——`FileAuditLog` 链哈希 FNV-1a 64 → 树内 SHA-256（`sha256(prev‖payload)`），schema 不变、legacy FNV-1a 文件按摘要长度（16/64 hex）判别兼容续链（上一项哈希字节原样作 `prev`）；security 29→30 测（新增 legacy 兼容混合链测试）+ R3 门禁 `r3_security_gate` 3 测保持全绿；② **P1-01 Ontology 载荷联动 reasoner**——`ontolith-reasoner::domain::ontology` 新增 `OntologyPayload`（tbox/abox/annotation/rule/provenance 角色拆分）+ `load_ontology_payload`（`OntologyGraphReader` trait，按 `OntologyObject` 图引用物化 KO 载荷）+ server 接线（`QueryReadOntologyReader` 适配 `QueryReadService`、`reasoning_input_with_ontology` 将载荷并入推理输入、`ONTOLITH_ONTOLOGY_{TBOX,ABOX,ANNOTATION,RULE,PROVENANCE}` env 契约经 `AppState.ontology` 生效、`/materialize` 同接入）；reasoner 98→102 测 + server 68→70 测（命名图 tbox/abox 仅经载荷进入推理输入 + 未配置不泄漏）；③ **P4-05 读一致性级别与 API 说明**——L4 文档 2.7.0→2.8.0 §4 固化 `ConsistencyLevel`（strong/session/eventual）语义矩阵、Rust 读路由 API（`route_read`/`route_read_session`/`QueryRequest::with_consistency`）与 L5 HTTP 契约（`/cluster/route?consistency=&session=`、`/query`·`/explain` 的 `x-ontolith-consistency` 头、权限与未知取值回退）；相对 R1–R4 全计划开放项清零（P1-01/P4-05/P5-04 全部完成），剩余仅预留/后续轨（P2-04 Async 索引、P2-05 备份调度运维轨、Miri/sanitizer、RemoteProvider/ANN、JSON-LD 导入）与生产发布运维项 |
 | 2026-08-10 | Codex | **平台日志接入 ikc-log-center（Rust SDK，PROG-0001 0.1.62→0.1.63）**：集成已发布 crate `log-center-sdk` 0.1.0（Tier B 登记）——新增 `crates/ontolith-server/src/logcenter.rs`（`LogCenterClient` 共享客户端 + `emit`/`emit_access`，环境变量 `LOG_CENTER_URL/TOKEN/TIMEOUT/QUEUE/BATCH` 与 Python/Java SDK 对齐，未配置时静默禁用）；gateway 启动/指标/就绪/错误与 access 日志（method/path/status/latency_ms/bytes + W3C trace_id/span_id）结构化上报，management 启动/配置日志同接入；`LOG_CENTER_URL=http://127.0.0.1:9315` 写入 prod/staging 四份 env；server 65→68 测全绿，冒烟实测日志带 `app=ontolith-server` 与 trace_id 进入 log-center `/search` |
 | 2026-08-10 | Codex | **今日任务看板同步 DONE（SYNC-PROJ-0001，PROG-0001 0.1.61→0.1.62）**：GitHub Projects #2 增量同步 5 条 0 失败——新增 4 卡：console 自动刷新优化（仅监控/集群模块内定时器）Done / console 数值精度 3 位小数 Done / console 租户管理页交互完善（key 复制 + toast + 图标操作 + 删除输入确认 + 2 列布局）Done / ikc-log-center Rust SDK 接入（规划中，Python 方案已回退）Todo；回写租户管理卡 Done；回读 total=63；`docs/github-projects-sync.md` 映射表补 4 行 |
 | 2026-08-10 | Codex | **console 租户列表固定 2 列（PROG-0001 0.1.60→0.1.61）**：租户卡片网格 `cards tenant-grid` 固定 `repeat(2, 1fr)`，不再随窗口无限向右排（窄屏 ≤760px 回退单列）；创建表单移出网格、整行置顶；`npm run build` 重建 dist，8890 线上验证 |
@@ -464,7 +465,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 原则：先底层逐层到最顶层应用——优先完成当前最低未完成层，再推进上一层；避免跳层开发。R1 退出标准收尾（核心 SLO 基线、恢复/回滚演练、全表勾选）随各层推进同步完成。
 
-> 当前光标：**R3+R4 收尾完成（2026-08-09：R3 GeoSPARQL 范围能力 + 企业级安全加固 + HA/故障转移门禁 + 租户隔离与审计门禁全部落地；R4 ACC-R4 验收包 `=== ACCEPTANCE PASS ===`；相对 R1–R4 全计划 ~100%）——计划内全部里程碑与验收门禁闭环，剩余仅生产环境真实发布（超出本环境范围，作为运维项保留在看板）**
+> 当前光标：**计划内全部里程碑与验收门禁闭环（2026-08-09 R1–R4 ~100%；2026-08-29 开放项清零：P1-01 Ontology 载荷联动 reasoner / P4-05 读一致性级别与 API 说明 / P5-04 审计加密级哈希升级（SHA-256）全部完成）——剩余仅预留/后续轨（P2-04 Async 索引维护、P2-05 备份调度接入管理面、Miri/sanitizer、RemoteProvider/ANN、JSON-LD 导入）与生产环境真实发布（超出本环境范围，作为运维项保留在看板）**
 
 - [x] **L0/L1 底层契约**：P1-02 并发字典契约、P1-03 存储接口版本冻结、P1-04 独立编码 RFC + 磁盘布局（2026-08-07）
 - [x] **L2 存储内核**：P2-02 真 MVCC 版本链（内存+磁盘）✅（2026-08-07，storage 30→40 测）、P2-01 纯 CF 索引扫描 ✅（2026-08-07）、P2-04 命名图六置换 ✅（2026-08-07；Async 维护预留）、P2-05 fsync/备份演练 ✅（2026-08-07，storage 43→46 测）

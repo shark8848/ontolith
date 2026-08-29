@@ -1,9 +1,9 @@
 # L4 — Cluster & Consistency
 
 文档 ID: IMPL-L4-0001  
-版本: 2.7.0  
+版本: 2.8.0  
 状态: Implemented (in-process simulator harness + multi-process raft M3 + P4-01–P4-04 via ADR-0004)  
-日期: 2026-08-08  
+日期: 2026-08-29  
 对应 crate: `crates/ontolith-cluster`（+ L5 `/cluster/*`）
 
 ---
@@ -87,11 +87,42 @@ let plans = rt.rebalance()?;
 | Session | 粘性到上次节点；失效则回 leader |
 | Eventual | 优先 lag 可接受的 follower |
 
+### 读一致性级别与 API 说明（P4-05）
+
+一致性级别由 `ontolith-core::domain::ConsistencyLevel` 表达，稳定拼写为
+`strong`（默认）/ `session` / `eventual`（大小写不敏感，未知取值回退
+`strong`）：
+
+| 级别 | 读路由 | 语义 |
+|------|--------|------|
+| `strong` | 始终 leader | 线性一致读（读自己的写）；`requires_primary()=true` |
+| `session` | 粘性到上次节点，失效回 leader | 会话内单调读（`SessionId` 维度） |
+| `eventual` | 优先 lag 可接受的 follower | 只读副本就近读，容忍短滞后 |
+
+**Rust API**
+
+- `ShardRouter::route_read(key, level)` / `route_read_session(key, &SessionId, level)`
+  （`ontolith-cluster`，§2 契约扩展）。
+- 查询执行器：`QueryRequest::with_consistency(level)` 将级别随计划下发；
+  `requires_primary()` 为 false 的级别允许非 leader 读路径。
+
+**L5 HTTP API**
+
+- `/cluster/route?key=&consistency=&session=`：读写路由查询；`consistency`
+  取 `strong|session|eventual`，`session` 给粘性会话 id。
+- `/query` 与 `/explain`：`x-ontolith-consistency` 请求头（`strong|session|
+  eventual`，缺省 `strong`）作用于 SPARQL 读执行。
+- 权限：与 `/health` 相同（`health:read`）。
+
+**分区语义**
+
 分区：
 
 - 被隔离节点不参与投票/复制  
 - **选主需要全体 votable 的多数**（防脑裂）  
 - `commit_index` 仅统计可达 voter 的 applied 多数  
+- `session` 粘性节点被隔离时回退 leader（`route_read_session` 内部处理）；
+  隔离期间的写路径由 `metadata_mutation` 拒绝并携带 leader 提示。
 
 ---
 
@@ -127,3 +158,4 @@ let plans = rt.rebalance()?;
 | 2026-08-08 | 2.6.0 | **P4-01 落地**：多进程元数据服务与主从选举收尾——`LogPayload` 增 `RegisterNode`/`Heartbeat`/`SetNodeStatus` 变体（`ClusterNode`/`NodeRole`/`NodeStatus` 等增 serde）；`RaftClusterRuntime` 复制式节点注册表（`nodes` + `applied_watermark` 增量折叠，RocksDB 重启重建）；元数据变异经 `metadata_mutation` 提交（leader 本地 `client_write`，follower 经 `/internal/raft/apply` 转发、409 携带 leader 提示、重试 ≤3）；`membership()`/`status()` 读复制式注册表（role 按 leader 刷新）；cluster 27→28 测 |
 
 | 2026-08-08 | 2.7.0 | **P4-03/P4-04 落地**：`DataPlaneSync for RaftClusterRuntime` 真实实现——`DataPlaneSnapshotIo` trait（`export_snapshot`/`import_snapshot`）+ `/internal/raft/transfer-snapshot` RPC，`complete_transfer` 导出字节 POST 至目标导入、200 返回 `SyncReceipt`，无 hook 回退模拟回执；`FaultInjector` 真实对称网络分区——`HttpRaftClient::post` 按 `partition` 集合丢弃 RPC（target/self 命中即 `RPCError::Network`），`metadata_mutation` 拒绝隔离节点自身与转发到隔离 leader，`complete_transfer` 拒绝迁移到分区目标，heal 后恢复；cluster 28→30 测 |
+| 2026-08-29 | 2.8.0 | **P4-05 读一致性级别与 API 说明**：§4 固化 `ConsistencyLevel`（strong/session/eventual）语义矩阵 + Rust 读路由 API（`route_read`/`route_read_session`/`QueryRequest::with_consistency`）+ L5 HTTP 契约（`/cluster/route` 的 `consistency` 参数、`/query`·`/explain` 的 `x-ontolith-consistency` 头、权限/缺省与未知取值回退）+ 分区下 session 回退语义 |

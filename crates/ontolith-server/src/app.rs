@@ -1,7 +1,9 @@
 //! Application state and route handlers for L5 HTTP gateway.
 
 use crate::http::{HttpRequest, HttpResponse, now_ms};
-use crate::reasoning::{InferenceConfig, ReasoningReadService, base_read_service, reasoning_input};
+use crate::reasoning::{
+    InferenceConfig, ReasoningReadService, base_read_service, reasoning_input_with_ontology,
+};
 #[cfg(feature = "rocksdb-backend")]
 use crate::tenants::RocksTenantStore;
 use ontolith_ai::application::SemanticSearchService;
@@ -12,7 +14,7 @@ use ontolith_cluster::domain::{ClusterNodeId, LogPayload, SessionId};
 #[cfg(feature = "raft-backend")]
 use ontolith_cluster::infrastructure::raft::{RaftClusterConfig, RaftClusterRuntime};
 use ontolith_cluster::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
-use ontolith_core::domain::{CanonicalEncode, ConsistencyLevel, NodeId};
+use ontolith_core::domain::{CanonicalEncode, ConsistencyLevel, NodeId, OntologyObject};
 use ontolith_core::error::OntolithError;
 use ontolith_observability::domain::{
     MetricKind, MetricPoint, SpanEvent, SpanName, SpanStatus, TraceContext,
@@ -222,6 +224,10 @@ pub struct AppState {
     /// L6 reasoning posture (P6-03): inference mode + materialization guards
     /// applied to the shared SPARQL execution path.
     pub inference: InferenceConfig,
+    /// P1-01 ontology payload linkage: a KO [`OntologyObject`] whose
+    /// referenced role graphs (tbox/abox/…) are merged into the reasoning
+    /// input. `None` when no ontology is configured.
+    pub ontology: Option<OntologyObject>,
     pub cluster: Arc<dyn ClusterRuntime>,
     pub cluster_tick: AtomicU64,
     /// L8 semantic search service (P8-01/P8-02). `None` when disabled
@@ -265,6 +271,7 @@ impl AppState {
             tenant_mode,
             InferenceConfig::default(),
             semantic,
+            None,
         )
     }
 
@@ -300,6 +307,7 @@ impl AppState {
             tenant_mode,
             inference,
             semantic,
+            crate::reasoning::ontology_from_env(),
         )
     }
 
@@ -353,6 +361,7 @@ impl AppState {
             tenant_mode,
             InferenceConfig::default(),
             semantic,
+            None,
         ))
     }
 
@@ -396,6 +405,7 @@ impl AppState {
             tenant_mode,
             inference,
             semantic,
+            crate::reasoning::ontology_from_env(),
         ))
     }
 
@@ -414,6 +424,7 @@ impl AppState {
         tenant_mode: TenantMode,
         inference: InferenceConfig,
         semantic: Option<SemanticSearchService>,
+        ontology: Option<OntologyObject>,
     ) -> Arc<Self> {
         let semantic = semantic.map(std::sync::Mutex::new);
         // Keep the tenant registry and the gateway authenticator on the same
@@ -447,6 +458,7 @@ impl AppState {
             data_dir,
             tenant_mode,
             inference,
+            ontology,
             cluster,
             cluster_tick: AtomicU64::new(0),
             semantic,
@@ -480,6 +492,7 @@ impl AppState {
             TenantMode::Disabled,
             InferenceConfig::default(),
             semantic,
+            None,
         )
     }
 
@@ -1200,7 +1213,11 @@ impl AppState {
                 Arc::clone(&self.dictionary),
                 Arc::clone(&self.storage),
             );
-            let input = reasoning_input(base.as_ref(), qreq.tenant_scope.as_ref())?;
+            let input = reasoning_input_with_ontology(
+                base.as_ref(),
+                qreq.tenant_scope.as_ref(),
+                self.ontology.as_ref(),
+            )?;
             let task = inference.reasoning_task(Some(plan.id));
             let outcome =
                 ForwardChainReasoner::new().materialize(self.dictionary.as_ref(), &task, &input)?;
@@ -1513,12 +1530,22 @@ impl AppState {
             .unwrap_or(20_000)
             .min(100_000);
         let dict = self.dictionary.as_ref();
-        let input: Vec<Triple> = self
+        let mut input: Vec<Triple> = self
             .triples
             .all_in_txn(None)
             .into_iter()
             .take(limit)
             .collect();
+        if let Some(ontology) = &self.ontology {
+            let base = base_read_service(
+                Arc::clone(&self.triples),
+                Arc::clone(&self.dictionary),
+                Arc::clone(&self.storage),
+            );
+            let reader = crate::reasoning::QueryReadOntologyReader::new(base.as_ref());
+            input
+                .extend(ontolith_reasoner::domain::load_ontology_payload(&reader, ontology)?.all());
+        }
         let task = ReasoningTask {
             mode: InferenceMode::ForwardChaining,
             ..self.inference.reasoning_task(None)
@@ -2674,6 +2701,7 @@ pub fn dispatch_for_test(state: &Arc<AppState>, req: HttpRequest) -> HttpRespons
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ontolith_core::domain::{GraphId, Iri, ObjectId};
     use ontolith_security::infrastructure::{CachingJwks, Jwks, JwksFetcher, JwksVerifier};
     use std::collections::HashMap;
 
@@ -2763,7 +2791,43 @@ mod tests {
             TenantMode::Disabled,
             inference,
             semantic,
+            None,
         )
+    }
+
+    fn memory_state_with_inference_and_ontology(
+        inference: InferenceConfig,
+        ontology: OntologyObject,
+    ) -> Arc<AppState> {
+        let storage: Arc<dyn StorageEngine> = Arc::new(InMemoryStorageEngine::new());
+        let dictionary: Arc<dyn DictionaryCodec> = Arc::new(InMemoryDictionary::new());
+        let triples: Arc<dyn TripleRepository> =
+            Arc::new(EngineTripleRepository::new(Arc::clone(&storage)));
+        let semantic = build_semantic_service(&*triples, &*dictionary, &SemanticConfig::default());
+        AppState::from_parts(
+            storage,
+            dictionary,
+            triples,
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator::default(),
+            None,
+            StorageBackendKind::Memory,
+            None,
+            default_cluster(),
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+            inference,
+            semantic,
+            Some(ontology),
+        )
+    }
+
+    fn test_ontology() -> OntologyObject {
+        let mut ontology =
+            OntologyObject::new(ObjectId::from_validated("ontology:test"), 0).expect("ontology");
+        ontology.tbox_graph = Some(GraphId::named(Iri::new("urn:onto:tbox")));
+        ontology.abox_graph = Some(GraphId::named(Iri::new("urn:onto:abox")));
+        ontology
     }
 
     fn enforced_tenant_state_with_inference(inference: InferenceConfig) -> Arc<AppState> {
@@ -2790,6 +2854,7 @@ mod tests {
             TenantMode::Enforced,
             inference,
             semantic,
+            None,
         )
     }
 
@@ -3614,6 +3679,86 @@ mod tests {
     }
 
     #[test]
+    fn inference_includes_configured_ontology_payload() {
+        let state = memory_state_with_inference_and_ontology(
+            InferenceConfig::new(InferenceMode::ForwardChaining, 64, None),
+            test_ontology(),
+        );
+        let insert = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!(
+                    "INSERT DATA {{ GRAPH <urn:onto:tbox> {{ <http://ex.org/A> <{RDFS_SUBCLASS}> <http://ex.org/B> }} GRAPH <urn:onto:abox> {{ <http://ex.org/x> <{RDF_TYPE}> <http://ex.org/A> }} }}"
+                ),
+            ),
+        );
+        assert_eq!(
+            insert.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&insert.body)
+        );
+
+        // The ontology role graphs are not part of the default graph, so the
+        // derived typing is only observable when the ontology payload is
+        // merged into the reasoning input (P1-01).
+        let query = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!("SELECT ?s WHERE {{ ?s <{RDF_TYPE}> <http://ex.org/B> }}"),
+            ),
+        );
+        assert_eq!(
+            query.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&query.body)
+        );
+        let body = String::from_utf8_lossy(&query.body);
+        assert!(
+            body.contains("\"row_count\":1"),
+            "ontology tbox+abox must feed the reasoner (row_count 1): {body}"
+        );
+        assert!(
+            body.contains("\"inferred_triples\":1"),
+            "inferred count: {body}"
+        );
+    }
+
+    #[test]
+    fn ontology_payload_not_merged_when_unconfigured() {
+        let state = memory_state_with_inference(InferenceConfig::new(
+            InferenceMode::ForwardChaining,
+            64,
+            None,
+        ));
+        let insert = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!(
+                    "INSERT DATA {{ GRAPH <urn:onto:tbox> {{ <http://ex.org/A> <{RDFS_SUBCLASS}> <http://ex.org/B> }} GRAPH <urn:onto:abox> {{ <http://ex.org/x> <{RDF_TYPE}> <http://ex.org/A> }} }}"
+                ),
+            ),
+        );
+        assert_eq!(insert.status, 200);
+        let query = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                &format!("SELECT ?s WHERE {{ ?s <{RDF_TYPE}> <http://ex.org/B> }}"),
+            ),
+        );
+        let body = String::from_utf8_lossy(&query.body);
+        assert!(
+            !body.contains("\"row_count\":1"),
+            "without ontology config, named-graph axioms must not leak: {body}"
+        );
+    }
+
+    #[test]
     fn inference_default_off_and_query_param_override() {
         let state =
             AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
@@ -4032,6 +4177,7 @@ mod tests {
                 TenantMode::Disabled,
                 InferenceConfig::default(),
                 semantic,
+                None,
             );
             let mut q = HashMap::new();
             q.insert("q".to_owned(), "alice".to_owned());

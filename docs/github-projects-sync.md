@@ -2,7 +2,7 @@
 
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
-数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.48，2026-08-10）
+数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.64，2026-08-29）
 状态: Active（Classic PAT 已配置，随增量同步；2026-08-10 增量同步完成：9 条 0 失败，回读 total=58）
 
 ## 1. 认证要求（重要，勿重复探索）
@@ -47,7 +47,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P0-03 依赖登记模板与评审规则 | 已完成 | audit-dependency-register.sh 硬门禁 + CI dependency-audit + cargo-audit CVE 观测 |
 | P0-04 RFC 流程落地 | 已完成 | RFC-0001 评审回填完成（2026-08-09：Reviewers=sharky-ai，契约与实现逐项核验，转正式 Accepted） |
 | P0-05 进度台账 | 已完成 | PROG-0001 |
-| P1-01 Knowledge Object 领域模型 | 进行中 | 80%，L0+L1+序列化 Part II |
+| P1-01 Knowledge Object 领域模型 | 已完成 | 100%，L0+L1+序列化 Part II + Ontology 载荷联动 reasoner（2026-08-29：`OntologyPayload`/`load_ontology_payload` + server 推理输入合并） |
 | P1-02 Node 标识与字典管理器 | 进行中 | 90% |
 | P1-03 存储抽象接口 | 已完成 | 接口版本 0.1.0 冻结 |
 | P1-04 确定性标识与规范化编码规则 | 已完成 | RFC-0001 评审回填转正式 Accepted（2026-08-09） |
@@ -65,10 +65,12 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P4-02 多进程 Raft 数据面（M1–M3） | 已完成 | openraft + HTTP RPC + RocksDB raft CF |
 | P4-03 跨节点数据搬迁 | 已完成 | transfer-snapshot + DataPlaneSnapshotIo |
 | P4-04 真实网络分区演练 | 已完成 | 对称丢弃/隔离拒绝/愈合恢复 |
+| P4-05 读一致性级别与 API 说明 | 已完成 | 2026-08-29，L4 v2.8.0：ConsistencyLevel 语义矩阵 + Rust/HTTP API 契约 |
 | P5-01 gRPC 网关 | 已完成 | tonic + metadata 鉴权 |
 | P5-02 OIDC/JWT 基线 | 已完成 | HS256 Bearer |
 | OIDC 完整链路 R2+ | 已完成 | 2026-08-08，JWKS/RS256/发现文档/TTL 缓存 |
 | P5-03 强制租户隔离 | 已完成 | TenantNamespace + 越权 403 |
+| P5-04 审计加密级哈希升级 | 已完成 | 2026-08-29，链哈希 FNV-1a→SHA-256，legacy 兼容续链 |
 | P5-05 Tracing 全链路 | 已完成 | traceparent 延续 + /admin/traces |
 | 管理面 TLS 终止 + R2 门禁 | 已完成 | rustls + 非 loopback 强制 |
 | P6-01 规则扩展 | 已完成 | 前向链推理引擎 |

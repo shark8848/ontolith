@@ -14,6 +14,7 @@ pub use jwt::{
     verify_hs256,
 };
 pub mod oidc;
+use jwt::sha256;
 pub use oidc::{
     CachingJwks, Jwk, Jwks, JwksFetcher, JwksVerifier, OidcConfig, OidcDiscovery, RsaPublicKey,
     verify_oidc_token,
@@ -24,9 +25,12 @@ pub use oidc::{
 /// Format (one event per line):
 /// `{"ts":…,"tenant":"…","user":"…","action":"…","resource":"…","outcome":"…","detail":"…","prev":"<hex>","hash":"<hex>"}`
 ///
-/// Each entry chains the previous entry's hash (genesis = 0) with the event
-/// payload using FNV-1a 64. This is an integrity-level chain (dependency-free,
-/// deterministic); a cryptographic upgrade keeps the same schema.
+/// Each entry chains the previous entry's hash (genesis = 8 zero bytes) with
+/// the event payload using SHA-256 (in-tree FIPS 180-4, dependency-free).
+/// Logs written before the cryptographic upgrade used FNV-1a 64 (16 hex chars
+/// per digest); verification length-discriminates the two formats so legacy
+/// files remain verifiable and the chain continues seamlessly across the
+/// upgrade (the previous hash bytes are carried verbatim as `prev`).
 #[derive(Debug)]
 pub struct FileAuditLog {
     path: PathBuf,
@@ -35,7 +39,7 @@ pub struct FileAuditLog {
 
 #[derive(Debug, Default)]
 struct ChainState {
-    last_hash: u64,
+    last_hash: Vec<u8>,
 }
 
 /// Result of a full-chain integrity verification.
@@ -65,7 +69,7 @@ impl FileAuditLog {
             .map_err(|e| {
                 OntolithError::Failed(format!("audit log open {}: {e}", path.display()))
             })?;
-        let last_hash = last_written_hash(&path)?;
+        let last_hash = last_written_digest(&path)?;
         Ok(Self {
             path,
             lock: Mutex::new(ChainState { last_hash }),
@@ -81,7 +85,7 @@ impl FileAuditLog {
             .lock
             .lock()
             .map_err(|_| OntolithError::Failed("audit log lock poisoned".into()))?;
-        let prev = guard.last_hash;
+        let prev = guard.last_hash.clone();
         let payload = audit_fields_json(
             event.timestamp_ms,
             &event.tenant,
@@ -91,9 +95,11 @@ impl FileAuditLog {
             event.outcome.as_str(),
             &event.detail,
         );
-        let hash = chain_hash(prev, payload.as_bytes());
+        let hash = chain_hash(&prev, payload.as_bytes());
+        let prev_hex = to_hex(&prev);
+        let hash_hex = to_hex(&hash);
         let line = format!(
-            r#"{{"ts":{},"tenant":{},"user":{},"action":{},"resource":{},"outcome":{},"detail":{},"prev":"{prev:016x}","hash":"{hash:016x}"}}"#,
+            r#"{{"ts":{},"tenant":{},"user":{},"action":{},"resource":{},"outcome":{},"detail":{},"prev":"{prev_hex}","hash":"{hash_hex}"}}"#,
             event.timestamp_ms,
             json_escape(&event.tenant),
             json_escape(&event.user),
@@ -118,7 +124,7 @@ impl FileAuditLog {
         f.flush().map_err(|e| {
             OntolithError::Failed(format!("audit log flush {}: {e}", self.path.display()))
         })?;
-        guard.last_hash = hash;
+        guard.last_hash = hash.to_vec();
         Ok(())
     }
 
@@ -128,7 +134,9 @@ impl FileAuditLog {
             OntolithError::Failed(format!("audit log read {}: {e}", self.path.display()))
         })?;
         let reader = BufReader::new(file);
-        let mut expected_prev = 0u64;
+        // Genesis: the legacy zero prev (8 zero bytes); new files start here
+        // and legacy files verify because every entry carries its own prev.
+        let mut expected_prev: Vec<u8> = vec![0u8; 8];
         let mut entries = 0usize;
         for line in reader.lines() {
             let line = line.map_err(|e| {
@@ -146,7 +154,30 @@ impl FileAuditLog {
                     broken_at: Some(entries),
                 });
             };
-            if meta.prev != expected_prev || meta.hash != chain_hash(expected_prev, &meta.payload) {
+            let computed: Vec<u8> = match meta.hash.len() {
+                // Legacy digests were written as `{:016x}` of a u64, i.e. the
+                // hex digits are big-endian; parse_hex reproduces that order.
+                8 => legacy_chain_hash(
+                    u64::from_be_bytes(
+                        meta.prev
+                            .as_slice()
+                            .try_into()
+                            .expect("legacy prev is 8 bytes"),
+                    ),
+                    &meta.payload,
+                )
+                .to_be_bytes()
+                .to_vec(),
+                32 => chain_hash(&meta.prev, &meta.payload).to_vec(),
+                _ => {
+                    return Ok(ChainVerify {
+                        ok: false,
+                        entries,
+                        broken_at: Some(entries),
+                    });
+                }
+            };
+            if meta.prev != expected_prev || meta.hash != computed {
                 return Ok(ChainVerify {
                     ok: false,
                     entries,
@@ -221,7 +252,9 @@ fn audit_fields_json(
     )
 }
 
-/// FNV-1a 64-bit (deterministic, dependency-free; integrity level only).
+/// FNV-1a 64-bit (deterministic, dependency-free). Retained for tenant API
+/// key digests and for verifying legacy audit entries written before the
+/// SHA-256 upgrade.
 pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for byte in bytes {
@@ -249,7 +282,17 @@ pub fn generate_api_key(tenant: &str, now_ms: u64, counter: u64) -> String {
     format!("ontk_{:016x}", fnv1a64(&buf))
 }
 
-fn chain_hash(prev: u64, payload: &[u8]) -> u64 {
+/// SHA-256 chain step: `hash = sha256(prev ‖ payload)` where `prev` is the
+/// raw digest bytes of the previous entry (8 for legacy FNV-1a, 32 otherwise).
+fn chain_hash(prev: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut chain = Vec::with_capacity(prev.len() + payload.len());
+    chain.extend_from_slice(prev);
+    chain.extend_from_slice(payload);
+    sha256(&chain)
+}
+
+/// Legacy chain step (pre-upgrade format): `hash = fnv1a64(prev_le ‖ payload)`.
+fn legacy_chain_hash(prev: u64, payload: &[u8]) -> u64 {
     let mut chain = Vec::with_capacity(8 + payload.len());
     chain.extend_from_slice(&prev.to_le_bytes());
     chain.extend_from_slice(payload);
@@ -257,14 +300,14 @@ fn chain_hash(prev: u64, payload: &[u8]) -> u64 {
 }
 
 struct ChainMeta {
-    prev: u64,
-    hash: u64,
+    prev: Vec<u8>,
+    hash: Vec<u8>,
     payload: Vec<u8>,
 }
 
 fn parse_jsonl_chain_meta(line: &str) -> Option<ChainMeta> {
-    let prev = parse_hex_u64(extract_string(line, "\"prev\"")?.as_str())?;
-    let hash = parse_hex_u64(extract_string(line, "\"hash\"")?.as_str())?;
+    let prev = parse_hex(extract_string(line, "\"prev\"")?.as_str())?;
+    let hash = parse_hex(extract_string(line, "\"hash\"")?.as_str())?;
     let ts = extract_number(line, "\"ts\"")?;
     let tenant = extract_string(line, "\"tenant\"")?;
     let user = extract_string(line, "\"user\"")?;
@@ -281,15 +324,26 @@ fn parse_jsonl_chain_meta(line: &str) -> Option<ChainMeta> {
     })
 }
 
-fn parse_hex_u64(hex: &str) -> Option<u64> {
-    u64::from_str_radix(hex.trim(), 16).ok()
+fn parse_hex(hex: &str) -> Option<Vec<u8>> {
+    let hex = hex.trim();
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
 }
 
-fn last_written_hash(path: &Path) -> Result<u64, OntolithError> {
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn last_written_digest(path: &Path) -> Result<Vec<u8>, OntolithError> {
     let file = File::open(path)
         .map_err(|e| OntolithError::Failed(format!("audit log read {}: {e}", path.display())))?;
     let reader = BufReader::new(file);
-    let mut last = 0u64;
+    let mut last: Vec<u8> = vec![0u8; 8];
     for line in reader.lines() {
         let line = line.map_err(|e| {
             OntolithError::Failed(format!("audit log readline {}: {e}", path.display()))
@@ -549,6 +603,61 @@ mod tests {
         let verify = log.verify_chain().expect("verify tampered");
         assert!(!verify.ok);
         assert_eq!(verify.broken_at, Some(1));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn audit_chain_sha256_upgrade_keeps_legacy_logs_verifiable() {
+        let dir = std::env::temp_dir().join(format!(
+            "ontolith-audit-legacy-{}-{}",
+            std::process::id(),
+            now_ms_for_test()
+        ));
+        let path = dir.join("audit.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Seed a legacy (pre-upgrade) FNV-1a entry exactly as the old writer
+        // emitted it: 16-hex prev/hash, genesis prev = 0.
+        let payload = audit_fields_json(1, "acme", "alice", "query", "sparql", "allow", "old");
+        let legacy_hash = legacy_chain_hash(0u64, payload.as_bytes());
+        let line = format!(
+            r#"{{"ts":1,"tenant":"acme","user":"alice","action":"query","resource":"sparql","outcome":"allow","detail":"old","prev":"0000000000000000","hash":"{legacy_hash:016x}"}}"#
+        );
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+
+        // Reopen recovers the legacy tail digest and appends SHA-256 entries.
+        let log = FileAuditLog::open(&path).expect("open legacy");
+        log.append(&AuditEvent {
+            timestamp_ms: 2,
+            tenant: "acme".into(),
+            user: "bob".into(),
+            action: "write".into(),
+            resource: "data".into(),
+            outcome: AuditOutcome::Deny,
+            detail: "new".into(),
+        })
+        .unwrap();
+        let verify = log.verify_chain().expect("verify mixed chain");
+        assert!(verify.ok, "legacy+sha256 mixed chain must verify");
+        assert_eq!(verify.entries, 2);
+        assert_eq!(verify.broken_at, None);
+
+        // New entries carry 64-hex SHA-256 digests and chain off the legacy
+        // entry's 8-byte hash (its hex appears verbatim as the next prev).
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let legacy_hash_hex = format!("{legacy_hash:016x}");
+        let line1 = lines[1];
+        assert!(
+            line1.contains(&format!("\"prev\":\"{legacy_hash_hex}\"")),
+            "prev must be the legacy tail hash: {line1}"
+        );
+        let tail = lines[1].split("\"hash\":\"").nth(1).unwrap();
+        assert!(
+            lines[1].contains("\"hash\":\"") && tail.len() >= 65,
+            "new entries use 64-hex sha256: {tail}"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

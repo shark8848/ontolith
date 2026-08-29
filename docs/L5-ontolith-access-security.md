@@ -1,9 +1,9 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.10.0  
-状态: Implemented (HTTP + gRPC + dual backend + file audit + SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC 完整链路 R2+（JWKS 校验 + TTL 缓存刷新）+ full-chain tracing P5-05 + 租户管理（注册表 CRUD + 管理面代理）)  
-日期: 2026-07-23  
+版本: 2.11.0  
+状态: Implemented (HTTP + gRPC + dual backend + file audit（SHA-256 哈希链）+ SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC 完整链路 R2+（JWKS 校验 + TTL 缓存刷新）+ full-chain tracing P5-05 + 租户管理（注册表 CRUD + 管理面代理）+ Ontology 载荷联动推理输入)  
+日期: 2026-08-29  
 对应 crate:
 
 - `crates/ontolith-server`
@@ -322,8 +322,8 @@ systemctl --user status ontolith-server
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
-| ontolith-security | **29** | 鉴权/权限/审计（含哈希链完整性验证）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权）+ **OIDC 完整链路**（RFC 7515 A.2.1 RS256 官方向量、RFC 7517 JWKS 解析/kid 选键/不可用键过滤、发现文档 issuer 强制匹配、oct 往返 + 篡改/过期/iss/aud 拒绝、TTL 缓存刷新与坏响应保留旧钥）+ **租户注册表**（`Tenant`/`TenantApiKey`/`TenantStatus`、id 校验与 `system` 保留、确定性 JSON、`MemoryTenantStore`/`TenantService` create/update/delete/add_key/revoke_key、key 仅存摘要、摘要碰撞拒绝） |
-| ontolith-server | **65** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**OIDC 链路（file:// 加载 + Bearer 认证往返、http:// JWKS 抓取、https 拒绝启动、`/health` jwt/oidc 姿态）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）**、**gRPC 网关（roundtrip insert/select + `traceparent` 回带、enforced 401、跨租户 403、health+oidc）**、**租户管理（网关 CRUD + key 生命周期 + 鉴权即时生效 + digest 不泄漏、非 `system` 403、管理面代理 + ACL）** |
+| ontolith-security | **30** | 鉴权/权限/审计（**SHA-256 哈希链完整性验证 + legacy FNV-1a 兼容续链**）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权）+ **OIDC 完整链路**（RFC 7515 A.2.1 RS256 官方向量、RFC 7517 JWKS 解析/kid 选键/不可用键过滤、发现文档 issuer 强制匹配、oct 往返 + 篡改/过期/iss/aud 拒绝、TTL 缓存刷新与坏响应保留旧钥）+ **租户注册表**（`Tenant`/`TenantApiKey`/`TenantStatus`、id 校验与 `system` 保留、确定性 JSON、`MemoryTenantStore`/`TenantService` create/update/delete/add_key/revoke_key、key 仅存摘要、摘要碰撞拒绝） |
+| ontolith-server | **70** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**OIDC 链路（file:// 加载 + Bearer 认证往返、http:// JWKS 抓取、https 拒绝启动、`/health` jwt/oidc 姿态）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）**、**gRPC 网关（roundtrip insert/select + `traceparent` 回带、enforced 401、跨租户 403、health+oidc）**、**租户管理（网关 CRUD + key 生命周期 + 鉴权即时生效 + digest 不泄漏、非 `system` 403、管理面代理 + ACL）**、**Ontology 载荷联动推理输入（P1-01：`reasoning_input_with_ontology` 合并 tbox/abox 角色图）** |
 
 ---
 
@@ -331,7 +331,7 @@ systemctl --user status ontolith-server
 
 1. TLS 已落地（rustls 进程内终止 + R2 非 loopback 门禁）；HTTP/1.1 数据面尚无 HTTP/2；gRPC 网关为 HTTP/2（tonic，P5-01），完整框架中间件链仍无  
 2. OIDC 完整链路已落地（JWKS + RS256/HS256 + claim 策略 + TTL 缓存刷新）；树内客户端仅支持 `file://`/`http://` JWKS，`https://` 需反向代理终结 TLS 或挂载快照（TLS 客户端为后续项）；RFC 8414 发现文档解析为库级能力，自动发现端点接线为后续项  
-3. 审计哈希链为完整性级（FNV-1a 64，非加密级；加密升级保持同 schema）  
+3. 审计哈希链已升级为 **SHA-256**（2026-08-29，P5-04：`sha256(prev‖payload)`，schema 不变；升级前 FNV-1a 64 文件按摘要长度判别兼容续链，`verify_chain()` 混合链全量校验）  
 4. 租户隔离已升级为强制分库/行级（`ONTOLITH_TENANT_MODE=enforced`：命名图命名空间隔离 + 执行器租户视图）；分库物理隔离（每租户独立 RocksDB 实例）仍为后续增强  
 5. SPARQL Results JSON 为兼容子集（非完整 XML/CSV）  
 
@@ -348,6 +348,7 @@ systemctl --user status ontolith-server
 | 2026-07-23 | 2.2.2 | 管理面 runtime probe：健康/监控响应增加运行时连通性与探测延迟信息 |
 | 2026-08-06 | 2.3.0 | 审计哈希链：`FileAuditLog` 每条追加 `prev`/`hash` 字段（FNV-1a 64，genesis=0），reopen 恢复链尾，新增 `verify_chain()` 全链校验与篡改检测，+2 测 |
 | 2026-08-06 | 2.4.0 | 管理面 TLS 终止（rustls）+ R2 非 loopback TLS 强制门禁（ADR-0003 转 Accepted）：`HttpServer::with_tls`/`TlsServerConfig`、`ONTOLITH_TLS_CERT`/`ONTOLITH_TLS_KEY`、`/admin/config` 暴露 `tls` 姿态、`gen-self-signed-cert.sh`，+4 测 |
+| 2026-08-29 | 2.11.0 | **审计加密级哈希升级（P5-04）**：链哈希 FNV-1a 64 → 树内 SHA-256（FIPS 180-4），`prev`/`hash` 新条目为 64 hex，legacy 16 hex 条目按摘要长度判别兼容验证并无缝续链；security 29→30 测（legacy 混合链测试）+ R3 门禁保持全绿 |
 
 ## 8. 审计落盘与权限（v2.1）
 
