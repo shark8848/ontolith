@@ -87,6 +87,24 @@ mon() { curl -fsS --max-time 2 "http://127.0.0.1:$1/admin/monitoring" 2>/dev/nul
 field() { echo "$1" | grep -o "\"$2\":[^,}]*" | head -1 | sed 's/^[^:]*://' | tr -d '"' || true; }
 commit_of() { field "$(mon "$1")" commit_index; }
 leader_of() { field "$(mon "$1")" leader; }
+# Append one raft entry via the leader's admin API. Leader detection polls at
+# 1s granularity, so the first write can hit the transient post-election
+# settling window (openraft may still forward/step down under load); retry
+# with a short backoff and only fail after the window is clearly exceeded.
+replicate_append() {
+  local m="$1" body=""
+  for _ in $(seq 1 10); do
+    body="$(curl -sS --max-time 10 -X POST "http://127.0.0.1:${m}/admin/data/replicate?append=1" 2>/dev/null || true)"
+    if echo "$body" | grep -q '"applied_entries"'; then
+      echo "$body"
+      return 0
+    fi
+    sleep 0.5
+  done
+  log "FAIL: replicate append did not succeed on ${m}; last body: ${body}"
+  for i in $(seq 0 $((NODES - 1))); do log "--- node$i log ---"; tail -20 "$LOG_DIR/node$i.log" || true; done
+  return 1
+}
 
 MEMBERS=""
 for i in $(seq 0 $((NODES - 1))); do
@@ -140,7 +158,7 @@ log "rebalance: $rebalance_body"
 ok "online rebalance moved ${plans} slot ranges, shard-map epoch ${shard_map_epoch_before} -> ${shard_map_epoch_after}"
 
 # 3. replication baseline
-for _ in 1 2 3; do curl -fsS --max-time 10 -X POST "http://127.0.0.1:${lm}/admin/data/replicate?append=1" >/dev/null; done
+for _ in 1 2 3; do replicate_append "$lm" >/dev/null || fail "baseline replication append failed"; done
 commit="$(commit_of "$lm")"
 [[ "$commit" =~ ^[0-9]+$ ]] || fail "no commit index after baseline replication"
 converged=0
@@ -166,7 +184,7 @@ log "DR-1: killing follower n${follower}"
 kill "${PIDS[$follower]}" >/dev/null 2>&1 || true
 wait "${PIDS[$follower]}" 2>/dev/null || true
 PIDS[$follower]=""
-curl -fsS --max-time 10 -X POST "http://127.0.0.1:${lm}/admin/data/replicate?append=1" >/dev/null
+replicate_append "$lm" >/dev/null || fail "append after follower loss failed"
 commit2="$(commit_of "$lm")"
 (( commit2 > commit )) || fail "commit did not advance with one follower down (${commit} -> ${commit2})"
 ok "majority commit survived follower loss (${commit} -> ${commit2})"
@@ -195,7 +213,7 @@ done
 newid="${newleader#n}"
 eval nlm=\$m$newid
 log "new leader after failover: ${newleader}"
-curl -fsS --max-time 10 -X POST "http://127.0.0.1:${nlm}/admin/data/replicate?append=1" >/dev/null
+replicate_append "$nlm" >/dev/null || fail "append after failover failed"
 commit3="$(commit_of "$nlm")"
 (( commit3 > commit2 )) || fail "commit did not advance after failover (${commit2} -> ${commit3})"
 ok "automatic failover: commit advanced ${commit2} -> ${commit3} under ${newleader}"
