@@ -1538,7 +1538,10 @@ mod tests {
             .expect("append over http");
         assert_eq!(entry.index, 2);
         assert!(
-            wait_until(|| follower.commit_index() >= 2, 20000),
+            wait_until(
+                || follower.commit_index() >= 2 && leader.commit_index() >= 2,
+                20000
+            ),
             "follower did not commit replicated entry"
         );
         assert_eq!(follower.commit_index(), leader.commit_index());
@@ -2066,7 +2069,10 @@ mod tests {
             .append(LogPayload::Metadata("replicated".into()))
             .unwrap();
         assert_eq!(entry.index, 2);
-        assert!(wait_until(|| follower.commit_index() >= 2, 15000));
+        assert!(wait_until(
+            || follower.commit_index() >= 2 && leader.commit_index() >= 2,
+            15000
+        ));
         assert_eq!(follower.commit_index(), leader.commit_index());
     }
 }
