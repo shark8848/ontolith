@@ -32,6 +32,9 @@ pub use rocks::{TenantCfEntry, TenantCfOp};
 #[derive(Default)]
 struct DictionaryState {
     next_node_id: u64,
+    /// Dictionary epoch; bumped whenever the mapping table is cleared so
+    /// stale [`NodeId`]s from a previous epoch are recognizably invalid.
+    epoch: u64,
     node_to_value: HashMap<NodeId, String>,
     value_to_node: HashMap<String, NodeId>,
 }
@@ -45,6 +48,21 @@ impl InMemoryDictionary {
         Self {
             state: RwLock::new(DictionaryState::default()),
         }
+    }
+
+    /// Atomically clear all mappings and advance the dictionary epoch
+    /// (P1-02). `next_node_id` stays monotonic so ids from a previous epoch
+    /// are never re-issued; callers holding old ids must observe the epoch
+    /// change before reusing them. Returns the new epoch.
+    pub fn clear_dictionary(&self) -> u64 {
+        let mut guard = self
+            .state
+            .write()
+            .expect("dictionary lock must not be poisoned");
+        guard.node_to_value.clear();
+        guard.value_to_node.clear();
+        guard.epoch += 1;
+        guard.epoch
     }
 }
 
@@ -84,6 +102,10 @@ impl DictionaryCodec for InMemoryDictionary {
             .read()
             .map(|guard| guard.value_to_node.contains_key(value))
             .unwrap_or(false)
+    }
+
+    fn epoch(&self) -> u64 {
+        self.state.read().map(|guard| guard.epoch).unwrap_or(0)
     }
 }
 
@@ -1312,6 +1334,28 @@ mod tests {
         assert_eq!(id_a, id_b);
         assert_eq!(
             dictionary.decode_node(id_a).as_deref(),
+            Some("urn:test:alice")
+        );
+    }
+
+    #[test]
+    fn dictionary_epoch_increments_on_clear_and_invalidates_mappings() {
+        let dictionary = InMemoryDictionary::new();
+        assert_eq!(dictionary.epoch(), 0);
+        let id = dictionary.encode_node("urn:test:alice");
+        assert_eq!(dictionary.epoch(), 0);
+
+        assert_eq!(dictionary.clear_dictionary(), 1);
+        assert_eq!(dictionary.epoch(), 1);
+        assert!(dictionary.decode_node(id).is_none());
+        assert!(!dictionary.contains_value("urn:test:alice"));
+        assert!(dictionary.is_empty());
+
+        // Node ids stay monotonic across epochs: old ids are never re-issued.
+        let id2 = dictionary.encode_node("urn:test:alice");
+        assert!(id2.get() > id.get());
+        assert_eq!(
+            dictionary.decode_node(id2).as_deref(),
             Some("urn:test:alice")
         );
     }

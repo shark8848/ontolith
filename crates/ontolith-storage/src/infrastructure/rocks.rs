@@ -336,6 +336,38 @@ impl RocksDbStorageEngine {
             .map_err(rocks_err)
     }
 
+    /// Atomically clear the bidirectional dictionary and advance the
+    /// dictionary epoch (P1-02). The fwd/rev mappings are dropped and
+    /// `META_DICT_EPOCH` is persisted in the same durable batch, so a
+    /// reopened or backup-restored engine observes the new epoch.
+    /// `next_node_id` stays monotonic: ids issued before the clear are never
+    /// re-issued. Returns the new epoch.
+    pub fn clear_dictionary(&self) -> Result<u64, OntolithError> {
+        let _commit = self
+            .commit_lock
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("commit lock poisoned"))?;
+        let cf_fwd = self.cf(CF_DICT_FWD)?;
+        let cf_rev = self.cf(CF_DICT_REV)?;
+        let cf_meta = self.cf(CF_META)?;
+        let mut batch = RocksBatch::default();
+        // Bracket all keys: fwd keys are UTF-8 strings (never contain 0xff)
+        // and rev keys are 8-byte big-endian u64s; 0xff×8 is therefore a
+        // strict upper bound for every encodable key.
+        batch.delete_range_cf(cf_fwd, &[][..], &[0xff; 8][..]);
+        batch.delete_range_cf(cf_rev, &[][..], &[0xff; 8][..]);
+        let new_epoch = self.dict_epoch.load(Ordering::SeqCst) + 1;
+        batch.put_cf(cf_meta, META_DICT_EPOCH, encode_u64(new_epoch));
+        batch.put_cf(
+            cf_meta,
+            META_NEXT_NODE,
+            encode_u64(self.next_node_id.load(Ordering::SeqCst)),
+        );
+        self.durable_write(batch)?;
+        self.dict_epoch.store(new_epoch, Ordering::SeqCst);
+        Ok(new_epoch)
+    }
+
     fn cf(&self, name: &str) -> Result<&rocksdb::ColumnFamily, OntolithError> {
         self.db
             .cf_handle(name)
@@ -2571,6 +2603,56 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn rocksdb_dictionary_epoch_persists_across_reopen_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let id;
+        {
+            let engine = RocksDbStorageEngine::open(&path).unwrap();
+            assert_eq!(engine.epoch(), 0);
+            id = engine.encode_node("urn:dict:epoch");
+            assert_eq!(engine.epoch(), 0);
+
+            assert_eq!(engine.clear_dictionary().unwrap(), 1);
+            assert_eq!(engine.epoch(), 1);
+            assert!(engine.decode_node(id).is_none());
+            assert!(!engine.contains_value("urn:dict:epoch"));
+        }
+        // Reopen: epoch and the cleared mappings survive.
+        let engine = RocksDbStorageEngine::open(&path).unwrap();
+        assert_eq!(engine.epoch(), 1);
+        assert!(engine.decode_node(id).is_none());
+        let id2 = engine.encode_node("urn:dict:epoch");
+        assert!(id2.get() > id.get());
+        assert_eq!(engine.decode_node(id2).as_deref(), Some("urn:dict:epoch"));
+    }
+
+    #[test]
+    fn rocksdb_backup_restore_keeps_dictionary_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let backup_dir = dir.path().join("backup");
+        let restored_dir = dir.path().join("restored");
+        {
+            let engine = RocksDbStorageEngine::open(&path).unwrap();
+            engine.encode_node("urn:dict:before");
+            assert_eq!(engine.clear_dictionary().unwrap(), 1);
+            engine.encode_node("urn:dict:after");
+            std::fs::create_dir_all(&backup_dir).unwrap();
+            engine.create_backup(&backup_dir).unwrap();
+        }
+        // Restore into a fresh directory: the bumped epoch and the post-clear
+        // mappings must be preserved.
+        RocksDbStorageEngine::restore_backup(&backup_dir, &restored_dir).unwrap();
+        let engine = RocksDbStorageEngine::open(&restored_dir).unwrap();
+        assert_eq!(engine.epoch(), 1);
+        assert!(!engine.contains_value("urn:dict:before"));
+        assert!(engine.contains_value("urn:dict:after"));
+        let id = engine.encode_node("urn:dict:after");
+        assert_eq!(engine.decode_node(id).as_deref(), Some("urn:dict:after"));
     }
 
     #[test]

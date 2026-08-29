@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.65
+版本: 0.1.66
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -103,7 +103,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 | ID | 交付物 | 状态 | 完成度 | 证据 | 下次动作 |
 |----|--------|------|--------|------|----------|
 | P1-01 | Knowledge Object 领域模型 | 已完成 | 100% | L0 KO + L1 Statement/Graph/Dataset + 序列化 Part II（`KoCodec` 全容器往返）；**Ontology 载荷联动 reasoner 完成**（2026-08-29：`ontolith-reasoner::domain::ontology` —— `OntologyPayload`（tbox/abox/annotation/rule/provenance 角色拆分）+ `load_ontology_payload`（经 `OntologyGraphReader` 按 `OntologyObject` 图引用物化）+ server 接线（`reasoning_input_with_ontology` 合并载荷、`ONTOLITH_ONTOLOGY_{TBOX,ABOX,ANNOTATION,RULE,PROVENANCE}` env 契约、`/materialize` 同接入），reasoner 98→102 测 + server +2 测） | —（载荷联动闭环） |
-| P1-02 | Node 标识与字典管理器 | 部分完成 | 90% | 内存字典 + RocksDB 持久字典 + 并发字典契约（[L2-storage-contracts.md](./L2-storage-contracts.md) Part A） | 随 P2-02 MVCC 复核字典 epoch 语义 |
+| P1-02 | Node 标识与字典管理器 | 已完成 | 100% | 内存字典 + RocksDB 持久字典 + 并发字典契约（[L2-storage-contracts.md](./L2-storage-contracts.md) Part A）；**字典 epoch 语义收尾完成**（2026-08-29：`InMemoryDictionary` 跟踪 epoch + `clear_dictionary` 清空递增；Rocks 侧 fwd/rev delete_range + `META_DICT_EPOCH` 同批持久化、分配器跨 epoch 单调不重用；新增 epoch 清空失效/reopen 保持/备份恢复保持测试，storage 54→57 测） | —（契约冻结，见 Part A） |
 | P1-03 | 存储抽象接口 | 已完成 | 100% | stats/matching/snapshot_with/delete 精确 API + 接口版本冻结 0.1.0（[L2-storage-contracts.md](./L2-storage-contracts.md) Part B） | —（破坏性变更按流程走 RFC/ADR 登记） |
 | P1-04 | 确定性标识与规范化编码规则 | 已完成 | 100% | 六置换物理键 + triple/quad set key + 编码规则/磁盘布局定稿（[RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)），2026-08-09 评审回填转正式 Accepted | —（磁盘布局变更走 RFC/ADR） |
 
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-29 | Codex | **P1-02 字典 epoch 语义收尾 DONE（PROG-0001 0.1.65→0.1.66）**：`InMemoryDictionary` 跟踪 epoch + `clear_dictionary`（写锁内清双映射并递增）；`RocksDbStorageEngine::clear_dictionary`（fwd/rev delete_range + `META_DICT_EPOCH`/`META_NEXT_NODE` 同批持久化，`next_node_id` 跨 epoch 单调不重用）；新增 3 测（内存清空递增与旧 id 失效、Rocks reopen 后 epoch 保持、备份恢复后 epoch 与映射保持），storage 54→57 测；[L2-storage-contracts.md](./L2-storage-contracts.md) Part A 增补 Epoch 语义行与并发细则 #6；看板 P1-02 → Done（SYNC-PROJ-0001 增量同步） |
 | 2026-08-29 | Codex | **看板同步 DONE（SYNC-PROJ-0001，PROG-0001 0.1.64→0.1.65）**：GitHub Projects #2 全量同步 **65 条（63 更新 + 2 新建，0 失败）**——回写 P1-01/P4-05/P5-04 → **已完成（Done）**、ikc-log-center Rust SDK 接入 → Done，其余卡片按 0.1.64 快照对齐；回读验证 total=65，关键卡 Status=Done；`docs/github-projects-sync.md` 映射表保持 0.1.64 快照（P1-01 更新 + P4-05/P5-04 新增行） |
 | 2026-08-29 | Codex | **开放项闭合 DONE（PROG-0001 0.1.63→0.1.64）**：① **P5-04 审计加密级哈希升级**——`FileAuditLog` 链哈希 FNV-1a 64 → 树内 SHA-256（`sha256(prev‖payload)`），schema 不变、legacy FNV-1a 文件按摘要长度（16/64 hex）判别兼容续链（上一项哈希字节原样作 `prev`）；security 29→30 测（新增 legacy 兼容混合链测试）+ R3 门禁 `r3_security_gate` 3 测保持全绿；② **P1-01 Ontology 载荷联动 reasoner**——`ontolith-reasoner::domain::ontology` 新增 `OntologyPayload`（tbox/abox/annotation/rule/provenance 角色拆分）+ `load_ontology_payload`（`OntologyGraphReader` trait，按 `OntologyObject` 图引用物化 KO 载荷）+ server 接线（`QueryReadOntologyReader` 适配 `QueryReadService`、`reasoning_input_with_ontology` 将载荷并入推理输入、`ONTOLITH_ONTOLOGY_{TBOX,ABOX,ANNOTATION,RULE,PROVENANCE}` env 契约经 `AppState.ontology` 生效、`/materialize` 同接入）；reasoner 98→102 测 + server 68→70 测（命名图 tbox/abox 仅经载荷进入推理输入 + 未配置不泄漏）；③ **P4-05 读一致性级别与 API 说明**——L4 文档 2.7.0→2.8.0 §4 固化 `ConsistencyLevel`（strong/session/eventual）语义矩阵、Rust 读路由 API（`route_read`/`route_read_session`/`QueryRequest::with_consistency`）与 L5 HTTP 契约（`/cluster/route?consistency=&session=`、`/query`·`/explain` 的 `x-ontolith-consistency` 头、权限与未知取值回退）；相对 R1–R4 全计划开放项清零（P1-01/P4-05/P5-04 全部完成），剩余仅预留/后续轨（P2-04 Async 索引、P2-05 备份调度运维轨、Miri/sanitizer、RemoteProvider/ANN、JSON-LD 导入）与生产发布运维项 |
 | 2026-08-10 | Codex | **平台日志接入 ikc-log-center（Rust SDK，PROG-0001 0.1.62→0.1.63）**：集成已发布 crate `log-center-sdk` 0.1.0（Tier B 登记）——新增 `crates/ontolith-server/src/logcenter.rs`（`LogCenterClient` 共享客户端 + `emit`/`emit_access`，环境变量 `LOG_CENTER_URL/TOKEN/TIMEOUT/QUEUE/BATCH` 与 Python/Java SDK 对齐，未配置时静默禁用）；gateway 启动/指标/就绪/错误与 access 日志（method/path/status/latency_ms/bytes + W3C trace_id/span_id）结构化上报，management 启动/配置日志同接入；`LOG_CENTER_URL=http://127.0.0.1:9315` 写入 prod/staging 四份 env；server 65→68 测全绿，冒烟实测日志带 `app=ontolith-server` 与 trace_id 进入 log-center `/search` |

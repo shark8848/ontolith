@@ -2,7 +2,7 @@
 
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
-数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.64，2026-08-29）
+数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.66，2026-08-29）
 状态: Active（Classic PAT 已配置，随增量同步；2026-08-29 全量同步完成：65 条（63 更新 + 2 新建）0 失败，回读 total=65）
 
 ## 1. 认证要求（重要，勿重复探索）
@@ -48,7 +48,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P0-04 RFC 流程落地 | 已完成 | RFC-0001 评审回填完成（2026-08-09：Reviewers=sharky-ai，契约与实现逐项核验，转正式 Accepted） |
 | P0-05 进度台账 | 已完成 | PROG-0001 |
 | P1-01 Knowledge Object 领域模型 | 已完成 | 100%，L0+L1+序列化 Part II + Ontology 载荷联动 reasoner（2026-08-29：`OntologyPayload`/`load_ontology_payload` + server 推理输入合并） |
-| P1-02 Node 标识与字典管理器 | 进行中 | 90% |
+| P1-02 Node 标识与字典管理器 | 已完成 | 100%，字典 epoch 语义收尾（2026-08-29：内存/Rocks `clear_dictionary` + epoch 持久化 + reopen/备份恢复测试） |
 | P1-03 存储抽象接口 | 已完成 | 接口版本 0.1.0 冻结 |
 | P1-04 确定性标识与规范化编码规则 | 已完成 | RFC-0001 评审回填转正式 Accepted（2026-08-09） |
 | P2-01 RocksDB 适配 | 已完成 | 索引 CF 调优（bloom/块缓存/压缩）+ tuning() 姿态 |

@@ -24,6 +24,7 @@
 | 不可变性 | `NodeId` 在字典 epoch 内恒定（SAS-0401 §5）；`decode_node` 返回克隆字符串，不暴露内部借用 | 调用方持有失效 id |
 | 原子性 | RocksDB 侧 fwd/rev/meta 三写同一 batch；`next_node_id` 崩溃后从 `meta` 恢复 | 半写字典/重复分配 |
 | 确定性 | 同 lexical form → 同 id（进程内）；epoch 递增即旧映射失效 | 跨 epoch 引用错乱 |
+| Epoch 语义 | `epoch()` 随映射表清空递增（`clear_dictionary`：内存侧写锁内清双映射 + epoch+1；Rocks 侧 fwd/rev delete_range + `META_DICT_EPOCH` 同批持久化）；`NodeId` 分配器跨 epoch 单调，旧 id 不重用；reopen/备份恢复后 epoch 与映射一致 | 跨 epoch 引用错乱/旧 id 复用 |
 
 ### 并发行为细则
 
@@ -32,10 +33,11 @@
 3. `decode_node(Nonexistent) -> None`；`encode_node` 永不返回 `None`。
 4. `contains_value`/`contains_node` 语义基于 `encode`+`decode` 往返，允许实现按需优化。
 5. 上层（query/reasoner）只经 `DictionaryCodec` trait 访问字典，禁止依赖具体基础设施类型。
+6. `clear_dictionary` 清空映射并递增 epoch；旧 epoch 的 `NodeId` 视为失效，调用方须在观测到 epoch 变化后重建引用（分配器保持单调，旧 id 永不复用）。
 
 ### 测试基线
 
-- storage crate 字典单测（编码幂等、解码往返、并发读写、RocksDB reopen 恢复）。
+- storage crate 字典单测（编码幂等、解码往返、并发读写、RocksDB reopen 恢复、epoch 清空递增与失效、reopen/备份恢复后 epoch 保持）。
 - reasoner/query 依赖字典的集成测试均以 `InMemoryDictionary` 为基座，契约变化须同步验证。
 
 ---
