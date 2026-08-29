@@ -3,7 +3,7 @@
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
 数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.64，2026-08-29）
-状态: Active（Classic PAT 已配置，随增量同步；2026-08-10 增量同步完成：9 条 0 失败，回读 total=58）
+状态: Active（Classic PAT 已配置，随增量同步；2026-08-29 全量同步完成：65 条（63 更新 + 2 新建）0 失败，回读 total=65）
 
 ## 1. 认证要求（重要，勿重复探索）
 

@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.64
+版本: 0.1.65
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-29 | Codex | **看板同步 DONE（SYNC-PROJ-0001，PROG-0001 0.1.64→0.1.65）**：GitHub Projects #2 全量同步 **65 条（63 更新 + 2 新建，0 失败）**——回写 P1-01/P4-05/P5-04 → **已完成（Done）**、ikc-log-center Rust SDK 接入 → Done，其余卡片按 0.1.64 快照对齐；回读验证 total=65，关键卡 Status=Done；`docs/github-projects-sync.md` 映射表保持 0.1.64 快照（P1-01 更新 + P4-05/P5-04 新增行） |
 | 2026-08-29 | Codex | **开放项闭合 DONE（PROG-0001 0.1.63→0.1.64）**：① **P5-04 审计加密级哈希升级**——`FileAuditLog` 链哈希 FNV-1a 64 → 树内 SHA-256（`sha256(prev‖payload)`），schema 不变、legacy FNV-1a 文件按摘要长度（16/64 hex）判别兼容续链（上一项哈希字节原样作 `prev`）；security 29→30 测（新增 legacy 兼容混合链测试）+ R3 门禁 `r3_security_gate` 3 测保持全绿；② **P1-01 Ontology 载荷联动 reasoner**——`ontolith-reasoner::domain::ontology` 新增 `OntologyPayload`（tbox/abox/annotation/rule/provenance 角色拆分）+ `load_ontology_payload`（`OntologyGraphReader` trait，按 `OntologyObject` 图引用物化 KO 载荷）+ server 接线（`QueryReadOntologyReader` 适配 `QueryReadService`、`reasoning_input_with_ontology` 将载荷并入推理输入、`ONTOLITH_ONTOLOGY_{TBOX,ABOX,ANNOTATION,RULE,PROVENANCE}` env 契约经 `AppState.ontology` 生效、`/materialize` 同接入）；reasoner 98→102 测 + server 68→70 测（命名图 tbox/abox 仅经载荷进入推理输入 + 未配置不泄漏）；③ **P4-05 读一致性级别与 API 说明**——L4 文档 2.7.0→2.8.0 §4 固化 `ConsistencyLevel`（strong/session/eventual）语义矩阵、Rust 读路由 API（`route_read`/`route_read_session`/`QueryRequest::with_consistency`）与 L5 HTTP 契约（`/cluster/route?consistency=&session=`、`/query`·`/explain` 的 `x-ontolith-consistency` 头、权限与未知取值回退）；相对 R1–R4 全计划开放项清零（P1-01/P4-05/P5-04 全部完成），剩余仅预留/后续轨（P2-04 Async 索引、P2-05 备份调度运维轨、Miri/sanitizer、RemoteProvider/ANN、JSON-LD 导入）与生产发布运维项 |
 | 2026-08-10 | Codex | **平台日志接入 ikc-log-center（Rust SDK，PROG-0001 0.1.62→0.1.63）**：集成已发布 crate `log-center-sdk` 0.1.0（Tier B 登记）——新增 `crates/ontolith-server/src/logcenter.rs`（`LogCenterClient` 共享客户端 + `emit`/`emit_access`，环境变量 `LOG_CENTER_URL/TOKEN/TIMEOUT/QUEUE/BATCH` 与 Python/Java SDK 对齐，未配置时静默禁用）；gateway 启动/指标/就绪/错误与 access 日志（method/path/status/latency_ms/bytes + W3C trace_id/span_id）结构化上报，management 启动/配置日志同接入；`LOG_CENTER_URL=http://127.0.0.1:9315` 写入 prod/staging 四份 env；server 65→68 测全绿，冒烟实测日志带 `app=ontolith-server` 与 trace_id 进入 log-center `/search` |
 | 2026-08-10 | Codex | **今日任务看板同步 DONE（SYNC-PROJ-0001，PROG-0001 0.1.61→0.1.62）**：GitHub Projects #2 增量同步 5 条 0 失败——新增 4 卡：console 自动刷新优化（仅监控/集群模块内定时器）Done / console 数值精度 3 位小数 Done / console 租户管理页交互完善（key 复制 + toast + 图标操作 + 删除输入确认 + 2 列布局）Done / ikc-log-center Rust SDK 接入（规划中，Python 方案已回退）Todo；回写租户管理卡 Done；回读 total=63；`docs/github-projects-sync.md` 映射表补 4 行 |
