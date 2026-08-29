@@ -523,6 +523,7 @@ pub struct HttpRaftClient {
 }
 
 impl HttpRaftClient {
+    #[allow(clippy::result_large_err)] // error type is mandated by openraft::RaftNetwork
     async fn post<Req, Resp, E>(
         &self,
         path: &str,

@@ -33,7 +33,7 @@ fn decode_embedding(bytes: &[u8]) -> Result<Embedding, OntolithError> {
         return Err(OntolithError::Storage("semantic embedding length mismatch"));
     }
     let mut values = Vec::with_capacity(dim);
-    for chunk in bytes[4..].chunks_exact(4) {
+    for chunk in bytes[4..].as_chunks::<4>().0 {
         values.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Embedding::new(values)

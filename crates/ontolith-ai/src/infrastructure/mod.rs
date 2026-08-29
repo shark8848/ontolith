@@ -182,7 +182,12 @@ fn dot_const<const D: usize>(qv: &[f32], row: &[f32]) -> f32 {
 #[inline]
 fn dot_runtime(qv: &[f32], row: &[f32]) -> f32 {
     let mut acc = 0.0f32;
-    for (a, b) in qv.chunks_exact(4).zip(row.chunks_exact(4)) {
+    for (a, b) in qv
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(row.as_chunks::<4>().0.iter())
+    {
         acc += a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
     }
     let mut tail = 0.0f32;

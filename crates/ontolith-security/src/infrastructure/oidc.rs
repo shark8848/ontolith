@@ -565,9 +565,9 @@ fn rsa_sha256_verify(signature: &[u8], n: &[u8], e: &[u8], message: &[u8]) -> bo
     if e.is_empty() || e == [0] {
         return false;
     }
-    let e_u64 = e.iter().fold(0u64, |acc, &b| {
-        acc.checked_mul(256).map_or(0, |a| a) + b as u64
-    });
+    let e_u64 = e
+        .iter()
+        .fold(0u64, |acc, &b| acc.checked_mul(256).unwrap_or(0) + b as u64);
     if e_u64 == 0 {
         return false;
     }

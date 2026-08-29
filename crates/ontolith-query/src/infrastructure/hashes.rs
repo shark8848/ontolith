@@ -39,9 +39,9 @@ pub fn md5(input: &[u8]) -> [u8; 16] {
 
     let (mut a0, mut b0, mut c0, mut d0) =
         (0x67452301u32, 0xefcdab89u32, 0x98badcfeu32, 0x10325476u32);
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
-        for (i, w) in chunk.chunks_exact(4).enumerate() {
+        for (i, w) in chunk.as_chunks::<4>().0.iter().enumerate() {
             m[i] = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
         }
         let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
@@ -92,9 +92,9 @@ pub fn sha1(input: &[u8]) -> [u8; 20] {
         0x10325476u32,
         0xc3d2e1f0u32,
     );
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 80];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
         }
         for i in 16..80 {
@@ -164,9 +164,9 @@ pub fn sha256(input: &[u8]) -> [u8; 32] {
         0x1f83d9abu32,
         0x5be0cd19u32,
     );
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
         }
         for i in 16..64 {
@@ -331,9 +331,9 @@ fn sha512_compress(input: &[u8], iv: &[u64; 8]) -> [u64; 8] {
 
     let (mut h0, mut h1, mut h2, mut h3, mut h4, mut h5, mut h6, mut h7) =
         (iv[0], iv[1], iv[2], iv[3], iv[4], iv[5], iv[6], iv[7]);
-    for chunk in msg.chunks_exact(128) {
+    for chunk in msg.as_chunks::<128>().0 {
         let mut w = [0u64; 80];
-        for (i, word) in chunk.chunks_exact(8).enumerate() {
+        for (i, word) in chunk.as_chunks::<8>().0.iter().enumerate() {
             w[i] = u64::from_be_bytes([
                 word[0], word[1], word[2], word[3], word[4], word[5], word[6], word[7],
             ]);
