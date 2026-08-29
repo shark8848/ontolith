@@ -3556,11 +3556,9 @@ mod tests {
     fn parses_non_ascii_literal_in_filter() {
         // Regression: keyword lookahead must not byte-slice across a
         // multi-byte char, e.g. CONTAINS(STR(?o), "中文").
-        let plan = plan_query(&req(
-            "PREFIX ex: <http://e/> \
+        let plan = plan_query(&req("PREFIX ex: <http://e/> \
              SELECT ?s WHERE { ?s ex:label ?o . \
-             FILTER(CONTAINS(STR(?o), \"中文\")) }",
-        ))
+             FILTER(CONTAINS(STR(?o), \"中文\")) }"))
         .expect("parse should not panic");
         assert_eq!(plan.kind, QueryKind::Select);
     }
