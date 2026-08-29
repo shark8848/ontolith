@@ -136,7 +136,7 @@ jobs:
             for j in 0 1 2; do
               eval m=\$m$j
               body="$(curl -fsS --max-time 2 "http://127.0.0.1:${m}/admin/monitoring" 2>/dev/null || true)"
-              lid="$(echo "$body" | grep -o '"leader":"n[012]"' | head -1 | sed 's/.*"n\([012]\)".*/\1/')"
+              lid="$(echo "$body" | grep -o '"leader":"n[012]"' | head -1 | sed 's/.*"n\([012]\)".*/\1/' || true)"
               if [[ -n "$lid" ]]; then leader_id=$lid; break 2; fi
             done
             sleep 1
@@ -155,7 +155,7 @@ jobs:
             echo "raft smoke failed: applied_entries not >= 1"
             exit 1
           fi
-          commit="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2)"
+          commit="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2 || true)"
           if (( commit < 2 )); then
             echo "raft smoke failed: commit_index < 2 (${commit})"
             exit 1
@@ -167,7 +167,7 @@ jobs:
             for j in 0 1 2; do
               eval m=\$m$j
               body="$(curl -fsS --max-time 2 "http://127.0.0.1:${m}/admin/monitoring" 2>/dev/null || true)"
-              c="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2)"
+              c="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2 || true)"
               if [[ -z "$c" || "$c" -lt "$commit" ]]; then reached=0; fi
             done
             (( reached == 1 )) && break
@@ -190,7 +190,7 @@ jobs:
 
           body="$(curl -fsS --max-time 10 -X POST "http://127.0.0.1:${lm}/admin/data/replicate?append=1")"
           echo "raft smoke replicate after follower loss: ${body}"
-          commit2="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2)"
+          commit2="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2 || true)"
           if (( commit2 <= commit )); then
             echo "raft smoke failed: commit did not advance after follower loss (${commit} -> ${commit2})"
             exit 1
