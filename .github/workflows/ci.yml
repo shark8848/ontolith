@@ -149,7 +149,25 @@ jobs:
           eval lm=\$m$leader_id
           echo "raft smoke: leader=n$leader_id bind=${lm}"
 
-          body="$(curl -fsS --max-time 10 -X POST "http://127.0.0.1:${lm}/admin/data/replicate?append=1")"
+          # Leader detection polls at 1s granularity, so the first append can
+          # hit the transient post-election settling window (openraft may still
+          # forward/step down under load). Retry with short backoff, matching
+          # scripts/drill-rebalance-dr.sh::replicate_append.
+          replicate_append() {
+            local m="$1" body=""
+            for _ in $(seq 1 10); do
+              body="$(curl -sS --max-time 10 -X POST "http://127.0.0.1:${m}/admin/data/replicate?append=1" 2>/dev/null || true)"
+              if echo "$body" | grep -q '"applied_entries"'; then
+                echo "$body"
+                return 0
+              fi
+              sleep 0.5
+            done
+            echo "raft smoke failed: replicate append did not succeed on ${m}; last body: ${body}" >&2
+            return 1
+          }
+
+          body="$(replicate_append "$lm")" || exit 1
           echo "raft smoke replicate: ${body}"
           if ! echo "$body" | grep -q '"applied_entries":[1-9]'; then
             echo "raft smoke failed: applied_entries not >= 1"
@@ -188,7 +206,7 @@ jobs:
           wait "${pids[$follower]}" 2>/dev/null || true
           pids[$follower]=""
 
-          body="$(curl -fsS --max-time 10 -X POST "http://127.0.0.1:${lm}/admin/data/replicate?append=1")"
+          body="$(replicate_append "$lm")" || exit 1
           echo "raft smoke replicate after follower loss: ${body}"
           commit2="$(echo "$body" | grep -o '"commit_index":[0-9]*' | head -1 | cut -d: -f2 || true)"
           if (( commit2 <= commit )); then
