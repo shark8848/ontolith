@@ -25,7 +25,8 @@ use ontolith_observability::infrastructure::{
 };
 use ontolith_parser::domain::ParseFormat;
 use ontolith_parser::infrastructure::{
-    parse_json_ld_doc, parse_nquads, parse_ntriples, parse_trig_doc, parse_turtle_doc,
+    parse_json_ld_doc, parse_json_ld_doc_with_remote_context, parse_nquads, parse_ntriples,
+    parse_trig_doc, parse_turtle_doc,
 };
 use ontolith_query::domain::{
     BoundValue, PatternCost, QueryExplain, QueryKind, QueryRequest, QueryResult,
@@ -1308,7 +1309,14 @@ impl AppState {
                 ParseFormat::NQuads => parse_nquads(text, dict)?,
                 ParseFormat::Turtle => parse_turtle_doc(text, dict)?,
                 ParseFormat::TriG => parse_trig_doc(text, dict)?,
-                ParseFormat::JsonLd => parse_json_ld_doc(text, dict, None)?,
+                ParseFormat::JsonLd => {
+                    if crate::jsonld::remote_context_enabled() {
+                        let loader = crate::jsonld::HttpRemoteContextLoader;
+                        parse_json_ld_doc_with_remote_context(text, dict, None, &loader)?
+                    } else {
+                        parse_json_ld_doc(text, dict, None)?
+                    }
+                }
             };
 
             // Tenant isolation at write path (P5-03): enforced mode ALWAYS
@@ -3598,6 +3606,66 @@ mod tests {
         );
         let rbody = String::from_utf8_lossy(&read.body);
         assert!(rbody.contains("Alice"), "read: {rbody}");
+    }
+
+    #[test]
+    fn jsonld_remote_context_ingest_via_http() {
+        // Serialize env-mutating tests (process-wide ONTOLITH_JSONLD_REMOTE_CONTEXT).
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serve = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().expect("accept context fetch");
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"name": "http://ex.org/name"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/ld+json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).expect("write context");
+        });
+
+        // SAFETY: env mutation is serialized by ENV_LOCK; no concurrent reads
+        // of this variable from other tests.
+        unsafe { std::env::set_var("ONTOLITH_JSONLD_REMOTE_CONTEXT", "1") };
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let body = format!(
+            r#"{{
+              "@context": "http://{addr}/ctx.json",
+              "@id": "http://ex.org/alice",
+              "name": "Remote"
+            }}"#
+        );
+        let resp = dispatch_for_test(
+            &state,
+            HttpRequest {
+                method: "POST".to_owned(),
+                path: "/data/json-ld".to_owned(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: body.into_bytes(),
+            },
+        );
+        // SAFETY: see set_var above; ENV_LOCK held for the whole test.
+        unsafe { std::env::remove_var("ONTOLITH_JSONLD_REMOTE_CONTEXT") };
+        serve.join().expect("context server");
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+
+        let read = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "SELECT ?n WHERE { <http://ex.org/alice> <http://ex.org/name> ?n }",
+            ),
+        );
+        let rbody = String::from_utf8_lossy(&read.body);
+        assert!(rbody.contains("Remote"), "read: {rbody}");
     }
 
     #[test]

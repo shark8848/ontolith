@@ -12,8 +12,9 @@
 //!   `{"@id": g, "@graph": [...]}` named graphs (quads).
 //! - Term/prefix expansion, base IRI resolution.
 //!
-//! Not supported (explicit errors): remote `@context` URLs, `@reverse`,
-//! `@nest`, `@included`, `@json`.
+//! Remote `@context` URLs are supported through an injectable
+//! [`RemoteContextLoader`] (the parser performs no network I/O); without a
+//! loader they produce an explicit `Unsupported` error.
 
 use crate::domain::{RdfEvent, RdfEventSink};
 use crate::infrastructure::term_lex::resolve_against_base;
@@ -27,6 +28,13 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+const RDF_JSON: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON";
+
+/// Loader for remote `@context` documents (JSON-LD 1.1). The parser never
+/// performs network I/O itself; callers supply the fetch and any caching.
+pub trait RemoteContextLoader: Send + Sync {
+    fn load(&self, url: &str) -> Result<String, OntolithError>;
+}
 
 #[derive(Debug, Clone, Default)]
 struct TermDef {
@@ -34,6 +42,9 @@ struct TermDef {
     type_: Option<TypeMapping>,
     language: Option<String>,
     container: Container,
+    reverse: Option<String>,
+    reverse_own: bool,
+    nest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +52,7 @@ enum TypeMapping {
     Id,
     Vocab,
     Datatype(String),
+    Json,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,6 +71,25 @@ struct Context {
     vocab: Option<String>,
     base: Option<String>,
     default_language: Option<String>,
+}
+
+impl Context {
+    /// Merge a (possibly remote) context into this one: term definitions are
+    /// overridden, and `@vocab`/`@base`/`@language` apply when present.
+    fn merge(&mut self, other: Context) {
+        for (key, def) in other.terms {
+            self.terms.insert(key, def);
+        }
+        if other.vocab.is_some() {
+            self.vocab = other.vocab;
+        }
+        if other.base.is_some() {
+            self.base = other.base;
+        }
+        if other.default_language.is_some() {
+            self.default_language = other.default_language;
+        }
+    }
 }
 
 fn parse_error(message: impl AsRef<str>) -> OntolithError {
@@ -155,6 +186,8 @@ pub struct JsonLdParser<'a> {
     context: Context,
     dictionary: &'a dyn DictionaryCodec,
     blank_count: usize,
+    remote_loader: Option<&'a dyn RemoteContextLoader>,
+    remote_context_cache: std::collections::HashMap<String, Context>,
 }
 
 impl<'a> JsonLdParser<'a> {
@@ -166,7 +199,16 @@ impl<'a> JsonLdParser<'a> {
             },
             dictionary,
             blank_count: 0,
+            remote_loader: None,
+            remote_context_cache: std::collections::HashMap::new(),
         }
+    }
+
+    /// Enable remote `@context` resolution through `loader`. Without a
+    /// loader, remote context URLs keep failing with `Unsupported`.
+    pub fn with_remote_context_loader(mut self, loader: &'a dyn RemoteContextLoader) -> Self {
+        self.remote_loader = Some(loader);
+        self
     }
 
     pub fn parse_into(
@@ -218,7 +260,11 @@ impl<'a> JsonLdParser<'a> {
                 }
                 Ok(())
             }
-            Value::String(_) => Err(OntolithError::Unsupported("json-ld remote @context URL")),
+            Value::String(url) => {
+                let ctx = self.remote_context_for(url)?;
+                self.context.merge(ctx);
+                Ok(())
+            }
             Value::Object(map) => {
                 // Pass 1: @vocab / @base / @language and raw string term
                 // definitions (prefixes), so pass 2 can expand prefixed IRIs.
@@ -300,6 +346,7 @@ impl<'a> JsonLdParser<'a> {
                             def.type_ = Some(match s {
                                 "@id" => TypeMapping::Id,
                                 "@vocab" => TypeMapping::Vocab,
+                                "@json" => TypeMapping::Json,
                                 other => TypeMapping::Datatype(expand_iri_ref(
                                     &self.context,
                                     other,
@@ -321,8 +368,29 @@ impl<'a> JsonLdParser<'a> {
                                 _ => Container::None,
                             };
                         }
+                        "@reverse" => {
+                            match v {
+                                Value::String(s) => {
+                                    def.reverse = Some(expand_iri_ref(&self.context, s, false));
+                                }
+                                Value::Bool(true) => {
+                                    // `@reverse: true` reverses the term's own IRI
+                                    // (resolved once @id is known).
+                                    def.reverse_own = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        "@nest" => {
+                            if let Value::String(s) = v {
+                                def.nest = Some(s.clone());
+                            }
+                        }
                         _ => {}
                     }
+                }
+                if def.reverse_own {
+                    def.reverse = def.id.clone();
                 }
                 Ok(def)
             }
@@ -332,7 +400,40 @@ impl<'a> JsonLdParser<'a> {
         }
     }
 
-    fn context_for(&self, map: &serde_json::Map<String, Value>) -> Result<Context, OntolithError> {
+    /// Resolve a remote `@context` URL through the injected loader, caching
+    /// the parsed context for the lifetime of this parse. Without a loader the
+    /// URL keeps failing with `Unsupported`.
+    fn remote_context_for(&mut self, url: &str) -> Result<Context, OntolithError> {
+        if let Some(cached) = self.remote_context_cache.get(url) {
+            return Ok(cached.clone());
+        }
+        let loader = self
+            .remote_loader
+            .ok_or(OntolithError::Unsupported("json-ld remote @context URL"))?;
+        let doc = loader.load(url)?;
+        let value: Value = serde_json::from_str(&doc)
+            .map_err(|e| parse_error(format!("invalid remote @context JSON: {e}")))?;
+        let mut sub = JsonLdParser {
+            context: Context {
+                base: self.context.base.clone(),
+                ..Context::default()
+            },
+            dictionary: self.dictionary,
+            blank_count: self.blank_count,
+            remote_loader: self.remote_loader,
+            remote_context_cache: std::collections::HashMap::new(),
+        };
+        sub.apply_context(&value)?;
+        let ctx = sub.context;
+        self.remote_context_cache
+            .insert(url.to_owned(), ctx.clone());
+        Ok(ctx)
+    }
+
+    fn context_for(
+        &mut self,
+        map: &serde_json::Map<String, Value>,
+    ) -> Result<Context, OntolithError> {
         let mut ctx = self.context.clone();
         if let Some(c) = map.get("@context") {
             match c {
@@ -341,9 +442,16 @@ impl<'a> JsonLdParser<'a> {
                         context: ctx.clone(),
                         dictionary: self.dictionary,
                         blank_count: self.blank_count,
+                        remote_loader: self.remote_loader,
+                        remote_context_cache: std::mem::take(&mut self.remote_context_cache),
                     };
                     parser.apply_context(c)?;
                     ctx = parser.context;
+                    self.remote_context_cache = parser.remote_context_cache;
+                }
+                Value::String(url) => {
+                    let remote = self.remote_context_for(url)?;
+                    ctx.merge(remote);
                 }
                 _ => {
                     return Err(OntolithError::Unsupported("json-ld remote @context URL"));
@@ -479,27 +587,117 @@ impl<'a> JsonLdParser<'a> {
             .and_then(Value::as_str);
 
         for (key, val) in map {
-            if key.starts_with('@') {
-                continue;
-            }
             let def = ctx.terms.get(key).cloned().unwrap_or_default();
             let predicate = if let Some(id) = &def.id {
                 id.clone()
             } else {
                 expand_iri_ref(&ctx, key, true)
             };
-            if predicate.starts_with('@') {
-                continue;
+            match predicate.as_str() {
+                "@nest" => {
+                    let nested = val
+                        .as_object()
+                        .ok_or_else(|| parse_error("@nest value must be an object"))?;
+                    for (nk, nv) in nested {
+                        let ndef = ctx.terms.get(nk).cloned().unwrap_or_default();
+                        let npred = ndef
+                            .id
+                            .clone()
+                            .unwrap_or_else(|| expand_iri_ref(&ctx, nk, true));
+                        if npred.starts_with('@') {
+                            continue;
+                        }
+                        self.emit_values(
+                            subject,
+                            &npred,
+                            nv,
+                            &ndef,
+                            node_language,
+                            graph.as_ref(),
+                            sink,
+                        )?;
+                    }
+                }
+                "@included" => {
+                    for item in items_of(val) {
+                        let _ = self.node_object(item, graph.clone(), sink)?;
+                    }
+                }
+                "@reverse" => {
+                    let rmap = val
+                        .as_object()
+                        .ok_or_else(|| parse_error("@reverse value must be an object"))?;
+                    for (rk, rv) in rmap {
+                        let rdef = ctx.terms.get(rk).cloned().unwrap_or_default();
+                        let rpred = rdef
+                            .id
+                            .clone()
+                            .unwrap_or_else(|| expand_iri_ref(&ctx, rk, true));
+                        if rpred.starts_with('@') {
+                            continue;
+                        }
+                        self.emit_reverse(
+                            &subject_term,
+                            &rpred,
+                            rv,
+                            &rdef,
+                            node_language,
+                            graph.as_ref(),
+                            sink,
+                        )?;
+                    }
+                }
+                _ => {
+                    if predicate.starts_with('@') {
+                        continue;
+                    }
+                    if def.nest.is_some()
+                        && let Some(nested) = val.as_object()
+                    {
+                        // A term whose definition carries `@nest` consumes a
+                        // map of properties, emitted as if on the node itself.
+                        for (nk, nv) in nested {
+                            let ndef = ctx.terms.get(nk).cloned().unwrap_or_default();
+                            let npred = ndef
+                                .id
+                                .clone()
+                                .unwrap_or_else(|| expand_iri_ref(&ctx, nk, true));
+                            if npred.starts_with('@') {
+                                continue;
+                            }
+                            self.emit_values(
+                                subject,
+                                &npred,
+                                nv,
+                                &ndef,
+                                node_language,
+                                graph.as_ref(),
+                                sink,
+                            )?;
+                        }
+                    } else if let Some(rev_pred) = &def.reverse {
+                        self.emit_reverse(
+                            &subject_term,
+                            rev_pred,
+                            val,
+                            &def,
+                            node_language,
+                            graph.as_ref(),
+                            sink,
+                        )?;
+                    } else {
+                        self.emit_values(
+                            subject,
+                            &predicate,
+                            val,
+                            &def,
+                            node_language,
+                            graph.as_ref(),
+                            sink,
+                        )?;
+                    }
+                }
             }
-            self.emit_values(
-                subject,
-                &predicate,
-                val,
-                &def,
-                node_language,
-                graph.as_ref(),
-                sink,
-            )?;
         }
         Ok(Some(subject_term))
     }
@@ -535,7 +733,7 @@ impl<'a> JsonLdParser<'a> {
                     let tag = LanguageTag::parse(lang)
                         .map_err(|e| parse_error(format!("invalid language tag: {e}")))?;
                     for item in items_of(val) {
-                        let obj = self.value_term(item, def, Some(tag.as_str()), sink)?;
+                        let obj = self.value_term(item, def, Some(tag.as_str()), graph, sink)?;
                         if let Some(o) = obj {
                             self.emit(subject, predicate, o, graph, sink)?;
                         }
@@ -572,9 +770,38 @@ impl<'a> JsonLdParser<'a> {
         graph: Option<&Iri>,
         sink: &mut dyn RdfEventSink,
     ) -> Result<(), OntolithError> {
-        let obj = self.value_term(item, def, node_language, sink)?;
+        let obj = self.value_term(item, def, node_language, graph, sink)?;
         if let Some(o) = obj {
             self.emit(subject, predicate, o, graph, sink)?;
+        }
+        Ok(())
+    }
+
+    /// Emit a reversed triple (`@reverse`): the property value becomes the
+    /// subject and the current node the object. Literal values cannot head a
+    /// triple and are skipped.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_reverse(
+        &mut self,
+        subject_term: &Term,
+        predicate: &str,
+        value: &Value,
+        def: &TermDef,
+        node_language: Option<&str>,
+        graph: Option<&Iri>,
+        sink: &mut dyn RdfEventSink,
+    ) -> Result<(), OntolithError> {
+        for item in items_of(value) {
+            let obj = self.value_term(item, def, node_language, graph, sink)?;
+            let (rev_subject, rev_object) = match obj {
+                Some(Term::Iri(iri)) => (
+                    self.dictionary.encode_node(iri.as_str()),
+                    subject_term.clone(),
+                ),
+                Some(Term::BlankNode(node)) => (node, subject_term.clone()),
+                _ => continue,
+            };
+            self.emit(rev_subject, predicate, rev_object, graph, sink)?;
         }
         Ok(())
     }
@@ -584,6 +811,7 @@ impl<'a> JsonLdParser<'a> {
         item: &Value,
         def: &TermDef,
         node_language: Option<&str>,
+        graph: Option<&Iri>,
         sink: &mut dyn RdfEventSink,
     ) -> Result<Option<Term>, OntolithError> {
         match item {
@@ -593,6 +821,11 @@ impl<'a> JsonLdParser<'a> {
                     Ok(Some(self.iri_or_blank(s, &self.context)?))
                 } else if def.type_ == Some(TypeMapping::Vocab) {
                     Ok(Some(Term::iri(expand_iri_ref(&self.context, s, true))))
+                } else if def.type_ == Some(TypeMapping::Json) {
+                    Ok(Some(Term::literal(LiteralValue::Typed {
+                        value: s.clone(),
+                        datatype: Iri::new(RDF_JSON),
+                    })))
                 } else if let Some(TypeMapping::Datatype(dt)) = &def.type_ {
                     Ok(Some(Term::literal(coerce_literal(s.clone(), dt))))
                 } else if let Some(lang) = def
@@ -627,13 +860,13 @@ impl<'a> JsonLdParser<'a> {
                     let has_properties = map.keys().any(|k| !k.starts_with('@'));
                     if has_properties {
                         // Embedded node: emit nested triples and reference it.
-                        self.node_object(item, None, sink)
+                        self.node_object(item, graph.cloned(), sink)
                     } else {
                         // Pure reference to an existing node.
                         Ok(Some(self.iri_or_blank(id, &self.context)?))
                     }
                 } else {
-                    self.node_object(item, None, sink)
+                    self.node_object(item, graph.cloned(), sink)
                 }
             }
             _ => Err(parse_error("unsupported JSON value in property position")),
@@ -652,6 +885,14 @@ impl<'a> JsonLdParser<'a> {
             let dt = t
                 .as_str()
                 .ok_or_else(|| parse_error("@type in value object must be a string"))?;
+            if dt == "@json" {
+                let lexical = serde_json::to_string(v)
+                    .map_err(|e| parse_error(format!("cannot serialize @json value: {e}")))?;
+                return Ok(Some(Term::literal(LiteralValue::Typed {
+                    value: lexical,
+                    datatype: Iri::new(RDF_JSON),
+                })));
+            }
             let dt = expand_iri_ref(&self.context, dt, true);
             let lexical = match v {
                 Value::String(s) => s.clone(),
@@ -694,7 +935,7 @@ impl<'a> JsonLdParser<'a> {
         let mut prev = head;
         let len = items.len();
         for (i, item) in items.iter().enumerate() {
-            let obj = self.value_term(item, def, node_language, sink)?;
+            let obj = self.value_term(item, def, node_language, graph, sink)?;
             if let Some(o) = obj {
                 self.emit(prev, RDF_FIRST, o, graph, sink)?;
                 if i + 1 < len {
@@ -725,6 +966,21 @@ pub fn parse_json_ld(
     sink: &mut dyn RdfEventSink,
 ) -> Result<(), OntolithError> {
     JsonLdParser::new(dictionary, base_iri).parse_into(input, sink)
+}
+
+/// Parse a JSON-LD document resolving remote `@context` URLs through
+/// `loader`. Without a loader, remote contexts keep failing with
+/// `Unsupported` (see [`parse_json_ld`]).
+pub fn parse_json_ld_with_remote_context(
+    input: &str,
+    dictionary: &dyn DictionaryCodec,
+    base_iri: Option<String>,
+    loader: &dyn RemoteContextLoader,
+    sink: &mut dyn RdfEventSink,
+) -> Result<(), OntolithError> {
+    JsonLdParser::new(dictionary, base_iri)
+        .with_remote_context_loader(loader)
+        .parse_into(input, sink)
 }
 
 #[cfg(test)]
@@ -960,5 +1216,195 @@ mod tests {
 
         let err = parse_json_ld("{not json", &dict, None, &mut sink).unwrap_err();
         assert!(err.to_string().contains("invalid JSON"));
+    }
+
+    #[test]
+    fn parses_reverse_properties() {
+        // Term definition with `@reverse: true` and a node-level `@reverse`
+        // map both emit the value as subject and the node as object.
+        let (sink, dict) = parse_doc(
+            r#"{
+              "@context": {
+                "parentOf": {"@id": "http://ex.org/parentOf", "@reverse": true},
+                "knows": {"@id": "http://ex.org/knows", "@type": "@id"},
+                "name": "http://ex.org/name"
+              },
+              "@id": "urn:child",
+              "parentOf": {"@id": "urn:parent", "name": "P"},
+              "@reverse": {"knows": "urn:knower"}
+            }"#,
+        );
+        assert_has(
+            &sink,
+            &dict,
+            "urn:parent",
+            "http://ex.org/parentOf",
+            Term::iri("urn:child"),
+        );
+        assert_has(
+            &sink,
+            &dict,
+            "urn:knower",
+            "http://ex.org/knows",
+            Term::iri("urn:child"),
+        );
+    }
+
+    #[test]
+    fn parses_nested_properties() {
+        // `@nest` keyword and a term with an `@nest` definition flatten the
+        // nested map onto the node itself.
+        let (sink, dict) = parse_doc(
+            r#"{
+              "@context": {
+                "name": "http://ex.org/name",
+                "age": {"@id": "http://ex.org/age", "@nest": "details"},
+                "details": "@nest"
+              },
+              "@id": "urn:a",
+              "@nest": {"name": "N", "age": 7}
+            }"#,
+        );
+        assert_has(
+            &sink,
+            &dict,
+            "urn:a",
+            "http://ex.org/name",
+            Term::literal(LiteralValue::String("N".into())),
+        );
+        assert_has(
+            &sink,
+            &dict,
+            "urn:a",
+            "http://ex.org/age",
+            Term::literal(LiteralValue::Integer(7)),
+        );
+    }
+
+    #[test]
+    fn parses_included_nodes() {
+        let (sink, dict) = parse_doc(
+            r#"{
+              "@context": {"name": "http://ex.org/name"},
+              "@id": "urn:root",
+              "name": "Root",
+              "@included": [{"@id": "urn:inc", "name": "Included"}]
+            }"#,
+        );
+        assert_has(
+            &sink,
+            &dict,
+            "urn:inc",
+            "http://ex.org/name",
+            Term::literal(LiteralValue::String("Included".into())),
+        );
+        // The included node is not linked to the including node.
+        assert!(!sink.dataset.default_graph.iter().any(|t| {
+            t.predicate.as_str() == "http://ex.org/name"
+                && t.subject == dict.encode_node("urn:root")
+                && t.object == Term::iri("urn:inc")
+        }));
+    }
+
+    #[test]
+    fn parses_json_literals() {
+        let (sink, dict) = parse_doc(
+            r#"{
+              "@context": {
+                "meta": {"@id": "http://ex.org/meta", "@type": "@json"}
+              },
+              "@id": "urn:a",
+              "meta": {"@value": {"k": [1, "v", true]}, "@type": "@json"}
+            }"#,
+        );
+        let json_hit = sink.dataset.default_graph.iter().any(|t| {
+            t.subject == dict.encode_node("urn:a")
+                && t.predicate.as_str() == "http://ex.org/meta"
+                && matches!(
+                    &t.object,
+                    Term::Literal(LiteralValue::Typed { datatype, value })
+                        if datatype.as_str() == RDF_JSON && value.contains("\"k\"")
+                )
+        });
+        assert!(json_hit, "expected rdf:JSON literal");
+    }
+
+    struct StaticContextLoader(&'static str);
+
+    impl RemoteContextLoader for StaticContextLoader {
+        fn load(&self, _url: &str) -> Result<String, OntolithError> {
+            Ok(self.0.to_owned())
+        }
+    }
+
+    #[test]
+    fn resolves_remote_context_via_loader() {
+        let dict = InMemoryDictionary::new();
+        let mut sink = DatasetSink::default();
+        let loader = StaticContextLoader(
+            r#"{"name": "http://ex.org/name", "knows": {"@id": "http://ex.org/knows", "@type": "@id"}}"#,
+        );
+        parse_json_ld_with_remote_context(
+            r#"{
+              "@context": "https://example.org/ctx",
+              "@id": "urn:alice",
+              "name": "Alice",
+              "knows": "urn:bob"
+            }"#,
+            &dict,
+            None,
+            &loader,
+            &mut sink,
+        )
+        .expect("parse with remote context");
+
+        let has = |subject: &str, predicate: &str, object: Term| {
+            sink.dataset.default_graph.iter().any(|t| {
+                t.subject == dict.encode_node(subject)
+                    && t.predicate.as_str() == predicate
+                    && t.object == object
+            })
+        };
+        assert!(has(
+            "urn:alice",
+            "http://ex.org/name",
+            Term::literal(LiteralValue::String("Alice".into()))
+        ));
+        assert!(has(
+            "urn:alice",
+            "http://ex.org/knows",
+            Term::iri("urn:bob")
+        ));
+    }
+
+    #[test]
+    fn remote_context_cached_across_reuse() {
+        let dict = InMemoryDictionary::new();
+        let mut sink = DatasetSink::default();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader = CountingLoader {
+            context: r#"{"name": "http://ex.org/name"}"#.to_owned(),
+            calls: std::sync::Arc::clone(&calls),
+        };
+        let doc = r#"{
+          "@context": ["https://example.org/ctx", "https://example.org/ctx"],
+          "@id": "urn:a",
+          "name": "A"
+        }"#;
+        parse_json_ld_with_remote_context(doc, &dict, None, &loader, &mut sink).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    struct CountingLoader {
+        context: String,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl RemoteContextLoader for CountingLoader {
+        fn load(&self, _url: &str) -> Result<String, OntolithError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(self.context.clone())
+        }
     }
 }

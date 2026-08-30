@@ -10,7 +10,8 @@ use crate::domain::{DatasetSink, ParseFormat, ParseOutput, ParseRequest, RdfEven
 use ontolith_core::error::OntolithError;
 use ontolith_storage::application::DictionaryCodec;
 
-use self::json_ld::parse_json_ld;
+pub use self::json_ld::RemoteContextLoader;
+use self::json_ld::{parse_json_ld, parse_json_ld_with_remote_context};
 use self::nt::{LineFormat, parse_document_streaming};
 use self::turtle::{parse_trig, parse_turtle};
 
@@ -117,6 +118,29 @@ pub fn parse_json_ld_doc(
         input,
         dictionary,
     )
+}
+
+pub fn parse_json_ld_doc_with_remote_context(
+    input: &str,
+    dictionary: &dyn DictionaryCodec,
+    base_iri: Option<String>,
+    loader: &dyn RemoteContextLoader,
+) -> Result<ParseOutput, OntolithError> {
+    let mut sink = DatasetSink::default();
+    parse_json_ld_with_remote_context(input, dictionary, base_iri, loader, &mut sink)?;
+    let mut stats = sink.stats;
+    stats.line_count = input.lines().count();
+    stats.triple_count = sink.dataset.default_graph.len();
+    stats.quad_count = sink
+        .dataset
+        .named_graphs
+        .iter()
+        .map(|g| g.triples.len())
+        .sum();
+    Ok(ParseOutput {
+        dataset: sink.dataset,
+        stats,
+    })
 }
 
 pub fn status() -> &'static str {
