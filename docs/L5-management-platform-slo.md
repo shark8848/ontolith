@@ -178,7 +178,37 @@ SLO（R1）：
 
 ---
 
-## 6. 关联
+## 6. 管理面备份调度（P2-05，2026-08-30）
+
+管理面（`ontolith-management-server`）提供按需与定时持久备份，经管理面 ACL
+（`x-ontolith-management-key`）保护，底层走 `StorageEngine::create_backup`
+（RocksDB BackupEngine，先 flush memtable 保证快照耐久；内存后端返回 501）。
+
+### 端点
+
+- `POST /admin/data/backup` —— 立即执行一次备份（写 key 权限），返回
+  `{"status","dir","created_at_ms"}`；备份写入 `<base>/backup-<ms>`。
+- `GET /admin/data/backup` —— 状态 + 近 20 次运行历史（读 key 权限），含
+  `base_dir`、`schedule`、`run_count`、`runs[]`（`dir/created_at_ms/ok/error`）。
+- `GET /admin/data/backup/schedule` —— 当前调度配置。
+- `POST /admin/data/backup/schedule` —— 设置调度
+  `{"enabled": bool, "interval_seconds": n}`（n>0）；`enabled=true` 幂等启动
+  后台调度线程，按最近一次运行时间判定是否到期。
+
+### 环境变量契约
+
+- `ONTOLITH_BACKUP_DIR` —— 备份基目录（缺省回退到 `<ONTOLITH_DATA_DIR>/backups`）。
+- `ONTOLITH_BACKUP_INTERVAL_SECONDS` —— 启动即启用定时备份的间隔（>0）；缺省不启用。
+
+### 恢复路径
+
+在线恢复不在本端点范围内（RocksDB restore 要求目标库未被打开）：离线恢复沿用
+`RocksDbStorageEngine::restore_backup(backup_dir, target_db_dir)`（storage 层
+往返测试 + 本层 Rocks 端到端测试覆盖：备份 → 恢复到新目录 → 重开引擎验证数据）。
+
+---
+
+## 7. 关联
 
 - `docs/L5-ontolith-access-security.md`
 - `docs/L5-systemd-service.md`

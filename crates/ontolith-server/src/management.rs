@@ -21,7 +21,8 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MGMT_BIND_ENV: &str = "ONTOLITH_MANAGEMENT_BIND";
@@ -47,9 +48,37 @@ const MGMT_KEY_HEADER: &str = "x-ontolith-management-key";
 const MGMT_RUNTIME_PROBE_TIMEOUT_MS_ENV: &str = "ONTOLITH_MANAGEMENT_PROBE_TIMEOUT_MS";
 const TLS_CERT_ENV: &str = "ONTOLITH_TLS_CERT";
 const TLS_KEY_ENV: &str = "ONTOLITH_TLS_KEY";
+const BACKUP_DIR_ENV: &str = "ONTOLITH_BACKUP_DIR";
+const BACKUP_INTERVAL_ENV: &str = "ONTOLITH_BACKUP_INTERVAL_SECONDS";
 
 const DEFAULT_MGMT_BIND: &str = "127.0.0.1:9091";
 const DEFAULT_API_BIND: &str = "127.0.0.1:8080";
+
+const BACKUP_RUN_HISTORY_CAP: usize = 20;
+
+/// Backup management state (P2-05 运维轨): one-shot + scheduled durable
+/// backups through the management ACL, backed by [`StorageEngine::create_backup`].
+#[derive(Default)]
+struct BackupManager {
+    base_dir: Option<PathBuf>,
+    schedule: Mutex<BackupSchedule>,
+    runs: Mutex<Vec<BackupRun>>,
+    scheduler_started: AtomicBool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BackupSchedule {
+    enabled: bool,
+    interval_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+struct BackupRun {
+    dir: String,
+    created_at_ms: u64,
+    ok: bool,
+    error: Option<String>,
+}
 
 pub struct ManagementState {
     app: Arc<AppState>,
@@ -58,6 +87,7 @@ pub struct ManagementState {
     acl: ManagementAcl,
     runtime_probe_timeout_ms: u64,
     tls_enabled: bool,
+    backup: BackupManager,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -104,7 +134,9 @@ impl ManagementState {
         acl: ManagementAcl,
         runtime_probe_timeout_ms: u64,
         tls_enabled: bool,
+        backup_dir: Option<PathBuf>,
     ) -> Arc<Self> {
+        let base_dir = backup_dir.or_else(|| app.data_dir.as_ref().map(|d| d.join("backups")));
         Arc::new(Self {
             app,
             management_bind,
@@ -112,6 +144,10 @@ impl ManagementState {
             acl,
             runtime_probe_timeout_ms,
             tls_enabled,
+            backup: BackupManager {
+                base_dir,
+                ..BackupManager::default()
+            },
         })
     }
 
@@ -136,6 +172,10 @@ impl ManagementState {
             ("GET", "/admin/data/audit") => self.admin_data_audit(&req),
             ("POST", "/admin/data/replicate") => self.admin_data_replicate(&req),
             ("POST", "/admin/data/rebalance") => self.admin_data_rebalance(&req),
+            ("GET", "/admin/data/backup") => self.admin_data_backup_status(&req),
+            ("POST", "/admin/data/backup") => self.admin_data_backup(&req),
+            ("GET", "/admin/data/backup/schedule") => self.admin_data_backup_schedule_get(&req),
+            ("POST", "/admin/data/backup/schedule") => self.admin_data_backup_schedule(&req),
             ("GET", "/admin/tenants") => self.admin_tenants_list(&req),
             ("POST", "/admin/tenants") => self.admin_tenants_create(&req),
             ("PUT", p) if p.starts_with("/admin/tenants/") => self.admin_tenants_update(&req, p),
@@ -611,6 +651,210 @@ impl ManagementState {
         ))
     }
 
+    /// Trigger a durable backup now (`POST /admin/data/backup`).
+    fn admin_data_backup(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_mutation(req)?;
+        let run = self.run_backup(None)?;
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"status":"ok","dir":{},"created_at_ms":{}}}"#,
+                json_string(&run.dir),
+                run.created_at_ms,
+            ),
+        ))
+    }
+
+    /// Backup status + history (`GET /admin/data/backup`).
+    fn admin_data_backup_status(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_view(req)?;
+        let schedule = self
+            .backup
+            .schedule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let runs = self.backup.runs.lock().unwrap_or_else(|e| e.into_inner());
+        let runs_json: Vec<String> = runs
+            .iter()
+            .map(|r| {
+                format!(
+                    r#"{{"dir":{},"created_at_ms":{},"ok":{},"error":{}}}"#,
+                    json_string(&r.dir),
+                    r.created_at_ms,
+                    r.ok,
+                    r.error
+                        .as_deref()
+                        .map(json_string)
+                        .unwrap_or_else(|| "null".to_owned()),
+                )
+            })
+            .collect();
+        let last_run_ms = runs.first().map(|r| r.created_at_ms).unwrap_or(0);
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"base_dir":{},"schedule":{{"enabled":{},"interval_seconds":{}}},"run_count":{},"last_run_ms":{},"runs":[{}]}}"#,
+                self.backup
+                    .base_dir
+                    .as_ref()
+                    .map(|p| json_string(&p.to_string_lossy()))
+                    .unwrap_or_else(|| "null".to_owned()),
+                schedule.enabled,
+                schedule.interval_seconds,
+                runs.len(),
+                last_run_ms,
+                runs_json.join(","),
+            ),
+        ))
+    }
+
+    /// Read the current schedule (`GET /admin/data/backup/schedule`).
+    fn admin_data_backup_schedule_get(
+        &self,
+        req: &HttpRequest,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_view(req)?;
+        let schedule = self
+            .backup
+            .schedule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"enabled":{},"interval_seconds":{}}}"#,
+                schedule.enabled, schedule.interval_seconds,
+            ),
+        ))
+    }
+
+    /// Configure the backup schedule (`POST /admin/data/backup/schedule`,
+    /// body `{"enabled": bool, "interval_seconds": n}`). Enabling spawns the
+    /// background scheduler (idempotent).
+    fn admin_data_backup_schedule(
+        self: &Arc<Self>,
+        req: &HttpRequest,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_mutation(req)?;
+        let body = req.body_str();
+        let value: serde_json::Value = serde_json::from_str(body)
+            .map_err(|_| OntolithError::InvalidArgument("invalid JSON body"))?;
+        let enabled = value
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let interval = value
+            .get("interval_seconds")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| *n > 0)
+            .ok_or(OntolithError::InvalidArgument(
+                "interval_seconds must be a positive integer",
+            ))?;
+        {
+            let mut schedule = self
+                .backup
+                .schedule
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            schedule.enabled = enabled;
+            schedule.interval_seconds = interval;
+        }
+        if enabled {
+            self.spawn_scheduler();
+        }
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"enabled":{},"interval_seconds":{}}}"#,
+                enabled, interval,
+            ),
+        ))
+    }
+
+    /// Execute a backup into `base_dir/<backup-<ms>>` (or `override_dir`) and
+    /// record the run in the bounded history. Errors are recorded and
+    /// propagated to the caller.
+    fn run_backup(&self, override_dir: Option<PathBuf>) -> Result<BackupRun, OntolithError> {
+        let base = self.backup.base_dir.clone().ok_or(OntolithError::InvalidState(
+            "no backup base directory configured (set ONTOLITH_BACKUP_DIR or ONTOLITH_DATA_DIR)",
+        ))?;
+        let target = override_dir.unwrap_or_else(|| base.join(format!("backup-{}", now_ms())));
+        let dir = target.to_string_lossy().into_owned();
+        match self.app.storage.create_backup(&target) {
+            Ok(()) => {
+                let run = BackupRun {
+                    dir,
+                    created_at_ms: now_ms(),
+                    ok: true,
+                    error: None,
+                };
+                self.record_run(run.clone());
+                Ok(run)
+            }
+            Err(e) => {
+                let run = BackupRun {
+                    dir,
+                    created_at_ms: now_ms(),
+                    ok: false,
+                    error: Some(e.message().to_owned()),
+                };
+                self.record_run(run);
+                Err(e)
+            }
+        }
+    }
+
+    fn record_run(&self, run: BackupRun) {
+        let mut runs = self.backup.runs.lock().unwrap_or_else(|e| e.into_inner());
+        runs.insert(0, run);
+        runs.truncate(BACKUP_RUN_HISTORY_CAP);
+    }
+
+    /// Spawn the background scheduler (once): when the schedule is enabled it
+    /// fires a backup at most once per `interval_seconds` based on the last
+    /// recorded run.
+    fn spawn_scheduler(self: &Arc<Self>) {
+        if self.backup.scheduler_started.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let this = Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("mgmt-backup-scheduler".to_owned())
+            .spawn(move || {
+                loop {
+                    let (enabled, interval) = {
+                        let schedule = this
+                            .backup
+                            .schedule
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        (schedule.enabled, schedule.interval_seconds)
+                    };
+                    if !enabled || interval == 0 {
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                    let due = {
+                        let runs = this.backup.runs.lock().unwrap_or_else(|e| e.into_inner());
+                        match runs.first() {
+                            Some(last) => {
+                                now_ms().saturating_sub(last.created_at_ms) >= interval * 1000
+                            }
+                            None => true,
+                        }
+                    };
+                    if due {
+                        let _ = this.run_backup(None);
+                    }
+                    std::thread::sleep(Duration::from_secs(interval.max(1)));
+                }
+            });
+    }
+
     /// Management-plane tenant registry (tenant management). The durable
     /// registry lives in the gateway process (single RocksDB owner, shared
     /// with the gateway authenticator); the management plane enforces the
@@ -718,13 +962,37 @@ pub fn run() -> Result<(), String> {
     enforce_tls_gate(&management_bind, tls.is_some())?;
 
     let app = build_gateway_app_state_from_env()?;
+    let backup_dir = env::var(BACKUP_DIR_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
     let state = ManagementState::new(
         app,
         management_bind.clone(),
         acl.clone(),
         runtime_probe_timeout_ms,
         tls.is_some(),
+        backup_dir,
     );
+
+    // Boot-time backup schedule (P2-05): ONTOLITH_BACKUP_INTERVAL_SECONDS > 0
+    // enables the background scheduler; the base directory falls back to
+    // ONTOLITH_BACKUP_DIR or <data_dir>/backups.
+    if let Ok(interval) = env::var(BACKUP_INTERVAL_ENV)
+        && let Ok(seconds) = interval.trim().parse::<u64>()
+        && seconds > 0
+    {
+        {
+            let mut schedule = state
+                .backup
+                .schedule
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            schedule.enabled = true;
+            schedule.interval_seconds = seconds;
+        }
+        state.spawn_scheduler();
+    }
 
     println!(
         "ontolith-management-server starting: bind={}, runtime_bind={}, backend={}, acl_read_key={}, acl_write_key={}, probe_timeout_ms={}, tls={}, jwt={}, oidc={}",
@@ -1620,7 +1888,7 @@ mod tests {
             InMemoryAuditLog::new(),
             TenantMode::Disabled,
         );
-        ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl, 10, false)
+        ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl, 10, false, None)
     }
 
     struct StaticFetcher(String);
@@ -2077,7 +2345,7 @@ mod tests {
             read_key: Some("r".to_owned()),
             write_key: Some("w".to_owned()),
         };
-        let state = ManagementState::new(mg_app, "127.0.0.1:9091".to_owned(), acl, 10, false);
+        let state = ManagementState::new(mg_app, "127.0.0.1:9091".to_owned(), acl, 10, false, None);
 
         // Read key cannot mutate.
         let resp = dispatch_for_test(
@@ -2134,5 +2402,188 @@ mod tests {
         // Wake the blocked `accept` so the serve loop observes the stop flag.
         let _ = std::net::TcpStream::connect(&bind);
         handle.join().expect("gateway server thread");
+    }
+
+    fn post_json(path: &str, body: &str, key: Option<&str>) -> HttpRequest {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "application/json".to_owned());
+        if let Some(k) = key {
+            headers.insert("X-Ontolith-Management-Key".to_owned(), k.to_owned());
+        }
+        HttpRequest {
+            method: "POST".to_owned(),
+            path: path.to_owned(),
+            query: HashMap::new(),
+            headers,
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn backup_endpoints_enforce_management_acl() {
+        let acl = ManagementAcl {
+            read_key: Some("r".to_owned()),
+            write_key: Some("w".to_owned()),
+        };
+        let state = test_state_with_acl(HeaderAuthenticator::default(), acl);
+
+        // No key / read key cannot trigger a backup -> 403 (ACL enforced).
+        let resp = dispatch_for_test(&state, post_json("/admin/data/backup", "{}", None));
+        assert_eq!(resp.status, 403);
+        let resp = dispatch_for_test(&state, post_json("/admin/data/backup", "{}", Some("r")));
+        assert_eq!(resp.status, 403, "read key must not mutate");
+
+        // Read key can read status.
+        let resp = dispatch_for_test(&state, req_with_key("GET", "/admin/data/backup", "r"));
+        assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn backup_schedule_config_roundtrips() {
+        let acl = ManagementAcl {
+            write_key: Some("w".to_owned()),
+            ..ManagementAcl::default()
+        };
+        let state = test_state_with_acl(HeaderAuthenticator::default(), acl);
+
+        let resp = dispatch_for_test(
+            &state,
+            post_json(
+                "/admin/data/backup/schedule",
+                r#"{"enabled":true,"interval_seconds":3600}"#,
+                Some("w"),
+            ),
+        );
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+
+        let resp = dispatch_for_test(
+            &state,
+            req_with_key("GET", "/admin/data/backup/schedule", "w"),
+        );
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("\"enabled\":true"), "body={body}");
+        assert!(body.contains("\"interval_seconds\":3600"), "body={body}");
+
+        // Invalid interval -> 400.
+        let resp = dispatch_for_test(
+            &state,
+            post_json(
+                "/admin/data/backup/schedule",
+                r#"{"enabled":true,"interval_seconds":0}"#,
+                Some("w"),
+            ),
+        );
+        assert_eq!(resp.status, 400);
+    }
+
+    #[test]
+    fn backup_run_on_memory_backend_records_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppState::new_memory_with_audit(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator::default(),
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+        );
+        let state = ManagementState::new(
+            app,
+            "127.0.0.1:9091".to_owned(),
+            ManagementAcl::default(),
+            10,
+            false,
+            Some(dir.path().join("backups")),
+        );
+        // Memory backend does not implement backups: endpoint reports 501 and
+        // records the failed run in history.
+        let resp = dispatch_for_test(&state, post_json("/admin/data/backup", "{}", None));
+        assert_eq!(resp.status, 501, "{}", String::from_utf8_lossy(&resp.body));
+
+        let resp = dispatch_for_test(&state, req("GET", "/admin/data/backup"));
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("\"run_count\":1"), "body={body}");
+        assert!(body.contains("\"ok\":false"), "body={body}");
+        assert!(body.contains("\"error\":"), "body={body}");
+    }
+
+    #[cfg(feature = "rocksdb-backend")]
+    #[test]
+    fn backup_run_with_rocks_backend_creates_durable_snapshot() {
+        use crate::app::default_cluster;
+        use ontolith_storage::application::StorageEngine as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db");
+        let backup_dir = dir.path().join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        let app = AppState::new_rocksdb_with_cluster(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator::default(),
+            db_path.clone(),
+            InMemoryAuditLog::new(),
+            TenantMode::Disabled,
+            default_cluster(),
+            InferenceConfig::default(),
+            crate::app::SemanticConfig::default(),
+        )
+        .expect("open rocksdb state");
+        let state = ManagementState::new(
+            app,
+            "127.0.0.1:9091".to_owned(),
+            ManagementAcl::default(),
+            10,
+            false,
+            Some(backup_dir.clone()),
+        );
+
+        // Seed one triple through the gateway, then trigger a management backup.
+        let ingest = state.app.handle(HttpRequest {
+            method: "POST".to_owned(),
+            path: "/data/nt".to_owned(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: b"<urn:ex:s> <urn:ex:p> \"durable\" .".to_vec(),
+        });
+        assert_eq!(ingest.status, 200);
+
+        let resp = dispatch_for_test(&state, post_json("/admin/data/backup", "{}", None));
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+        let snapshot_dir = backup_dir
+            .read_dir()
+            .unwrap()
+            .next()
+            .expect("backup snapshot subdir")
+            .expect("read snapshot entry")
+            .path();
+        assert!(
+            snapshot_dir.read_dir().unwrap().next().is_some(),
+            "backup snapshot must contain engine files: {snapshot_dir:?}"
+        );
+
+        // Restore the snapshot into a fresh directory and verify the triple
+        // survives (offline restore path, mirrors storage roundtrip).
+        let restored = dir.path().join("restored");
+        ontolith_storage::infrastructure::RocksDbStorageEngine::restore_backup(
+            &snapshot_dir,
+            &restored,
+        )
+        .expect("restore backup");
+        let engine = ontolith_storage::open_durable_engine(&restored).expect("reopen restored");
+        let triples = engine.default_graph_triples();
+        assert_eq!(triples.len(), 1, "triples={triples:?}");
+        assert_eq!(
+            triples[0].object,
+            ontolith_rdf::domain::Term::literal(ontolith_core::domain::LiteralValue::String(
+                "durable".into()
+            ))
+        );
+
+        // Status endpoint reports the successful run.
+        let resp = dispatch_for_test(&state, req("GET", "/admin/data/backup"));
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("\"run_count\":1"), "body={body}");
+        assert!(body.contains("\"ok\":true"), "body={body}");
     }
 }

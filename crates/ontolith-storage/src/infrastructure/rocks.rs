@@ -1309,6 +1309,10 @@ impl WriteAheadLog for RocksDbStorageEngine {
 }
 
 impl StorageEngine for RocksDbStorageEngine {
+    fn create_backup(&self, backup_dir: &Path) -> Result<(), OntolithError> {
+        RocksDbStorageEngine::create_backup(self, backup_dir)
+    }
+
     fn apply_write_batch(&self, batch: &WriteBatch) -> Result<(), OntolithError> {
         let mut guard = self.state.write().map_err(|_| {
             self.failed_stage_batches_count

@@ -11,6 +11,7 @@ use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::{Quad, Term, Triple};
 use ontolith_transaction::application::{TransactionManager, UnitOfWork};
 use ontolith_transaction::domain::{TxnId, TxnMode};
+use std::path::Path;
 
 /// Bidirectional dictionary: lexical form ↔ stable [`NodeId`].
 ///
@@ -72,6 +73,14 @@ pub trait WriteAheadLog: Send + Sync {
 /// without versioning (RocksDB today) fall back to the latest committed state.
 pub trait StorageEngine: Send + Sync {
     fn apply_write_batch(&self, batch: &WriteBatch) -> Result<(), OntolithError>;
+
+    /// Create a full durable backup into `backup_dir` (RocksDB BackupEngine;
+    /// memtables are flushed first so the snapshot is durable). Engines
+    /// without backup support report [`OntolithError::Unsupported`].
+    fn create_backup(&self, backup_dir: &Path) -> Result<(), OntolithError> {
+        let _ = backup_dir;
+        Err(OntolithError::Unsupported("backup"))
+    }
 
     fn commit_transaction(&self, txn_id: TxnId) -> Result<(), OntolithError>;
 
