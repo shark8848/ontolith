@@ -2,8 +2,8 @@
 
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
-数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.70，2026-08-31）
-状态: Active（Classic PAT 已配置，随增量同步；2026-08-29 全量同步完成：65 条（63 更新 + 2 新建）0 失败，回读 total=65；2026-08-30 新增 WBS-02 JSON-LD 导入卡 + 备份调度接入管理面卡（均已完成/P1），回读 total=67）
+数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.73，2026-09-02）
+状态: Active（Classic PAT 已配置，随增量同步；2026-08-29 全量同步完成：65 条（63 更新 + 2 新建）0 失败，回读 total=65；2026-08-30 新增 WBS-02 JSON-LD 导入卡 + 备份调度接入管理面卡（均已完成/P1），回读 total=67；2026-09-02 增量待同步：REL-PROD-0002 卡（已完成）——本环境无 `/tmp/gh_token`，同步跳过，契约保持）
 
 ## 1. 认证要求（重要，勿重复探索）
 
@@ -81,6 +81,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P7-03 发布/回滚手册 + 实际演练 | 已完成 | release-rollback-drill.sh DRILL PASS 2026-08-08 |
 | P7-04 灾备运维手册 | 已完成 | L7-ops-rebalance-dr.md |
 | 首次真实发布（生产） | 已完成 | REL-PROD-0001（2026-08-09 单节点生产部署：RocksDB 持久 + AUTH enforced + 审计落盘，验证全绿；真机 systemd 指引见 L7 §1.2） |
+| 生产刷新发布 REL-PROD-0002 | 已完成 | 2026-09-02 将 commit 49bfd7b（PROG-0001 0.1.73）部署至 /home/ontolith/prod/：release 构建替换 bin（旧二进制备份 rollback-2026-08-10/），重启后健康/401/Turtle+JSON-LD ingest/SPARQL 回读/重启持久性（triples=10015 一致）/审计哈希链全绿；发布记录 [RELEASE-2026-09-02.md](./RELEASE-2026-09-02.md) |
 | L8 AI-Native 扩展 | 已完成 | 100%（P8-01 M1–M3 + P8-02 KPI 门禁 + P8-03 扩展点 + ACC-R4 验收包 `=== ACCEPTANCE PASS ===`，2026-08-09） |
 | P8-01 语义-向量桥接 | 已完成 | 100%（M1–M3：语义核心 + server 接线 + RocksDB 持久化与增量更新，2026-08-09） |
 | P8-01 M3 语义索引持久化 + 增量更新 | 已完成 | RocksDB `semantic` CF + `RocksSemanticIndex` + 删改回流，2026-08-09 |
