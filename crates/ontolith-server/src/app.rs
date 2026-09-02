@@ -3723,6 +3723,83 @@ mod tests {
     }
 
     #[test]
+    fn jsonld_import_context_ingest_via_http() {
+        // Serialize env-mutating tests (process-wide ONTOLITH_JSONLD_REMOTE_CONTEXT).
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serve = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().expect("accept context fetch");
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let body =
+                r#"{"name": "http://imported.org/name", "knows": "http://imported.org/knows"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/ld+json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).expect("write context");
+        });
+
+        // SAFETY: env mutation is serialized by ENV_LOCK; no concurrent reads
+        // of this variable from other tests.
+        unsafe { std::env::set_var("ONTOLITH_JSONLD_REMOTE_CONTEXT", "1") };
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let body = format!(
+            r#"{{
+              "@context": {{
+                "@import": "http://{addr}/imported-ctx.json",
+                "name": "http://local.org/name"
+              }},
+              "@id": "http://ex.org/alice",
+              "name": "Local",
+              "knows": {{ "@id": "http://ex.org/bob" }}
+            }}"#
+        );
+        let resp = dispatch_for_test(
+            &state,
+            HttpRequest {
+                method: "POST".to_owned(),
+                path: "/data/json-ld".to_owned(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: body.into_bytes(),
+            },
+        );
+        // SAFETY: see set_var above; ENV_LOCK held for the whole test.
+        unsafe { std::env::remove_var("ONTOLITH_JSONLD_REMOTE_CONTEXT") };
+        serve.join().expect("context server");
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+
+        // Local term definition overrides the imported context.
+        let read = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "SELECT ?n WHERE { <http://ex.org/alice> <http://local.org/name> ?n }",
+            ),
+        );
+        let rbody = String::from_utf8_lossy(&read.body);
+        assert!(rbody.contains("Local"), "read: {rbody}");
+
+        // Imported-only term resolves through the imported context.
+        let read = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "SELECT ?n WHERE { <http://ex.org/alice> <http://imported.org/knows> ?n }",
+            ),
+        );
+        let rbody = String::from_utf8_lossy(&read.body);
+        assert!(rbody.contains("http://ex.org/bob"), "read: {rbody}");
+    }
+
+    #[test]
     fn sparql_http_json_renders_stored_iri_subject_as_uri() {
         // Regression: stored IRI subjects are dictionary node ids; the JSON
         // result renderer must decode them back to uri (not bnode).

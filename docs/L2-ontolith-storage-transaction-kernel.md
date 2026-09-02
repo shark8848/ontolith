@@ -175,8 +175,8 @@ ontolith-storage/src/
 
 ## 7. 已知限制（v3 边界）
 
-1. RocksDB 读路径仍依赖 **打开时重建的内存二级索引**（非纯 CF 前缀扫描）。  
-2. **无真 MVCC 版本链** — 读 = 已提交 ∪ 本 txn staged。  
+1. RocksDB 读路径为 **纯 CF 前缀扫描**（`scan_triples_with_prefix`/`scan_quads_with_prefix`；索引 CF SPO/POS/OSP 与命名图 GSPO/GPOS/GOSP），不再依赖打开时重建的内存二级索引。  
+2. **真 MVCC 版本链** — 磁盘 MVCC 版本 CF（大端版本前缀 ‖ 物理键，版本内前缀扫描隔离）与内存版本链（提交后不可变图快照）双轨；跨重启持久（WAL 回放重建版本链）、版本保留上限可配（默认 16）；读 = 指定版本已提交 ∪ 本 txn staged。  
 3. **IndexMaintenance::Async 已实现**（2026-09-02，P2-04）——延迟索引维护：提交写主 CF + `index_pending` 积压，后台维护线程按 `meta.index_watermark` 追赶索引 CF；读路径水位未追上时回退主 CF 扫描。  
 4. **命名图六置换** 已补（`GraphIndex` 新增 `by_subject`/`by_predicate`/`by_object` + `matching_in_named_graphs`）；默认图语句仍走 `TripleIndexes`。  
 5. **字典 GC / 压缩 / vacuum** 未做。  

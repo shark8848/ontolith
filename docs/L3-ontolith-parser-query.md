@@ -281,7 +281,7 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 
 1. **属性路径扩展（分组/嵌套更完整 1.1 语法）**、**高级子查询（相关子查询等）**、**EXISTS/NOT EXISTS**、**SERVICE** 未实现（已支持完整聚合 GROUP BY/HAVING、嵌套 SELECT+LIMIT 子查询、子查询聚合与属性路径最小集 `p1/p2`、`+`、`*`、`?`、`|`、`^`）。HAVING 中聚合调用需匹配投影聚合表达式（重写为别名求值）。  
 2. **SPARQL Update 高级形态**：已支持 `CLEAR/DROP [SILENT] DEFAULT|NAMED|ALL|GRAPH <g>`、`WITH <g>` 作用于 DELETE·INSERT…WHERE / DELETE WHERE（WHERE 以图 `g` 为默认图匹配，模板写入图 `g`）、`LOAD [SILENT] <src> [INTO GRAPH <g>]`（离线子集：`<src>` 为库内已有命名图，复制到默认图或目标图；远程 HTTP 抓取留待网络层）。`WITH` 仅组合 modify 形态（与规范一致）；DELETE/INSERT 模板中的 blank 节点按未绑定处理（跳过该三元组）；无匹配的更新为空操作不报错。  
-3. **JSON-LD** 为务实子集：`@reverse`/`@nest`/`@included`/`@json`/远程 `@context`（注入 loader，L5 仅 `http://`）/`@propagate`（W3C context 定义语义：默认 true，`false` 使生效 context 不传入子节点、子节点回退前一 context；2026-09-02）已支持；`@context` 无完整 term 定义（`@id` 为相对 IRI 的 `@type` 语义、`@container` 组合等边缘）与 `@import` 等 1.1 进阶关键字按文档声明处理。  
+3. **JSON-LD** 为务实子集：`@reverse`/`@nest`/`@included`/`@json`/远程 `@context`（注入 loader，L5 仅 `http://`）/`@propagate`（W3C context 定义语义：默认 true，`false` 使生效 context 不传入子节点、子节点回退前一 context；2026-09-02）/`@import`（Pass 0 远程导入先行合并、导入 context 本地定义覆盖、远程被导入 context 含 `@import` 拒绝；2026-09-02）已支持；`@context` 无完整 term 定义（`@id` 为相对 IRI 的 `@type` 语义、`@container` 组合等边缘）按文档声明处理。  
 4. JOIN 为嵌套循环式 solution merge；BGP 模式序由代价优化器按实时统计（triple/predicate/subject/object 计数）做贪心选序 + 绑定传播（`EngineQueryStatistics` + `CostBasedOptimizer`），统计为均匀选择性启发式，尚无采样/直方图。  
 5. CONSTRUCT 模板中的 blank 生成语义为绑定投影，非全规范 blank 唯一化。  
 6. 网络流式结果属于 **L5 server**，本层交付内存 `QueryResult`。  

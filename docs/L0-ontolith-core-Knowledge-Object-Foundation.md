@@ -313,7 +313,7 @@ CanonicalEncode, CanonicalWriter
 
 | 项 | 现状 | 后续层/工作 |
 |----|------|-------------|
-| Statement KO | 仅有 `ObjectType::Statement` | L1 挂 Triple/Quad + 可选 Header |
+| Statement KO | 已实现（2026-09-02：`StatementObject` = KO header + Quad，`ObjectType::Statement`，`from_triple`/`from_quad` + 单测） | 字典/审计/版本化等挂载点按需扩展 |
 | IRI 校验 | 基线启发式 | 完整 IRI/URI 规范可选 feature |
 | Literal Decimal | `f64` 位型确定性 | 十进制任意精度类型 |
 | Canonical 规范文档 | 代码即规范 | 独立 RFC/编码规范文档（P1-04） |
