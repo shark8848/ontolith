@@ -459,6 +459,39 @@ jobs:
       - name: server rocksdb backend test
         run: cargo test -p ontolith-server --features rocksdb-backend rocksdb_backend -- --nocapture
 
+  # P2-04 hardening gate: Miri + ASan + UBSan over the pure-Rust,
+  # memory-sensitive crates (core / rdf / transaction / storage memory
+  # engine). RocksDB-backed code is excluded (FFI is not Miri/ASan
+  # compatible); the memory engine is the memory-safety-critical path.
+  miri-sanitizer:
+    name: miri + sanitizers (memory safety)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Miri (core / rdf / transaction / storage memory engine)
+        run: |
+          cargo +nightly miri test -p ontolith-core -p ontolith-rdf -p ontolith-transaction
+          cargo +nightly miri test -p ontolith-storage --no-default-features
+      - name: ASan (core / rdf / transaction / storage memory engine)
+        run: |
+          RUSTFLAGS="-Zsanitizer=address -D warnings" \
+            cargo +nightly test -p ontolith-core -p ontolith-rdf -p ontolith-transaction \
+            -p ontolith-storage --no-default-features
+      - name: LSan (core / rdf / transaction / storage memory engine)
+        run: |
+          if rustc +nightly -Zsanitizer=leak --print=cfg >/dev/null 2>&1; then
+            RUSTFLAGS="-Zsanitizer=leak -D warnings" \
+              cargo +nightly test -p ontolith-core -p ontolith-rdf -p ontolith-transaction \
+              -p ontolith-storage --no-default-features
+          else
+            echo "SKIP: this nightly dropped -Zsanitizer=leak (was: undefined, removed upstream)"
+          fi
+
   bench:
     name: storage bench thresholds + trend
     runs-on: ubuntu-latest

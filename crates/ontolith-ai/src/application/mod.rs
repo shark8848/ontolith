@@ -6,7 +6,7 @@ use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::Term;
 
 use crate::domain::{Embedding, EmbeddingProvider, SemanticHit, SemanticIndex};
-use crate::infrastructure::InMemorySemanticIndex;
+use crate::infrastructure::{InMemorySemanticIndex, LshConfig, LshSemanticIndex};
 
 /// Default auto-index cap: bounds the semantic index size (P8-01 M3).
 pub const DEFAULT_SEMANTIC_INDEX_CAP: usize = 100_000;
@@ -33,6 +33,19 @@ impl SemanticSearchService {
 
     pub fn with_cap(provider: Arc<dyn EmbeddingProvider>, cap: usize) -> Self {
         let index = InMemorySemanticIndex::new(Arc::clone(&provider));
+        Self {
+            provider,
+            index: Box::new(index),
+            cap,
+        }
+    }
+
+    /// Approximate variant (P8-01 ANN, ADR-0006): the index answers top-k
+    /// with multi-probe hyperplane LSH over the same provider. Exact and
+    /// approximate services expose the same interface; this is an opt-in
+    /// for large corpora where a full scan is too costly.
+    pub fn with_lsh(provider: Arc<dyn EmbeddingProvider>, cap: usize, lsh: LshConfig) -> Self {
+        let index = LshSemanticIndex::new(Arc::clone(&provider), lsh);
         Self {
             provider,
             index: Box::new(index),
@@ -186,5 +199,22 @@ mod tests {
             .index_terms(&[Term::iri("urn:ex:d"), Term::iri("urn:ex:e")])
             .unwrap();
         assert_eq!(added, 0);
+    }
+
+    #[test]
+    fn service_with_lsh_retrieves_top_hit() {
+        let mut svc = SemanticSearchService::with_lsh(provider(), MAX_TOP_K, LshConfig::default());
+        for t in [
+            "urn:ex:apple_pie",
+            "urn:ex:apple_juice",
+            "urn:ex:telephone_booth",
+        ]
+        .map(Term::iri)
+        {
+            svc.index(&t).unwrap();
+        }
+        let hits = svc.search_text("apple juice", 3).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].term, Term::iri("urn:ex:apple_juice"));
     }
 }

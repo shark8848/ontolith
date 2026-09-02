@@ -70,6 +70,14 @@ pub struct SemanticConfig {
     /// Auto-index cap: number of store terms (subjects + predicates +
     /// objects) indexed at startup.
     pub auto_index_cap: usize,
+    /// Optional remote embedding endpoint (ADR-0006). When set, embeddings
+    /// come from the external HTTP service instead of the deterministic
+    /// feature-hash fallback.
+    pub embedding_url: Option<String>,
+    pub embedding_api_key: Option<String>,
+    pub embedding_model: Option<String>,
+    /// Remote embedding per-request timeout in seconds.
+    pub embedding_timeout_secs: u64,
 }
 
 impl Default for SemanticConfig {
@@ -78,6 +86,10 @@ impl Default for SemanticConfig {
             enabled: false,
             dim: ontolith_ai::domain::DEFAULT_EMBEDDING_DIM,
             auto_index_cap: 100_000,
+            embedding_url: None,
+            embedding_api_key: None,
+            embedding_model: None,
+            embedding_timeout_secs: 30,
         }
     }
 }
@@ -96,10 +108,27 @@ impl SemanticConfig {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(100_000);
+        let embedding_url = std::env::var("ONTOLITH_SEMANTIC_EMBEDDING_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let embedding_api_key = std::env::var("ONTOLITH_SEMANTIC_EMBEDDING_API_KEY")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let embedding_model = std::env::var("ONTOLITH_SEMANTIC_EMBEDDING_MODEL")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let embedding_timeout_secs = std::env::var("ONTOLITH_SEMANTIC_EMBEDDING_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(30);
         Self {
             enabled,
             dim,
             auto_index_cap,
+            embedding_url,
+            embedding_api_key,
+            embedding_model,
+            embedding_timeout_secs,
         }
     }
 }
@@ -134,8 +163,8 @@ fn auto_index_store_terms(
 }
 
 /// Build the in-memory semantic search service (P8-01 M2): deterministic
-/// feature-hash embeddings + auto-index of store terms. Returns `None` when
-/// semantic is disabled.
+/// feature-hash embeddings (or the configured remote provider, ADR-0006) +
+/// auto-index of store terms. Returns `None` when semantic is disabled.
 pub(crate) fn build_semantic_service(
     triples: &dyn TripleRepository,
     dictionary: &dyn DictionaryCodec,
@@ -144,13 +173,41 @@ pub(crate) fn build_semantic_service(
     if !config.enabled {
         return None;
     }
-    let provider = Arc::new(
-        FeatureHashEmbedding::new(config.dim)
-            .expect("semantic embedding dimension must be non-zero"),
-    ) as Arc<dyn ontolith_ai::domain::EmbeddingProvider>;
+    let provider = build_embedding_provider(config)?;
     let mut svc = SemanticSearchService::with_cap(provider, config.auto_index_cap);
     auto_index_store_terms(&mut svc, triples, dictionary);
     Some(svc)
+}
+
+/// Select the embedding provider: the remote HTTP provider (ADR-0006) when
+/// `ONTOLITH_SEMANTIC_EMBEDDING_URL` is configured, otherwise the in-tree
+/// deterministic feature-hash fallback. Remote construction failures (bad
+/// endpoint/dimension) degrade to the deterministic fallback.
+fn build_embedding_provider(
+    config: &SemanticConfig,
+) -> Option<Arc<dyn ontolith_ai::domain::EmbeddingProvider>> {
+    if let Some(url) = config.embedding_url.as_deref().filter(|u| !u.is_empty()) {
+        let remote = ontolith_ai::infrastructure::RemoteEmbeddingConfig {
+            endpoint: url.to_owned(),
+            api_key: config.embedding_api_key.clone(),
+            model: config
+                .embedding_model
+                .clone()
+                .unwrap_or_else(|| "text-embedding-3-small".to_owned()),
+            dim: config.dim,
+            timeout: std::time::Duration::from_secs(config.embedding_timeout_secs),
+            cache_capacity: 4096,
+        };
+        if let Ok(provider) = ontolith_ai::infrastructure::RemoteHttpEmbeddingProvider::new(remote)
+        {
+            return Some(Arc::new(provider));
+        }
+        eprintln!("semantic remote embedding misconfigured; falling back to feature-hash");
+    }
+    Some(Arc::new(
+        FeatureHashEmbedding::new(config.dim)
+            .expect("semantic embedding dimension must be non-zero"),
+    ))
 }
 
 /// Build the RocksDB-persistent semantic search service (P8-01 M3): the
@@ -167,10 +224,7 @@ pub(crate) fn build_persistent_semantic_service(
     if !config.enabled {
         return None;
     }
-    let provider = Arc::new(
-        FeatureHashEmbedding::new(config.dim)
-            .expect("semantic embedding dimension must be non-zero"),
-    ) as Arc<dyn ontolith_ai::domain::EmbeddingProvider>;
+    let provider = build_embedding_provider(config)?;
     let mut svc =
         SemanticSearchService::new_persistent(engine, provider, config.auto_index_cap).ok()?;
     auto_index_store_terms(&mut svc, triples, dictionary);
@@ -4135,6 +4189,10 @@ mod tests {
                 enabled: true,
                 dim: 256,
                 auto_index_cap: 100_000,
+                embedding_url: None,
+                embedding_api_key: None,
+                embedding_model: None,
+                embedding_timeout_secs: 30,
             }
         }
 

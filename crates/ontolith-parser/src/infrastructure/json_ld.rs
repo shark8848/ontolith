@@ -65,12 +65,27 @@ enum Container {
     Index,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Context {
     terms: std::collections::HashMap<String, TermDef>,
     vocab: Option<String>,
     base: Option<String>,
     default_language: Option<String>,
+    /// JSON-LD 1.1 `@propagate` (default true): whether the active context
+    /// flows into contained node objects.
+    propagate: bool,
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self {
+            terms: std::collections::HashMap::new(),
+            vocab: None,
+            base: None,
+            default_language: None,
+            propagate: true,
+        }
+    }
 }
 
 impl Context {
@@ -88,6 +103,9 @@ impl Context {
         }
         if other.default_language.is_some() {
             self.default_language = other.default_language;
+        }
+        if !other.propagate {
+            self.propagate = false;
         }
     }
 }
@@ -266,6 +284,15 @@ impl<'a> JsonLdParser<'a> {
                 Ok(())
             }
             Value::Object(map) => {
+                // Pass 0: `@import` — a single remote context merged FIRST,
+                // with the importing context's own definitions overriding it.
+                if let Some(import_val) = map.get("@import") {
+                    let url = import_val.as_str().ok_or_else(|| {
+                        parse_error("@import must be a string (remote context URL)")
+                    })?;
+                    let imported = self.remote_context_for(url)?;
+                    self.context.merge(imported);
+                }
                 // Pass 1: @vocab / @base / @language and raw string term
                 // definitions (prefixes), so pass 2 can expand prefixed IRIs.
                 for (key, val) in map {
@@ -288,6 +315,12 @@ impl<'a> JsonLdParser<'a> {
                             } else {
                                 self.context.default_language = None;
                             }
+                        }
+                        "@propagate" => {
+                            let p = val
+                                .as_bool()
+                                .ok_or_else(|| parse_error("@propagate must be a boolean"))?;
+                            self.context.propagate = p;
                         }
                         _ => {}
                     }
@@ -413,6 +446,13 @@ impl<'a> JsonLdParser<'a> {
         let doc = loader.load(url)?;
         let value: Value = serde_json::from_str(&doc)
             .map_err(|e| parse_error(format!("invalid remote @context JSON: {e}")))?;
+        if value
+            .as_object()
+            .map(|m| m.contains_key("@import"))
+            .unwrap_or(false)
+        {
+            return Err(parse_error("remote @context must not contain @import"));
+        }
         let mut sub = JsonLdParser {
             context: Context {
                 base: self.context.base.clone(),
@@ -547,6 +587,15 @@ impl<'a> JsonLdParser<'a> {
             return Ok(None);
         }
         let ctx = self.context_for(map)?;
+        // JSON-LD 1.1 `@propagate` (a context-definition keyword): the node's
+        // effective context flows into contained node objects by default;
+        // `@propagate: false` in that context stops it, so contained nodes
+        // fall back to the context active before entering this node.
+        let saved_context = if ctx.propagate {
+            Some(std::mem::replace(&mut self.context, ctx.clone()))
+        } else {
+            None
+        };
         let subject_term = match self.node_keyword(map, "@id", &ctx).and_then(Value::as_str) {
             Some(id) => self.iri_or_blank(id, &ctx)?,
             None => Term::blank(self.mint_blank()),
@@ -579,6 +628,9 @@ impl<'a> JsonLdParser<'a> {
                 _ => None,
             };
             self.process_graph(graph_val, named.or(graph), sink)?;
+            if let Some(saved) = saved_context {
+                self.context = saved;
+            }
             return Ok(Some(subject_term));
         }
 
@@ -698,6 +750,9 @@ impl<'a> JsonLdParser<'a> {
                     }
                 }
             }
+        }
+        if let Some(saved) = saved_context {
+            self.context = saved;
         }
         Ok(Some(subject_term))
     }
@@ -1406,5 +1461,161 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(self.context.clone())
         }
+    }
+
+    #[test]
+    fn parses_context_import_with_local_override() {
+        let dict = InMemoryDictionary::new();
+        let mut sink = DatasetSink::default();
+        let loader = StaticContextLoader(
+            r#"{"name": "http://imported.org/name", "knows": "http://imported.org/knows"}"#,
+        );
+        parse_json_ld_with_remote_context(
+            r#"{
+              "@context": {
+                "@import": "https://example.org/base-ctx",
+                "name": "http://local.org/name"
+              },
+              "@id": "urn:a",
+              "name": "Local",
+              "knows": "urn:b"
+            }"#,
+            &dict,
+            None,
+            &loader,
+            &mut sink,
+        )
+        .expect("parse with @import");
+        // Local term definitions override the imported context.
+        assert_has(
+            &sink,
+            &dict,
+            "urn:a",
+            "http://local.org/name",
+            Term::literal(LiteralValue::String("Local".into())),
+        );
+        // Imported-only terms still resolve.
+        assert_has(
+            &sink,
+            &dict,
+            "urn:a",
+            "http://imported.org/knows",
+            Term::literal(LiteralValue::String("urn:b".into())),
+        );
+    }
+
+    #[test]
+    fn rejects_remote_context_containing_import() {
+        let dict = InMemoryDictionary::new();
+        let mut sink = DatasetSink::default();
+        let loader = StaticContextLoader(
+            r#"{"@import": "https://example.org/nested", "a": "http://ex.org/a"}"#,
+        );
+        let err = parse_json_ld_with_remote_context(
+            r#"{
+              "@context": "https://example.org/outer",
+              "@id": "urn:a"
+            }"#,
+            &dict,
+            None,
+            &loader,
+            &mut sink,
+        )
+        .expect_err("nested @import must be rejected");
+        assert!(err.message().contains("@import"), "got: {err}");
+    }
+
+    #[test]
+    fn context_propagates_to_nested_nodes() {
+        let (sink, dict) = parse_doc(
+            r#"{
+              "@id": "urn:root",
+              "@context": {"name": "http://ex.org/name"},
+              "child": {
+                "@id": "urn:child",
+                "name": "ChildName"
+              }
+            }"#,
+        );
+        // The parent's inline context reaches the nested node by default.
+        assert_has(
+            &sink,
+            &dict,
+            "urn:child",
+            "http://ex.org/name",
+            Term::literal(LiteralValue::String("ChildName".into())),
+        );
+    }
+
+    #[test]
+    fn propagate_false_stops_context_propagation() {
+        let (sink, dict) = parse_doc(
+            r#"{
+              "@id": "urn:outer",
+              "root": {
+                "@id": "urn:root",
+                "@context": {"name": "http://ex.org/name", "@propagate": false},
+                "name": "RootName",
+                "child": {
+                  "@id": "urn:child",
+                  "name": "ChildName"
+                }
+              }
+            }"#,
+        );
+        // The node's own context still applies to its own properties...
+        assert_has(
+            &sink,
+            &dict,
+            "urn:root",
+            "http://ex.org/name",
+            Term::literal(LiteralValue::String("RootName".into())),
+        );
+        // ...but is not propagated to the contained node.
+        let leaked = sink.dataset.default_graph.iter().any(|t| {
+            t.subject == dict.encode_node("urn:child")
+                && t.predicate.as_str() == "http://ex.org/name"
+        });
+        assert!(
+            !leaked,
+            "child must not see the parent context under @propagate: false"
+        );
+        assert_has(
+            &sink,
+            &dict,
+            "urn:child",
+            "name",
+            Term::literal(LiteralValue::String("ChildName".into())),
+        );
+    }
+
+    #[test]
+    fn child_own_context_still_applies() {
+        let (sink, dict) = parse_doc(
+            r#"{
+              "@id": "urn:outer",
+              "root": {
+                "@id": "urn:root",
+                "@context": {"name": "http://ex.org/name", "@propagate": false},
+                "child": {
+                  "@id": "urn:child",
+                  "grand": {
+                    "@id": "urn:grand",
+                    "@context": {"name": "http://ex.org/other-name"},
+                    "name": "GrandName"
+                  }
+                }
+              }
+            }"#,
+        );
+        // The grandchild declares its own context, which applies to its own
+        // properties even though the ancestor context stopped propagating.
+        assert_has(
+            &sink,
+            &dict,
+            "urn:grand",
+            "http://ex.org/other-name",
+            Term::literal(LiteralValue::String("GrandName".into())),
+        );
     }
 }

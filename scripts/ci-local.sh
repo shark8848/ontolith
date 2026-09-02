@@ -90,4 +90,30 @@ trap - EXIT
 echo "==> SLO history window checker self-test (day/week + alert policy)"
 bash scripts/check-slo-window-history.sh --self-test
 
+if [[ "${CI_LOCAL_MIRI:-0}" == "1" || "${CI_LOCAL_SANITIZER:-0}" == "1" ]]; then
+  if ! rustup toolchain list 2>/dev/null | grep -q nightly; then
+    echo "SKIP: miri/sanitizer requires nightly (rustup toolchain install nightly --profile minimal --component miri)"
+  else
+    if [[ "${CI_LOCAL_MIRI:-0}" == "1" ]]; then
+      echo "==> miri (core / rdf / transaction / storage memory engine)"
+      cargo +nightly miri test -p ontolith-core -p ontolith-rdf -p ontolith-transaction
+      cargo +nightly miri test -p ontolith-storage --no-default-features
+    fi
+    if [[ "${CI_LOCAL_SANITIZER:-0}" == "1" ]]; then
+      echo "==> asan (core / rdf / transaction / storage memory engine)"
+      RUSTFLAGS="-Zsanitizer=address -D warnings" \
+        cargo +nightly test -p ontolith-core -p ontolith-rdf -p ontolith-transaction \
+        -p ontolith-storage --no-default-features
+      if rustc +nightly -Zsanitizer=leak --print=cfg >/dev/null 2>&1; then
+        echo "==> lsan (core / rdf / transaction / storage memory engine)"
+        RUSTFLAGS="-Zsanitizer=leak -D warnings" \
+          cargo +nightly test -p ontolith-core -p ontolith-rdf -p ontolith-transaction \
+          -p ontolith-storage --no-default-features
+      else
+        echo "SKIP: this nightly dropped -Zsanitizer=leak (was: undefined, removed upstream)"
+      fi
+    fi
+  fi
+fi
+
 echo "==> OK: local CI gates passed"

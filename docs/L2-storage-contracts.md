@@ -59,7 +59,7 @@
 
 1. **上层依赖约束**：query/server/reasoner 只依赖 application 层 trait；基础设施类型（`InMemoryDictionary`、`RocksDbStorageEngine`）仅在测试与工厂中使用。
 2. **集合语义**：`PutTriple`/`PutQuad` 为集合语义（重复插入为 no-op）；删除幂等。
-3. **索引维护**：`IndexMaintenance::Sync` 为默认且正确性优先；`Async` 为保留位，未启用。
+3. **索引维护**：`IndexMaintenance::Sync` 为默认且正确性优先（索引 CF 与主 CF 同批提交）；`IndexMaintenance::Async` 已实现（2026-09-02，P2-04）——索引维护延迟到后台维护线程，提交只写主 CF + 持久 `index_pending` 积压 CF（键 = 提交序号 ‖ 操作序号），`meta.index_watermark` 记录已应用到的提交序号；读路径在水位未追上时回退主 CF 全扫描（结果一致、较慢），追上后走索引 CF 前缀扫描；`DeleteKey` 在提交时按主 CF 预镜像分解为逐条删除入积压；水位与积压随 RocksDB 持久化、reopen 后继续追赶；`ONTOLITH_INDEX_MAINTENANCE=async` 或 `RocksDbOptions.index_maintenance` 启用，`index_maintenance()` 上报模式。
 4. **物理键**：六置换索引键字节格式由 [RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md) 定稿，后端无关。
 5. **变更流程**：任何破坏性变更（签名、语义、物理格式）须先经 RFC/ADR 评审并在本文件登记版本升级；非破坏性扩展（新增默认方法）不受限。
 

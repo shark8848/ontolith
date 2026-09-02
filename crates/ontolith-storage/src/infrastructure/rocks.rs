@@ -4,15 +4,15 @@
 
 use crate::application::{DictionaryCodec, StorageEngine, WriteAheadLog};
 use crate::domain::{
-    SnapshotRef, StorageKey, StorageStats, WalPhase, WalRecord, WriteBatch, WriteOperation,
-    encode_gosp_key, encode_gosp_object_prefix, encode_gpos_key, encode_gpos_predicate_prefix,
-    encode_gspo_graph_prefix, encode_gspo_key, encode_gspo_subject_prefix, encode_osp_key,
-    encode_osp_object_prefix, encode_pos_key, encode_pos_predicate_prefix, encode_spo_key,
-    encode_spo_subject_prefix,
+    IndexMaintenance, SnapshotRef, StorageKey, StorageStats, WalPhase, WalRecord, WriteBatch,
+    WriteOperation, encode_gosp_key, encode_gosp_object_prefix, encode_gpos_key,
+    encode_gpos_predicate_prefix, encode_gspo_graph_prefix, encode_gspo_key,
+    encode_gspo_subject_prefix, encode_osp_key, encode_osp_object_prefix, encode_pos_key,
+    encode_pos_predicate_prefix, encode_spo_key, encode_spo_subject_prefix,
 };
 use crate::infrastructure::codec::{
-    decode_quad, decode_triple, decode_u64, decode_wal_record, encode_quad, encode_triple,
-    encode_u64, encode_wal_record,
+    decode_quad, decode_triple, decode_u64, decode_wal_record, decode_write_op, encode_quad,
+    encode_triple, encode_u64, encode_wal_record, encode_write_op,
 };
 use crate::infrastructure::indexes::{quad_graph_prefix, quad_key, triple_key};
 use ontolith_core::domain::{ConsistencyLevel, Iri, NodeId};
@@ -26,8 +26,10 @@ use rocksdb::{
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 const CF_META: &str = "meta";
 const CF_DICT_FWD: &str = "dict_fwd";
@@ -43,6 +45,10 @@ const CF_GPOS_INDEX: &str = "gpos_index";
 const CF_GOSP_INDEX: &str = "gosp_index";
 const CF_VERSIONS: &str = "versions";
 const CF_VERSIONS_QUADS: &str = "versions_quads";
+/// Deferred index-maintenance backlog (P2-04 async mode): committed
+/// operations not yet applied to the index column families, keyed by
+/// (commit sequence, op index). Durable with the commit that produced them.
+const CF_INDEX_PENDING: &str = "index_pending";
 /// Dedicated column family for the L4 raft data plane (ADR-0004): openraft
 /// log entries, hard state (vote/committed/last_applied), and snapshot refs.
 /// Accessed only through the `raft_cf_*` byte-level primitives below.
@@ -61,6 +67,13 @@ const META_NEXT_NODE: &[u8] = b"next_node_id";
 const META_WAL_SEQ: &[u8] = b"wal_seq";
 const META_DICT_EPOCH: &[u8] = b"dict_epoch";
 const META_NEXT_VERSION: &[u8] = b"next_version";
+/// Highest commit sequence whose operations have been applied to the index
+/// column families (P2-04 async mode; maintained in the `meta` CF).
+const META_INDEX_WATERMARK: &[u8] = b"index_watermark";
+/// Env knob: `async` selects deferred (background) index maintenance.
+const ENV_INDEX_MAINTENANCE: &str = "ONTOLITH_INDEX_MAINTENANCE";
+/// Default background index-maintainer poll interval (async mode).
+const INDEX_MAINTAINER_INTERVAL_MS: u64 = 25;
 
 /// Compression codec for the index column families (RocksDB backend).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +112,16 @@ pub struct RocksDbOptions {
     pub index_block_cache_mb: usize,
     /// Compression codec for the index CFs (default LZ4).
     pub index_compression: IndexCompression,
+    /// Index maintenance mode (P2-04). `Sync` updates the index CFs inside
+    /// the commit write (correctness-first, default). `Async` defers index
+    /// maintenance to a background maintainer with a durable watermark;
+    /// reads fall back to the main data CFs while the index is behind.
+    pub index_maintenance: IndexMaintenance,
+    /// Background maintainer poll interval in ms (async mode only).
+    pub async_index_interval_ms: u64,
+    /// Whether to spawn the background maintainer thread (async mode only;
+    /// tests may disable it for deterministic catch-up control).
+    pub async_index_maintainer_enabled: bool,
 }
 
 impl Default for RocksDbOptions {
@@ -109,6 +132,9 @@ impl Default for RocksDbOptions {
             index_bloom_bits_per_key: 10,
             index_block_cache_mb: 64,
             index_compression: IndexCompression::Lz4,
+            index_maintenance: IndexMaintenance::Sync,
+            async_index_interval_ms: INDEX_MAINTAINER_INTERVAL_MS,
+            async_index_maintainer_enabled: true,
         }
     }
 }
@@ -175,7 +201,19 @@ pub struct RocksDbStorageEngine {
     path: PathBuf,
     state: RwLock<EngineState>,
     /// Serialize durable commits against shared DB.
-    commit_lock: Mutex<()>,
+    commit_lock: Arc<Mutex<()>>,
+    /// Index maintenance mode (P2-04); immutable after open.
+    index_maintenance: IndexMaintenance,
+    /// Highest commit sequence applied to the index CFs (async mode).
+    index_watermark: Arc<AtomicU64>,
+    /// Stop flag for the background index maintainer thread (async mode).
+    maintainer_stop: Arc<AtomicBool>,
+    /// Background index maintainer thread (async mode).
+    maintainer_thread: Option<JoinHandle<()>>,
+    /// Background maintainer poll interval in ms (async mode).
+    async_index_interval_ms: u64,
+    /// Whether the background maintainer thread is enabled (async mode).
+    async_index_maintainer_enabled: bool,
     next_snapshot_id: AtomicU64,
     next_node_id: AtomicU64,
     dict_epoch: AtomicU64,
@@ -207,7 +245,14 @@ pub struct RocksDbStorageEngine {
 
 impl RocksDbStorageEngine {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OntolithError> {
-        Self::open_with_options(path, RocksDbOptions::default())
+        let mut options = RocksDbOptions::default();
+        if std::env::var(ENV_INDEX_MAINTENANCE)
+            .map(|v| v.trim().eq_ignore_ascii_case("async"))
+            .unwrap_or(false)
+        {
+            options.index_maintenance = IndexMaintenance::Async;
+        }
+        Self::open_with_options(path, options)
     }
 
     /// Open (or create) a durable engine with explicit durability tuning.
@@ -239,6 +284,7 @@ impl RocksDbStorageEngine {
             CF_GOSP_INDEX,
             CF_VERSIONS,
             CF_VERSIONS_QUADS,
+            CF_INDEX_PENDING,
             CF_RAFT,
             CF_SEMANTIC,
             CF_TENANT,
@@ -263,7 +309,13 @@ impl RocksDbStorageEngine {
             state: RwLock::new(EngineState {
                 pending_writes: HashMap::new(),
             }),
-            commit_lock: Mutex::new(()),
+            commit_lock: Arc::new(Mutex::new(())),
+            index_maintenance: options.index_maintenance,
+            index_watermark: Arc::new(AtomicU64::new(0)),
+            maintainer_stop: Arc::new(AtomicBool::new(false)),
+            maintainer_thread: None,
+            async_index_interval_ms: options.async_index_interval_ms,
+            async_index_maintainer_enabled: options.async_index_maintainer_enabled,
             next_snapshot_id: AtomicU64::new(1),
             next_node_id: AtomicU64::new(1),
             dict_epoch: AtomicU64::new(0),
@@ -287,7 +339,9 @@ impl RocksDbStorageEngine {
         engine.ensure_quad_index_column_families()?;
         engine.ensure_version_chain()?;
         engine.load_meta()?;
+        engine.init_index_watermark()?;
         engine.load_retained_versions()?;
+        engine.spawn_index_maintainer();
         Ok(engine)
     }
 
@@ -611,7 +665,281 @@ impl RocksDbStorageEngine {
         if let Some(v) = self.db.get_cf(cf, META_NEXT_VERSION).map_err(rocks_err)? {
             self.next_version.store(decode_u64(&v)?, Ordering::SeqCst);
         }
+        if let Some(v) = self
+            .db
+            .get_cf(cf, META_INDEX_WATERMARK)
+            .map_err(rocks_err)?
+        {
+            self.index_watermark
+                .store(decode_u64(&v)?, Ordering::SeqCst);
+        }
         Ok(())
+    }
+
+    /// Initialize the async index-maintenance watermark. On a fresh open the
+    /// `ensure_*` backfills have already brought the index CFs up to the
+    /// current committed state, so the watermark starts caught up. In async
+    /// mode the initial watermark is persisted so a reopen after a crash (no
+    /// new commits) does not re-derive it from an inconsistent backlog.
+    fn init_index_watermark(&self) -> Result<(), OntolithError> {
+        let cf = self.cf(CF_META)?;
+        if self
+            .db
+            .get_cf(cf, META_INDEX_WATERMARK)
+            .map_err(rocks_err)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let watermark = self.committed_version();
+        self.index_watermark.store(watermark, Ordering::SeqCst);
+        if self.index_maintenance == IndexMaintenance::Async {
+            let mut batch = RocksBatch::default();
+            batch.put_cf(cf, META_INDEX_WATERMARK, encode_u64(watermark));
+            self.db.write(batch).map_err(rocks_err)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the index column families cover the latest committed version.
+    /// `Sync` mode is always caught up; async mode consults the watermark.
+    fn index_caught_up(&self) -> bool {
+        self.index_maintenance != IndexMaintenance::Async
+            || self.index_watermark.load(Ordering::SeqCst) >= self.committed_version()
+    }
+
+    /// Apply all deferred index-maintenance operations up to the current
+    /// watermark+1 batch (P2-04 async mode). Returns the number of backlog
+    /// operations applied (0 when caught up or in sync mode).
+    pub fn catch_up_index(&self) -> Result<u64, OntolithError> {
+        Self::catch_up_index_core(
+            self.db.as_ref(),
+            &self.commit_lock,
+            &self.index_watermark,
+            self.sync_writes,
+        )
+    }
+
+    /// Shared catch-up routine (used by the public API and the background
+    /// maintainer thread). Serialized against commits via `commit_lock`.
+    fn catch_up_index_core(
+        db: &DB,
+        commit_lock: &Mutex<()>,
+        index_watermark: &AtomicU64,
+        sync_writes: bool,
+    ) -> Result<u64, OntolithError> {
+        let _guard = commit_lock
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("commit lock poisoned"))?;
+        let cf_pending = db
+            .cf_handle(CF_INDEX_PENDING)
+            .ok_or_else(|| OntolithError::Failed("index_pending CF missing".to_owned()))?;
+        let start = index_watermark.load(Ordering::SeqCst);
+        let from = pending_key(start + 1, 0);
+        let iter = db.iterator_cf(cf_pending, IteratorMode::From(&from, Direction::Forward));
+        let mut entries: Vec<(u64, WriteOperation)> = Vec::new();
+        let mut max_seq = start;
+        for item in iter {
+            let (k, v) = item.map_err(rocks_err)?;
+            if k.len() < 16 {
+                continue;
+            }
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&k[..8]);
+            let seq = u64::from_be_bytes(arr);
+            if seq <= start {
+                continue;
+            }
+            entries.push((seq, decode_write_op(&v)?));
+            if seq > max_seq {
+                max_seq = seq;
+            }
+        }
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        let mut batch = RocksBatch::default();
+        let mut cur_seq = entries[0].0;
+        let mut cur_ops: Vec<WriteOperation> = Vec::new();
+        for (seq, op) in entries {
+            if seq != cur_seq {
+                Self::durable_apply_index_cfs(db, &mut batch, &cur_ops)?;
+                cur_ops.clear();
+                cur_seq = seq;
+            }
+            cur_ops.push(op);
+        }
+        Self::durable_apply_index_cfs(db, &mut batch, &cur_ops)?;
+        batch.delete_range_cf(cf_pending, &from, &pending_key(max_seq + 1, 0));
+        let cf_meta = db
+            .cf_handle(CF_META)
+            .ok_or_else(|| OntolithError::Failed("meta CF missing".to_owned()))?;
+        batch.put_cf(cf_meta, META_INDEX_WATERMARK, encode_u64(max_seq));
+        if sync_writes {
+            let mut write_opts = WriteOptions::default();
+            write_opts.set_sync(true);
+            db.write_opt(batch, &write_opts).map_err(rocks_err)?;
+        } else {
+            db.write(batch).map_err(rocks_err)?;
+        }
+        index_watermark.store(max_seq, Ordering::SeqCst);
+        Ok(max_seq - start)
+    }
+
+    /// Apply index-only maintenance for `operations` to the batch (P2-04).
+    /// Backlog entries are decomposed so `DeleteKey` never appears here:
+    /// commits snapshot the doomed pre-image as per-entry deletes.
+    fn durable_apply_index_cfs(
+        db: &DB,
+        batch: &mut RocksBatch,
+        operations: &[WriteOperation],
+    ) -> Result<(), OntolithError> {
+        let cf_spo = db
+            .cf_handle(CF_SPO_INDEX)
+            .ok_or_else(|| OntolithError::Failed("spo_index CF missing".to_owned()))?;
+        let cf_pos = db
+            .cf_handle(CF_POS_INDEX)
+            .ok_or_else(|| OntolithError::Failed("pos_index CF missing".to_owned()))?;
+        let cf_osp = db
+            .cf_handle(CF_OSP_INDEX)
+            .ok_or_else(|| OntolithError::Failed("osp_index CF missing".to_owned()))?;
+        let cf_gspo = db
+            .cf_handle(CF_GSPO_INDEX)
+            .ok_or_else(|| OntolithError::Failed("gspo_index CF missing".to_owned()))?;
+        let cf_gpos = db
+            .cf_handle(CF_GPOS_INDEX)
+            .ok_or_else(|| OntolithError::Failed("gpos_index CF missing".to_owned()))?;
+        let cf_gosp = db
+            .cf_handle(CF_GOSP_INDEX)
+            .ok_or_else(|| OntolithError::Failed("gosp_index CF missing".to_owned()))?;
+        for op in operations {
+            match op {
+                WriteOperation::PutTriple(t) => {
+                    batch.put_cf(
+                        cf_spo,
+                        encode_spo_key(t.subject, &t.predicate, &t.object),
+                        encode_triple(t),
+                    );
+                    batch.put_cf(
+                        cf_pos,
+                        encode_pos_key(&t.predicate, &t.object, t.subject),
+                        encode_triple(t),
+                    );
+                    batch.put_cf(
+                        cf_osp,
+                        encode_osp_key(&t.object, t.subject, &t.predicate),
+                        encode_triple(t),
+                    );
+                }
+                WriteOperation::DeleteTriple(t) => {
+                    batch.delete_cf(cf_spo, encode_spo_key(t.subject, &t.predicate, &t.object));
+                    batch.delete_cf(cf_pos, encode_pos_key(&t.predicate, &t.object, t.subject));
+                    batch.delete_cf(cf_osp, encode_osp_key(&t.object, t.subject, &t.predicate));
+                }
+                WriteOperation::PutQuad(q) => {
+                    if let Some(graph) = &q.graph_name {
+                        batch.put_cf(
+                            cf_gspo,
+                            encode_gspo_key(
+                                graph,
+                                q.triple.subject,
+                                &q.triple.predicate,
+                                &q.triple.object,
+                            ),
+                            encode_quad(q),
+                        );
+                        batch.put_cf(
+                            cf_gpos,
+                            encode_gpos_key(
+                                graph,
+                                &q.triple.predicate,
+                                &q.triple.object,
+                                q.triple.subject,
+                            ),
+                            encode_quad(q),
+                        );
+                        batch.put_cf(
+                            cf_gosp,
+                            encode_gosp_key(
+                                graph,
+                                &q.triple.object,
+                                q.triple.subject,
+                                &q.triple.predicate,
+                            ),
+                            encode_quad(q),
+                        );
+                    }
+                }
+                WriteOperation::DeleteQuad(q) => {
+                    if let Some(graph) = &q.graph_name {
+                        batch.delete_cf(
+                            cf_gspo,
+                            encode_gspo_key(
+                                graph,
+                                q.triple.subject,
+                                &q.triple.predicate,
+                                &q.triple.object,
+                            ),
+                        );
+                        batch.delete_cf(
+                            cf_gpos,
+                            encode_gpos_key(
+                                graph,
+                                &q.triple.predicate,
+                                &q.triple.object,
+                                q.triple.subject,
+                            ),
+                        );
+                        batch.delete_cf(
+                            cf_gosp,
+                            encode_gosp_key(
+                                graph,
+                                &q.triple.object,
+                                q.triple.subject,
+                                &q.triple.predicate,
+                            ),
+                        );
+                    }
+                }
+                WriteOperation::DeleteKey(_) => {
+                    // Decomposed at commit time; never enqueued directly.
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Spawn the background index maintainer (async mode only). The thread
+    /// holds only cloned DB/atomic handles, so dropping the engine (or any
+    /// crash of a commit) stops it promptly via `maintainer_stop`.
+    fn spawn_index_maintainer(&mut self) {
+        if self.index_maintenance != IndexMaintenance::Async || !self.async_index_maintainer_enabled
+        {
+            return;
+        }
+        let db = Arc::clone(&self.db);
+        let commit_lock = Arc::clone(&self.commit_lock);
+        let watermark = Arc::clone(&self.index_watermark);
+        let stop = Arc::clone(&self.maintainer_stop);
+        let interval = self.async_index_interval_ms.max(1);
+        let sync_writes = self.sync_writes;
+        let handle = std::thread::Builder::new()
+            .name("ontolith-index-maintainer".to_owned())
+            .spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    if let Err(err) = Self::catch_up_index_core(
+                        db.as_ref(),
+                        &commit_lock,
+                        &watermark,
+                        sync_writes,
+                    ) {
+                        eprintln!("ontolith index maintainer: {err}");
+                    }
+                    std::thread::sleep(Duration::from_millis(interval));
+                }
+            })
+            .expect("spawn index maintainer");
+        self.maintainer_thread = Some(handle);
     }
 
     /// Backfill SPO/POS/OSP index column families for a database created
@@ -1008,8 +1336,19 @@ impl RocksDbStorageEngine {
         &self,
         subject_id: NodeId,
     ) -> Result<(Vec<Triple>, Vec<Quad>), OntolithError> {
-        let triples = self
-            .scan_triples_with_prefix(CF_SPO_INDEX, Some(&encode_spo_subject_prefix(subject_id)))?;
+        // Async index maintenance may leave the SPO index behind the primary
+        // CFs; scan the primary CF for a complete pre-image in that case.
+        let triples = if self.index_caught_up() {
+            self.scan_triples_with_prefix(
+                CF_SPO_INDEX,
+                Some(&encode_spo_subject_prefix(subject_id)),
+            )?
+        } else {
+            self.scan_triples_with_prefix(CF_TRIPLES, None)?
+                .into_iter()
+                .filter(|t| t.subject == subject_id)
+                .collect()
+        };
         let quads = self
             .scan_quads_with_prefix(CF_QUADS, None)?
             .into_iter()
@@ -1040,158 +1379,105 @@ impl RocksDbStorageEngine {
     ) -> Result<usize, OntolithError> {
         let cf_t = self.cf(CF_TRIPLES)?;
         let cf_q = self.cf(CF_QUADS)?;
-        let cf_spo = self.cf(CF_SPO_INDEX)?;
-        let cf_pos = self.cf(CF_POS_INDEX)?;
-        let cf_osp = self.cf(CF_OSP_INDEX)?;
-        let cf_gspo = self.cf(CF_GSPO_INDEX)?;
-        let cf_gpos = self.cf(CF_GPOS_INDEX)?;
-        let cf_gosp = self.cf(CF_GOSP_INDEX)?;
+        let mut index_ops: Vec<WriteOperation> = Vec::new();
         let mut removed = 0usize;
         for op in operations {
             match op {
                 WriteOperation::PutTriple(t) => {
-                    let encoded = encode_triple(t);
-                    batch.put_cf(cf_t, triple_key(t), &encoded);
-                    batch.put_cf(
-                        cf_spo,
-                        encode_spo_key(t.subject, &t.predicate, &t.object),
-                        &encoded,
-                    );
-                    batch.put_cf(
-                        cf_pos,
-                        encode_pos_key(&t.predicate, &t.object, t.subject),
-                        &encoded,
-                    );
-                    batch.put_cf(
-                        cf_osp,
-                        encode_osp_key(&t.object, t.subject, &t.predicate),
-                        &encoded,
-                    );
+                    batch.put_cf(cf_t, triple_key(t), encode_triple(t));
+                    index_ops.push(WriteOperation::PutTriple(t.clone()));
                 }
                 WriteOperation::DeleteTriple(t) => {
                     batch.delete_cf(cf_t, triple_key(t));
-                    batch.delete_cf(cf_spo, encode_spo_key(t.subject, &t.predicate, &t.object));
-                    batch.delete_cf(cf_pos, encode_pos_key(&t.predicate, &t.object, t.subject));
-                    batch.delete_cf(cf_osp, encode_osp_key(&t.object, t.subject, &t.predicate));
+                    index_ops.push(WriteOperation::DeleteTriple(t.clone()));
                 }
                 WriteOperation::PutQuad(q) => {
-                    let encoded = encode_quad(q);
-                    batch.put_cf(cf_q, quad_key(q), &encoded);
-                    if let Some(graph) = &q.graph_name {
-                        batch.put_cf(
-                            cf_gspo,
-                            encode_gspo_key(
-                                graph,
-                                q.triple.subject,
-                                &q.triple.predicate,
-                                &q.triple.object,
-                            ),
-                            &encoded,
-                        );
-                        batch.put_cf(
-                            cf_gpos,
-                            encode_gpos_key(
-                                graph,
-                                &q.triple.predicate,
-                                &q.triple.object,
-                                q.triple.subject,
-                            ),
-                            &encoded,
-                        );
-                        batch.put_cf(
-                            cf_gosp,
-                            encode_gosp_key(
-                                graph,
-                                &q.triple.object,
-                                q.triple.subject,
-                                &q.triple.predicate,
-                            ),
-                            &encoded,
-                        );
-                    }
+                    batch.put_cf(cf_q, quad_key(q), encode_quad(q));
+                    index_ops.push(WriteOperation::PutQuad(q.clone()));
                 }
                 WriteOperation::DeleteQuad(q) => {
                     batch.delete_cf(cf_q, quad_key(q));
-                    if let Some(graph) = &q.graph_name {
-                        batch.delete_cf(
-                            cf_gspo,
-                            encode_gspo_key(
-                                graph,
-                                q.triple.subject,
-                                &q.triple.predicate,
-                                &q.triple.object,
-                            ),
-                        );
-                        batch.delete_cf(
-                            cf_gpos,
-                            encode_gpos_key(
-                                graph,
-                                &q.triple.predicate,
-                                &q.triple.object,
-                                q.triple.subject,
-                            ),
-                        );
-                        batch.delete_cf(
-                            cf_gosp,
-                            encode_gosp_key(
-                                graph,
-                                &q.triple.object,
-                                q.triple.subject,
-                                &q.triple.predicate,
-                            ),
-                        );
-                    }
+                    index_ops.push(WriteOperation::DeleteQuad(q.clone()));
                 }
                 WriteOperation::DeleteKey(key) => {
                     if let Some(subject_id) = key.components.first().copied() {
                         let (doomed, doomed_q) = self.scan_doomed_by_subject(subject_id)?;
                         removed += doomed.len() + doomed_q.len();
-                        for t in doomed {
-                            batch.delete_cf(cf_t, triple_key(&t));
-                            batch.delete_cf(
-                                cf_spo,
-                                encode_spo_key(t.subject, &t.predicate, &t.object),
-                            );
-                            batch.delete_cf(
-                                cf_pos,
-                                encode_pos_key(&t.predicate, &t.object, t.subject),
-                            );
-                            batch.delete_cf(
-                                cf_osp,
-                                encode_osp_key(&t.object, t.subject, &t.predicate),
-                            );
+                        for t in &doomed {
+                            batch.delete_cf(cf_t, triple_key(t));
+                            index_ops.push(WriteOperation::DeleteTriple(t.clone()));
                         }
-                        for q in doomed_q {
-                            batch.delete_cf(cf_q, quad_key(&q));
-                            if let Some(graph) = &q.graph_name {
-                                batch.delete_cf(
-                                    cf_gspo,
-                                    encode_gspo_key(
-                                        graph,
-                                        q.triple.subject,
-                                        &q.triple.predicate,
-                                        &q.triple.object,
-                                    ),
-                                );
-                                batch.delete_cf(
-                                    cf_gpos,
-                                    encode_gpos_key(
-                                        graph,
-                                        &q.triple.predicate,
-                                        &q.triple.object,
-                                        q.triple.subject,
-                                    ),
-                                );
-                                batch.delete_cf(
-                                    cf_gosp,
-                                    encode_gosp_key(
-                                        graph,
-                                        &q.triple.object,
-                                        q.triple.subject,
-                                        &q.triple.predicate,
-                                    ),
-                                );
-                            }
+                        for q in &doomed_q {
+                            batch.delete_cf(cf_q, quad_key(q));
+                            index_ops.push(WriteOperation::DeleteQuad(q.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        Self::durable_apply_index_cfs(self.db.as_ref(), batch, &index_ops)?;
+        Ok(removed)
+    }
+
+    /// Async-mode commit write (P2-04): update the primary CFs (and the
+    /// MVCC versions snapshots written by the caller) but defer index
+    /// maintenance to the durable `index_pending` backlog. `DeleteKey` is
+    /// decomposed here: the doomed pre-image (from the primary CFs) is
+    /// enqueued as per-entry deletes so the maintainer needs no live scan.
+    fn durable_apply_ops_async(
+        &self,
+        batch: &mut RocksBatch,
+        operations: &[WriteOperation],
+        seq: u64,
+    ) -> Result<usize, OntolithError> {
+        let cf_t = self.cf(CF_TRIPLES)?;
+        let cf_q = self.cf(CF_QUADS)?;
+        let cf_pending = self.cf(CF_INDEX_PENDING)?;
+        let mut removed = 0usize;
+        let mut idx = 0u64;
+        for op in operations {
+            match op {
+                WriteOperation::PutTriple(t) => {
+                    batch.put_cf(cf_t, triple_key(t), encode_triple(t));
+                    batch.put_cf(cf_pending, pending_key(seq, idx), encode_write_op(op));
+                    idx += 1;
+                }
+                WriteOperation::DeleteTriple(t) => {
+                    batch.delete_cf(cf_t, triple_key(t));
+                    batch.put_cf(cf_pending, pending_key(seq, idx), encode_write_op(op));
+                    idx += 1;
+                }
+                WriteOperation::PutQuad(q) => {
+                    batch.put_cf(cf_q, quad_key(q), encode_quad(q));
+                    batch.put_cf(cf_pending, pending_key(seq, idx), encode_write_op(op));
+                    idx += 1;
+                }
+                WriteOperation::DeleteQuad(q) => {
+                    batch.delete_cf(cf_q, quad_key(q));
+                    batch.put_cf(cf_pending, pending_key(seq, idx), encode_write_op(op));
+                    idx += 1;
+                }
+                WriteOperation::DeleteKey(key) => {
+                    if let Some(subject_id) = key.components.first().copied() {
+                        let (doomed, doomed_q) = self.scan_doomed_by_subject(subject_id)?;
+                        removed += doomed.len() + doomed_q.len();
+                        for t in &doomed {
+                            batch.delete_cf(cf_t, triple_key(t));
+                            batch.put_cf(
+                                cf_pending,
+                                pending_key(seq, idx),
+                                encode_write_op(&WriteOperation::DeleteTriple(t.clone())),
+                            );
+                            idx += 1;
+                        }
+                        for q in &doomed_q {
+                            batch.delete_cf(cf_q, quad_key(q));
+                            batch.put_cf(
+                                cf_pending,
+                                pending_key(seq, idx),
+                                encode_write_op(&WriteOperation::DeleteQuad(q.clone())),
+                            );
+                            idx += 1;
                         }
                     }
                 }
@@ -1371,7 +1657,11 @@ impl StorageEngine for RocksDbStorageEngine {
 
         let seq = self.next_version.fetch_add(1, Ordering::SeqCst);
         let mut rocks_batch = RocksBatch::default();
-        self.durable_apply_ops(&mut rocks_batch, &operations)?;
+        if self.index_maintenance == IndexMaintenance::Async {
+            self.durable_apply_ops_async(&mut rocks_batch, &operations, seq)?;
+        } else {
+            self.durable_apply_ops(&mut rocks_batch, &operations)?;
+        }
         let cf_v = self.cf(CF_VERSIONS)?;
         let cf_vq = self.cf(CF_VERSIONS_QUADS)?;
         for triple in &triples {
@@ -1463,10 +1753,13 @@ impl StorageEngine for RocksDbStorageEngine {
 
         let seq = self.next_version.fetch_add(1, Ordering::SeqCst);
         let mut rocks_batch = RocksBatch::default();
-        self.durable_apply_ops(
-            &mut rocks_batch,
-            std::slice::from_ref(&WriteOperation::DeleteKey(key.clone())),
-        )?;
+        let delete_key_op = WriteOperation::DeleteKey(key.clone());
+        let delete_ops = std::slice::from_ref(&delete_key_op);
+        if self.index_maintenance == IndexMaintenance::Async {
+            self.durable_apply_ops_async(&mut rocks_batch, delete_ops, seq)?;
+        } else {
+            self.durable_apply_ops(&mut rocks_batch, delete_ops)?;
+        }
         let cf_v = self.cf(CF_VERSIONS)?;
         let cf_vq = self.cf(CF_VERSIONS_QUADS)?;
         for triple in &triples {
@@ -1560,6 +1853,10 @@ impl StorageEngine for RocksDbStorageEngine {
         }
     }
 
+    fn index_maintenance(&self) -> IndexMaintenance {
+        self.index_maintenance
+    }
+
     fn default_graph_triples_in_txn(&self, txn_id: Option<TxnId>) -> Vec<Triple> {
         let mut triples = self
             .scan_triples_with_prefix(CF_TRIPLES, None)
@@ -1570,27 +1867,53 @@ impl StorageEngine for RocksDbStorageEngine {
     }
 
     fn triples_by_subject_in_txn(&self, subject: NodeId, txn_id: Option<TxnId>) -> Vec<Triple> {
-        let mut triples = self
-            .scan_triples_with_prefix(CF_SPO_INDEX, Some(&encode_spo_subject_prefix(subject)))
-            .unwrap_or_default();
+        // P2-04 async mode: fall back to the primary CF while the index
+        // maintainer is behind the watermark (correct but slower).
+        let mut triples = if self.index_caught_up() {
+            self.scan_triples_with_prefix(CF_SPO_INDEX, Some(&encode_spo_subject_prefix(subject)))
+                .unwrap_or_default()
+        } else {
+            self.scan_triples_with_prefix(CF_TRIPLES, None)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| t.subject == subject)
+                .collect()
+        };
         let ops = self.pending_ops(txn_id);
         Self::apply_ops_to_triple_projection(&mut triples, &ops, Some(subject), None, None);
         triples
     }
 
     fn triples_by_predicate_in_txn(&self, predicate: &Iri, txn_id: Option<TxnId>) -> Vec<Triple> {
-        let mut triples = self
-            .scan_triples_with_prefix(CF_POS_INDEX, Some(&encode_pos_predicate_prefix(predicate)))
-            .unwrap_or_default();
+        let mut triples = if self.index_caught_up() {
+            self.scan_triples_with_prefix(
+                CF_POS_INDEX,
+                Some(&encode_pos_predicate_prefix(predicate)),
+            )
+            .unwrap_or_default()
+        } else {
+            self.scan_triples_with_prefix(CF_TRIPLES, None)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| &t.predicate == predicate)
+                .collect()
+        };
         let ops = self.pending_ops(txn_id);
         Self::apply_ops_to_triple_projection(&mut triples, &ops, None, Some(predicate), None);
         triples
     }
 
     fn triples_by_object_in_txn(&self, object: &Term, txn_id: Option<TxnId>) -> Vec<Triple> {
-        let mut triples = self
-            .scan_triples_with_prefix(CF_OSP_INDEX, Some(&encode_osp_object_prefix(object)))
-            .unwrap_or_default();
+        let mut triples = if self.index_caught_up() {
+            self.scan_triples_with_prefix(CF_OSP_INDEX, Some(&encode_osp_object_prefix(object)))
+                .unwrap_or_default()
+        } else {
+            self.scan_triples_with_prefix(CF_TRIPLES, None)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| &t.object == object)
+                .collect()
+        };
         let ops = self.pending_ops(txn_id);
         Self::apply_ops_to_triple_projection(&mut triples, &ops, None, None, Some(object));
         triples
@@ -1642,30 +1965,43 @@ impl StorageEngine for RocksDbStorageEngine {
         txn_id: Option<TxnId>,
     ) -> Vec<Quad> {
         let _ = txn_id;
-        // Pick the most selective bound position: named-graph index CFs
-        // support (graph), (graph, subject), (graph, predicate), (graph,
-        // object) prefix scans (six-permutation coverage for quads).
-        let mut quads = if let Some(s) = subject {
-            self.scan_quads_with_prefix(
-                CF_GSPO_INDEX,
-                Some(&encode_gspo_subject_prefix(graph_name, s)),
-            )
-            .unwrap_or_default()
-        } else if let Some(p) = predicate {
-            self.scan_quads_with_prefix(
-                CF_GPOS_INDEX,
-                Some(&encode_gpos_predicate_prefix(graph_name, p)),
-            )
-            .unwrap_or_default()
-        } else if let Some(o) = object {
-            self.scan_quads_with_prefix(
-                CF_GOSP_INDEX,
-                Some(&encode_gosp_object_prefix(graph_name, o)),
-            )
-            .unwrap_or_default()
-        } else {
-            self.scan_quads_with_prefix(CF_GSPO_INDEX, Some(&encode_gspo_graph_prefix(graph_name)))
+        // P2-04 async mode: fall back to the primary quads CF while the
+        // named-graph index maintainer is behind the watermark.
+        let mut quads = if self.index_caught_up() {
+            // Pick the most selective bound position: named-graph index CFs
+            // support (graph), (graph, subject), (graph, predicate), (graph,
+            // object) prefix scans (six-permutation coverage for quads).
+            if let Some(s) = subject {
+                self.scan_quads_with_prefix(
+                    CF_GSPO_INDEX,
+                    Some(&encode_gspo_subject_prefix(graph_name, s)),
+                )
                 .unwrap_or_default()
+            } else if let Some(p) = predicate {
+                self.scan_quads_with_prefix(
+                    CF_GPOS_INDEX,
+                    Some(&encode_gpos_predicate_prefix(graph_name, p)),
+                )
+                .unwrap_or_default()
+            } else if let Some(o) = object {
+                self.scan_quads_with_prefix(
+                    CF_GOSP_INDEX,
+                    Some(&encode_gosp_object_prefix(graph_name, o)),
+                )
+                .unwrap_or_default()
+            } else {
+                self.scan_quads_with_prefix(
+                    CF_GSPO_INDEX,
+                    Some(&encode_gspo_graph_prefix(graph_name)),
+                )
+                .unwrap_or_default()
+            }
+        } else {
+            self.scan_quads_with_prefix(CF_QUADS, None)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|q| q.graph_name.as_ref() == Some(graph_name))
+                .collect()
         };
         if let Some(s) = subject {
             quads.retain(|q| q.triple.subject == s);
@@ -1773,6 +2109,24 @@ impl StorageEngine for RocksDbStorageEngine {
                 .unwrap_or_default()
         }
     }
+}
+
+impl Drop for RocksDbStorageEngine {
+    fn drop(&mut self) {
+        self.maintainer_stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.maintainer_thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Backlog key for one deferred index operation: big-endian commit sequence
+/// ‖ big-endian op index (P2-04 async mode).
+fn pending_key(seq: u64, index: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&encode_u64(seq));
+    out.extend_from_slice(&encode_u64(index));
+    out
 }
 
 /// Open a durable engine at `path` (creates directory if needed).
@@ -2669,6 +3023,9 @@ mod tests {
             index_bloom_bits_per_key: 10,
             index_block_cache_mb: 16,
             index_compression: IndexCompression::Lz4,
+            index_maintenance: IndexMaintenance::Sync,
+            async_index_interval_ms: INDEX_MAINTAINER_INTERVAL_MS,
+            async_index_maintainer_enabled: true,
         };
         {
             let engine = RocksDbStorageEngine::open_with_options(path, options).unwrap();
@@ -2703,6 +3060,9 @@ mod tests {
             index_bloom_bits_per_key: 10,
             index_block_cache_mb: 16,
             index_compression: IndexCompression::Lz4,
+            index_maintenance: IndexMaintenance::Sync,
+            async_index_interval_ms: INDEX_MAINTAINER_INTERVAL_MS,
+            async_index_maintainer_enabled: true,
         };
         {
             let engine = RocksDbStorageEngine::open_with_options(path, options).unwrap();
@@ -2919,5 +3279,211 @@ mod tests {
         assert!(engine.tenant_cf_get(b"t:acme").unwrap().is_some());
         assert!(engine.tenant_cf_get(b"t:globex").unwrap().is_none());
         assert_eq!(engine.tenant_cf_scan_prefix(prefix).unwrap().len(), 1);
+    }
+
+    // ---- P2-04: async index maintenance (watermark + main-CF fallback) ----
+
+    fn async_test_options(background: bool) -> RocksDbOptions {
+        RocksDbOptions {
+            index_maintenance: IndexMaintenance::Async,
+            async_index_interval_ms: 1,
+            async_index_maintainer_enabled: background,
+            ..RocksDbOptions::default()
+        }
+    }
+
+    fn p204_workload(engine: &dyn StorageEngine) {
+        let graph = Iri::new("urn:g");
+        let txn = TxnId::new(1);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![
+                    WriteOperation::PutTriple(Triple::new(
+                        NodeId::new(1),
+                        Iri::new("urn:p"),
+                        Term::Iri(Iri::new("urn:o1")),
+                    )),
+                    WriteOperation::PutTriple(Triple::new(
+                        NodeId::new(1),
+                        Iri::new("urn:q"),
+                        Term::Iri(Iri::new("urn:o2")),
+                    )),
+                    WriteOperation::PutTriple(Triple::new(
+                        NodeId::new(2),
+                        Iri::new("urn:p"),
+                        Term::Iri(Iri::new("urn:o2")),
+                    )),
+                    WriteOperation::PutQuad(Quad::in_named_graph(
+                        Triple::new(
+                            NodeId::new(1),
+                            Iri::new("urn:p"),
+                            Term::Iri(Iri::new("urn:o1")),
+                        ),
+                        graph.clone(),
+                    )),
+                ],
+            })
+            .unwrap();
+        engine.commit_transaction(txn).unwrap();
+        let del = TxnId::new(2);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: del,
+                operations: vec![WriteOperation::DeleteTriple(Triple::new(
+                    NodeId::new(2),
+                    Iri::new("urn:p"),
+                    Term::Iri(Iri::new("urn:o2")),
+                ))],
+            })
+            .unwrap();
+        engine.commit_transaction(del).unwrap();
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ReadView {
+        all: Vec<Triple>,
+        by_subject: Vec<Triple>,
+        by_predicate: Vec<Triple>,
+        by_object: Vec<Triple>,
+        quads_in_graph: Vec<Quad>,
+        quads_by_graph: Vec<Quad>,
+    }
+
+    fn read_view(engine: &dyn StorageEngine) -> ReadView {
+        ReadView {
+            all: engine.default_graph_triples(),
+            by_subject: engine.triples_by_subject_in_txn(NodeId::new(1), None),
+            by_predicate: engine.triples_by_predicate_in_txn(&Iri::new("urn:p"), None),
+            by_object: engine.triples_by_object_in_txn(&Term::Iri(Iri::new("urn:o2")), None),
+            quads_in_graph: engine.quads_matching_in_graph(
+                &Iri::new("urn:g"),
+                None,
+                None,
+                None,
+                None,
+            ),
+            quads_by_graph: engine.quads_by_graph_in_txn(Some(&Iri::new("urn:g")), None),
+        }
+    }
+
+    #[test]
+    fn async_index_maintenance_parity_before_and_after_catch_up() {
+        let sync_dir = tempfile::tempdir().unwrap();
+        let async_dir = tempfile::tempdir().unwrap();
+        // Explicit default options (not env-sensitive): this test must not
+        // observe the `ONTOLITH_INDEX_MAINTENANCE` window mutated by
+        // `env_selects_async_index_maintenance` running in parallel.
+        let sync =
+            RocksDbStorageEngine::open_with_options(sync_dir.path(), RocksDbOptions::default())
+                .unwrap();
+        let async_engine =
+            RocksDbStorageEngine::open_with_options(async_dir.path(), async_test_options(false))
+                .unwrap();
+        let async_engine = &async_engine;
+
+        assert_eq!(sync.index_maintenance(), IndexMaintenance::Sync);
+        assert_eq!(async_engine.index_maintenance(), IndexMaintenance::Async);
+
+        p204_workload(&sync);
+        p204_workload(async_engine);
+
+        // The maintainer is disabled and no catch-up ran: the index is behind
+        // the committed watermark, so reads must fall back to the primary CFs.
+        assert!(
+            async_engine.index_watermark.load(Ordering::SeqCst) < async_engine.committed_version()
+        );
+        assert_eq!(read_view(async_engine), read_view(&sync));
+
+        // Catch-up brings the index up to the latest commit; reads still match.
+        let applied = async_engine.catch_up_index().unwrap();
+        assert!(applied > 0);
+        assert_eq!(
+            async_engine.index_watermark.load(Ordering::SeqCst),
+            async_engine.committed_version()
+        );
+        assert_eq!(read_view(async_engine), read_view(&sync));
+
+        // delete_by_key (admin path) parity, again before and after catch-up.
+        let sync_key = StorageKey::spo_subject(NodeId::new(1));
+        let async_key = StorageKey::spo_subject(NodeId::new(1));
+        assert_eq!(
+            sync.delete_by_key(&sync_key).unwrap(),
+            async_engine.delete_by_key(&async_key).unwrap()
+        );
+        assert!(
+            async_engine.index_watermark.load(Ordering::SeqCst) < async_engine.committed_version()
+        );
+        assert_eq!(read_view(async_engine), read_view(&sync));
+        async_engine.catch_up_index().unwrap();
+        assert_eq!(read_view(async_engine), read_view(&sync));
+    }
+
+    #[test]
+    fn async_index_watermark_and_backlog_persist_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        {
+            let engine =
+                RocksDbStorageEngine::open_with_options(&path, async_test_options(false)).unwrap();
+            p204_workload(&engine);
+            // No catch-up before drop: backlog + watermark stay durable.
+            assert_eq!(engine.index_watermark.load(Ordering::SeqCst), 0);
+            let baseline = read_view(&engine);
+            drop(engine);
+
+            let reopened =
+                RocksDbStorageEngine::open_with_options(&path, async_test_options(false)).unwrap();
+            assert_eq!(reopened.index_maintenance(), IndexMaintenance::Async);
+            assert_eq!(reopened.index_watermark.load(Ordering::SeqCst), 0);
+            assert_eq!(read_view(&reopened), baseline);
+            let applied = reopened.catch_up_index().unwrap();
+            assert!(applied > 0);
+            assert_eq!(
+                reopened.index_watermark.load(Ordering::SeqCst),
+                reopened.committed_version()
+            );
+            assert_eq!(read_view(&reopened), baseline);
+        }
+    }
+
+    #[test]
+    fn async_background_maintainer_catches_up() {
+        let sync_dir = tempfile::tempdir().unwrap();
+        let async_dir = tempfile::tempdir().unwrap();
+        // Explicit default options (env-independent), see the parity test.
+        let sync =
+            RocksDbStorageEngine::open_with_options(sync_dir.path(), RocksDbOptions::default())
+                .unwrap();
+        let async_engine =
+            RocksDbStorageEngine::open_with_options(async_dir.path(), async_test_options(true))
+                .unwrap();
+        p204_workload(&sync);
+        p204_workload(&async_engine);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while async_engine.index_watermark.load(Ordering::SeqCst) < async_engine.committed_version()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background maintainer did not catch up in time"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(read_view(&async_engine), read_view(&sync));
+    }
+
+    #[test]
+    fn env_selects_async_index_maintenance() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(ENV_INDEX_MAINTENANCE, "async") };
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        unsafe { std::env::remove_var(ENV_INDEX_MAINTENANCE) };
+        assert_eq!(engine.index_maintenance(), IndexMaintenance::Async);
+        // Default (env unset) stays sync.
+        let dir2 = tempfile::tempdir().unwrap();
+        let sync = RocksDbStorageEngine::open(dir2.path()).unwrap();
+        assert_eq!(sync.index_maintenance(), IndexMaintenance::Sync);
     }
 }

@@ -25,7 +25,7 @@
 | 命名图（quad model） | 线性 `Vec<Quad>` 过滤 | **GraphIndex**（by_graph + 精确删） | GSPO 全置换 |
 | 字典稳定 ID / epoch | encode/decode | + `epoch()` API | 持久字典 / GC |
 | WAL 耐久后 ACK | 内存 WAL | 同左（契约不变） | 磁盘 fsync |
-| 索引维护可配置 sync/async | 隐式 sync rebuild | `IndexMaintenance::Sync` 声明；增量 sync | Async 实现 |
+| 索引维护可配置 sync/async | 隐式 sync rebuild | **`IndexMaintenance::Sync` 默认；`Async` 已实现（水位+主 CF 回退+后台维护线程）** | — |
 | 精确删除 / 幂等写入 | 仅 subject 前缀删；Put 可重复 | **DeleteTriple/DeleteQuad**；**Put 集合语义去重** | 压缩/vacuum |
 | 存储统计供优化器 | 无 | **`StorageStats`** | 直方图/代价模型 |
 | 多绑定模式探测 | 单键 lookup | **`triples_matching_in_txn` / `matching_in_txn`** | 统计驱动选路 |
@@ -177,7 +177,7 @@ ontolith-storage/src/
 
 1. RocksDB 读路径仍依赖 **打开时重建的内存二级索引**（非纯 CF 前缀扫描）。  
 2. **无真 MVCC 版本链** — 读 = 已提交 ∪ 本 txn staged。  
-3. **IndexMaintenance::Async** 仅枚举预留。  
+3. **IndexMaintenance::Async 已实现**（2026-09-02，P2-04）——延迟索引维护：提交写主 CF + `index_pending` 积压，后台维护线程按 `meta.index_watermark` 追赶索引 CF；读路径水位未追上时回退主 CF 扫描。  
 4. **命名图六置换** 已补（`GraphIndex` 新增 `by_subject`/`by_predicate`/`by_object` + `matching_in_named_graphs`）；默认图语句仍走 `TripleIndexes`。  
 5. **字典 GC / 压缩 / vacuum** 未做。  
 6. 构建需要本机能编译 `librocksdb-sys`（C++ 工具链）。  

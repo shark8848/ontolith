@@ -17,6 +17,12 @@ mod rocks;
 #[cfg(feature = "rocksdb-backend")]
 pub use rocks::RocksSemanticIndex;
 
+mod approx;
+mod remote;
+
+pub use approx::{LshConfig, LshSemanticIndex};
+pub use remote::{RemoteEmbeddingConfig, RemoteHttpEmbeddingProvider};
+
 /// Deterministic feature-hash embedding (P8-01 fallback, zero external deps).
 ///
 /// Tokenizes text into alphanumeric tokens plus character trigrams, hashes
@@ -118,18 +124,13 @@ impl EmbeddingProvider for FeatureHashEmbedding {
     }
 
     fn embed_term(&self, term: &Term) -> Result<Embedding, OntolithError> {
-        let text = match term {
-            Term::Iri(iri) => iri.as_str().to_owned(),
-            Term::BlankNode(id) => format!("_:{}", id.get()),
-            Term::Literal(lit) => literal_text(lit),
-        };
-        self.embed_text(&text)
+        self.embed_text(&term_text(term))
     }
 }
 
 /// Deterministic text projection of a literal (datatype/lang participate so
 /// `"1"^^xsd:boolean` and `true^^xsd:boolean` embed differently).
-fn literal_text(lit: &LiteralValue) -> String {
+pub(crate) fn literal_text(lit: &LiteralValue) -> String {
     match lit {
         LiteralValue::Lang { value, lang } => {
             format!("{}@{lang}", value.to_lowercase())
@@ -145,6 +146,17 @@ fn literal_text(lit: &LiteralValue) -> String {
             }
         }
         other => other.lexical_form().to_lowercase(),
+    }
+}
+
+/// Deterministic text projection of a term (IRI / blank node / literal),
+/// shared by every [`EmbeddingProvider`] so RDF terms stay stable across
+/// providers and restarts.
+pub(crate) fn term_text(term: &Term) -> String {
+    match term {
+        Term::Iri(iri) => iri.as_str().to_owned(),
+        Term::BlankNode(id) => format!("_:{}", id.get()),
+        Term::Literal(lit) => literal_text(lit),
     }
 }
 
@@ -180,7 +192,7 @@ fn dot_const<const D: usize>(qv: &[f32], row: &[f32]) -> f32 {
 /// Four-wide chunking keeps two independent chains of FMAs for ILP even when
 /// LLVM cannot unroll with constant bounds.
 #[inline]
-fn dot_runtime(qv: &[f32], row: &[f32]) -> f32 {
+pub(crate) fn dot_runtime(qv: &[f32], row: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     for (a, b) in qv
         .as_chunks::<4>()

@@ -1,8 +1,8 @@
 # L8 — AI-Native 语义扩展立项
 
 文档 ID: AI-L8-0001  
-版本: 0.1.4  
-状态: Active（R4 立项完成；P8-01 M1 语义核心 + M2 server 接线 + M3 持久化与增量更新 + P8-02 检索 KPI 门禁 + P8-03 代理集成扩展点完成）  
+版本: 0.1.5  
+状态: Active（R4 立项完成；P8-01 M1 语义核心 + M2 server 接线 + M3 持久化与增量更新 + P8-02 检索 KPI 门禁 + P8-03 代理集成扩展点 + ADR-0006 RemoteProvider/ANN 完成）  
 日期: 2026-08-09  
 对应代码: `crates/ontolith-ai` + `crates/ontolith-storage`（`semantic` CF）  
 计划: [Ontolith_Development_Plan.zh-CN.md](./Ontolith_Development_Plan.zh-CN.md) §6 R4 / Phase 8
@@ -31,7 +31,7 @@ R4 退出标准：
 
 | ID | 范围 | 非目标（本期） |
 |----|------|----------------|
-| P8-01 | 语义-向量桥接：RDF 项（IRI/字面量/词法）↔ 定长向量；可插拔 embedding 提供者；树内确定性 fallback；相似度计算；向量索引（内存首版） | 不引入外部 embedding 服务/SDK（无新 Tier A 依赖）；不做 ANN 近似索引 |
+| P8-01 | 语义-向量桥接：RDF 项（IRI/字面量/词法）↔ 定长向量；可插拔 embedding 提供者；树内确定性 fallback；相似度计算；向量索引（内存首版）；**RemoteProvider（外部 HTTP embedding，API key/缓存/超时，ADR-0006）+ ANN 近似索引（确定性多探针 LSH）** | 无新 Tier A 依赖（`ureq` 按 Tier B 登记，已在 lock）；不做 RAG 完整链路/文档切分 |
 | P8-02 | 检索增强接口：`/semantic/search?q=&k=` 语义检索 API；top-k 相关项返回；与 SPARQL 结果 JSON 同构 | 不做 RAG 完整链路/文档切分 |
 | P8-03 | 代理集成扩展点：`plugin-api` 增 `Retrieval` 能力；代理工具（tool）抽象：语义检索 → 语句/SHACL 验证 | 不做 MCP/外部协议绑定 |
 
@@ -42,12 +42,23 @@ R4 退出标准：
 ```text
 EmbeddingProvider (trait)
  ├─ FeatureHashEmbedding   ← 树内确定性 fallback（默认，无外部依赖）
- └─ (后续) RemoteProvider   ← 外部服务适配（API key、缓存、超时；走 RFC 引入）
+ └─ RemoteProvider         ← 外部 HTTP embedding 服务适配（ADR-0006；API key、缓存、
+                             超时；`ONTOLITH_SEMANTIC_EMBEDDING_URL` 显式启用，
+                             未配置时回退 feature-hash）
 ```
 
 - `Embedding { dim: usize, values: Vec<f32> }`，L2 归一化后存储，相似度用余弦。
 - `embed_text(&str) -> Result<Embedding>`：任意文本（查询串、词法形式）。
 - `embed_term(&Term) -> Result<Embedding>`：IRI/字面量/语言标签按确定性规则投影。
+- **RemoteProvider**（ADR-0006）：`RemoteHttpEmbeddingProvider` 以
+  OpenAI 兼容 JSON（`data[].embedding`）请求外部端点，bearer API key +
+  每请求超时 + 输入文本 FIFO 缓存（默认 4096）；响应维度必须等于配置
+  `dim`，返回向量 L2 归一化。传输层 `RemoteHttpTransport` 可注入（测试用
+  内存 fake，零 socket）。
+- **ANN 近似索引**（ADR-0006）：`LshSemanticIndex` 确定性多探针超平面 LSH
+  （固定种子 SplitMix64 投影矩阵），仅对候选桶做精确点积 top-k；候选不足或
+  小索引回退全量扫描（结果永不截断，只可能重排）。`SemanticSearchService::with_lsh`
+  暴露，检索仍是近似召回，验证仍走 SPARQL/SHACL。
 - **确定性要求**：同输入同输出（跨进程、跨重启），满足「可复现」KPI 与 W3C 结果集
   比对风格；feature-hash 使用稳定哈希（FNV-1a 64 位，树内实现），不依赖随机化。
 
