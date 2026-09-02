@@ -1,7 +1,7 @@
 # Ontolith 任务进度台账
 
 文档 ID: PROG-0001  
-版本: 0.1.69
+版本: 0.1.70
 状态: Active  
 创建: 2026-07-15  
 基准: [PLAN-0001](./Ontolith_Development_Plan.zh-CN.md)  
@@ -316,6 +316,7 @@ Stream 负责人（PLAN-0001 §9.1，2026-08-09 确认）：A 核心存储与事
 
 | 日期 | 作者 | 变更 |
 |------|------|------|
+| 2026-08-31 | Codex | **CI raft smoke 时序健壮性修复 DONE（PROG-0001 0.1.69→0.1.70）**：多节点 raft smoke 的单发 `replicate?append=1` 可能命中 openraft 选主后瞬时沉降窗口（leader 探测 1s 轮询粒度，负载下首个写可能被转发/让位，返回 `applied_entries` 但 commit 未推进，CI run #136 杀 follower 后复现）；将 `scripts/drill-rebalance-dr.sh::replicate_append` 有界重试（10 次 × 0.5s，持续失败打印响应体与节点日志）移植进 `.github/workflows/ci.yml` 两处 append；本地验证：原版 16 轮 4 败（25%）→ 修复版 6/6 通过；提交 `7b4a977` 触发 CI run #137 于 2026-09-02 回读全绿（completed success） |
 | 2026-08-30 | Codex | **JSON-LD 扩展落地 DONE（PROG-0001 0.1.68→0.1.69）**：① **`@reverse`**——term 定义 `@reverse: true|<iri>`（`true` 取 term 自身 IRI）与节点级 `"@reverse": {...}`，值作主语、当前节点作宾语；② **`@nest`**——`@nest` 关键字/别名与带 `@nest` 定义的 term，嵌套属性平铺到节点；③ **`@included`**——被包含节点入同图；④ **`@json`**——`@type: "@json"` → `rdf:JSON` 字面量（term 定义与值对象两条路径）；⑤ **远程 `@context`**——`RemoteContextLoader` 注入抽象（解析器零网络 I/O）+ 解析期缓存（同 URL 单次加载）+ 内联节点 `@context` 同支持；L5 ingest 经 `ONTOLITH_JSONLD_REMOTE_CONTEXT=1` 启用最小 HTTP GET loader（`http://` 仅，同 JWKS 先例），端到端测试；修复：value_term 嵌套节点 graph 贯通（命名图内嵌套节点不再漏到默认图）；parser 26→32 测、server 75→76 测，workspace 全量全绿 + fmt/clippy 零告警；[L3-ontolith-parser-query.md](./L3-ontolith-parser-query.md) JSON-LD 章节与已知限制更新；WBS-02 完成度 ~97%→~99%（剩余 `@import`/`@propagate` 等 1.1 进阶关键字） |
 | 2026-08-30 | Codex | **P2-05 备份调度接入管理面 DONE（PROG-0001 0.1.67→0.1.68）**：`StorageEngine` 新增 `create_backup` 抽象（默认 `Unsupported`，Rocks 经 BackupEngine flush 快照实现）；管理面新增 `/admin/data/backup`（按需）/`GET /admin/data/backup`（状态+近 20 次历史）/`/admin/data/backup/schedule`（调度配置，`enabled`+`interval_seconds`，启用幂等拉起后台调度线程，按最近运行时间判定到期）；env 契约 `ONTOLITH_BACKUP_DIR`（缺省回退 `<data_dir>/backups`）+ `ONTOLITH_BACKUP_INTERVAL_SECONDS`（启动即启用）；离线恢复沿用 `restore_backup`；server 71→75 测（ACL 强制 / 内存 501+失败历史 / 调度回读+非法间隔 400 / Rocks 端到端：ingest→备份→恢复到新目录→重开验证三胞胎存活），workspace 全量全绿 + fmt/clippy 零告警；[L5-management-platform-slo.md](./L5-management-platform-slo.md) 新增 §6 备份调度契约；剩余预留/后续轨仅 P2-04 Async 索引、Miri/sanitizer、RemoteProvider/ANN、JSON-LD 远程 `@context`/`@reverse` 扩展 |
 | 2026-08-29 | Codex | **WBS-02 JSON-LD 导入落地 DONE（PROG-0001 0.1.66→0.1.67）**：`ontolith-parser` 新增 JSON-LD 1.0/1.1 务实子集解析（`crates/ontolith-parser/src/infrastructure/json_ld.rs`，962 行）——`@context` 对象/数组合并（term→IRI、`prefix:` 展开、`@vocab`/`@base`/`@language`、keyword 别名）、`@id`/`@type`、string/number/boolean/object/array/null 属性值、嵌套节点（mint blank）、值对象（`@value`+`@language`/`@type`，XSD 字面量 coercion 与 Turtle/NT 同路径）、`@list`/`@set`/`@language`/`@index` 容器、`{"@id": g, "@graph": [...]}` 命名图 quads（修复：命名图 graph 参数贯通 emit 链路 + 顶层文档 @id 取图名）；`ParseFormat::JsonLd` 由 `Unsupported` 转为全实现，`is_implemented()` 恒真；server ingest 接通（`/data/json-ld`、`/data/jsonld`、content-type `application/ld+json`、`format=json-ld`），HTTP 端到端 ingest→SPARQL 回读测试；parser 17→26 测、server 70→71 测，workspace 全量测试全绿 + clippy 零告警；[L3-ontolith-parser-query.md](./L3-ontolith-parser-query.md) JSON-LD 状态 ❌→✅ + 已知限制更新；WBS-02 → 已完成（剩余 JSON-LD 远程 `@context`/`@reverse`/`@nest`/`@included`/`@json` 为后续轨） |
