@@ -99,6 +99,7 @@ fn literal_term(lit: &LiteralValue) -> String {
         LiteralValue::Lang { value, lang } => {
             format!("\"{}\"@{}", escape_string(value), lang.as_str())
         }
+        LiteralValue::String(value) => format!("\"{}\"", escape_string(value)),
         _ => {
             let lexical = escape_string(&lit.lexical_form());
             format!("\"{lexical}\"^^<{}>", lit.xsd_datatype_iri().as_str())
@@ -222,11 +223,11 @@ mod tests {
     }
 
     #[test]
-    fn percent_encoding_leaves_query_terminals_intact() {
+    fn percent_encoding_keeps_only_rfc3986_unreserved() {
         let encoded = percent_encode("SELECT * WHERE { ?s <http://e/p> ?o }");
         assert_eq!(
             encoded,
-            "SELECT%20*%20WHERE%20%7B%20%3Fs%20%3Chttp%3A%2F%2Fe%2Fp%3E%20%3Fo%20%7D"
+            "SELECT%20%2A%20WHERE%20%7B%20%3Fs%20%3Chttp%3A%2F%2Fe%2Fp%3E%20%3Fo%20%7D"
         );
         let target = append_query("http://localhost:9999/sparql", &encoded);
         assert!(target.starts_with("http://localhost:9999/sparql?query=SELECT%20"));
