@@ -4,8 +4,8 @@ use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
     AggregateExpr, AggregateFunction, AggregateSpec, Algebra, BoundValue, DescribeTargets,
     Expression, GraphRef, GraphTarget, PathExpression, PreemptionReason, PreemptionToken,
-    QueryKind, QueryPlan, QueryRequest, QueryResult, Solution, TenantScope, TermPattern,
-    TriplePattern, UpdateOp, UpdatePattern,
+    QueryKind, QueryPlan, QueryRequest, QueryResult, ServiceClient, ServiceEndpoint, Solution,
+    TenantScope, TermPattern, TriplePattern, UpdateOp, UpdatePattern,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
@@ -87,6 +87,8 @@ impl AlgebraExecutor {
             base: plan.base.as_deref(),
             bnode: RefCell::new(BnodeState::default()),
             uuid: RefCell::new(uuid_seed()),
+            service: request.service_client.as_deref(),
+            fed: &[],
         };
 
         // Projection expressions must see every variable bound by the WHERE
@@ -212,6 +214,29 @@ struct ExecCtx<'a> {
     base: Option<&'a str>,
     bnode: RefCell<BnodeState>,
     uuid: RefCell<u64>,
+    /// SPARQL `SERVICE` federation client (None ⇒ SERVICE fails unless SILENT).
+    service: Option<&'a dyn ServiceClient>,
+    /// Solutions propagated from the enclosing join's left side; SERVICE
+    /// nodes dispatch per propagated row with VALUES over the shared terms.
+    fed: &'a [Solution],
+}
+
+impl<'a> ExecCtx<'a> {
+    fn with_fed<'b>(&self, fed: &'b [Solution]) -> ExecCtx<'b>
+    where
+        'a: 'b,
+    {
+        ExecCtx {
+            read: self.read,
+            txn_id: self.txn_id,
+            token: self.token,
+            base: self.base,
+            bnode: RefCell::new(BnodeState::default()),
+            uuid: RefCell::new(*self.uuid.borrow()),
+            service: self.service,
+            fed,
+        }
+    }
 }
 
 /// Per-query blank node state for `BNODE()` / `BNODE(str)` (SPARQL: the same
@@ -311,6 +336,8 @@ pub fn execute_update(
         base: None,
         bnode: RefCell::new(BnodeState::default()),
         uuid: RefCell::new(uuid_seed()),
+        service: request.service_client.as_deref(),
+        fed: &[],
     };
     let mut affected: u64 = 0;
     let mut staged = false;
@@ -371,6 +398,8 @@ pub fn execute_update(
                         base: None,
                         bnode: RefCell::new(BnodeState::default()),
                         uuid: RefCell::new(uuid_seed()),
+                        service: request.service_client.as_deref(),
+                        fed: &[],
                     };
                     let solutions = eval_algebra(where_pattern, &op_ctx)?;
                     let mut ops = Vec::new();
@@ -430,6 +459,8 @@ pub fn execute_update(
                         base: None,
                         bnode: RefCell::new(BnodeState::default()),
                         uuid: RefCell::new(uuid_seed()),
+                        service: request.service_client.as_deref(),
+                        fed: &[],
                     };
                     let where_algebra = update_patterns_algebra(patterns);
                     let solutions = eval_algebra(&where_algebra, &op_ctx)?;
@@ -1379,8 +1410,15 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
         Algebra::Bgp(patterns) => eval_bgp(patterns, ctx),
         Algebra::Join { left, right } => {
             let l = eval_algebra(left, ctx)?;
-            let r = eval_algebra(right, ctx)?;
-            hash_join(l, r, ctx)
+            if l.is_empty() {
+                return Ok(Vec::new());
+            }
+            if algebra_has_service(right) {
+                dependent_join(l, right, ctx)
+            } else {
+                let r = eval_algebra(right, ctx)?;
+                hash_join(l, r, ctx)
+            }
         }
         Algebra::LeftJoin {
             left,
@@ -1388,8 +1426,15 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
             condition,
         } => {
             let l = eval_algebra(left, ctx)?;
-            let r = eval_algebra(right, ctx)?;
-            left_join(l, r, condition.as_ref(), ctx)
+            if l.is_empty() {
+                return Ok(Vec::new());
+            }
+            if algebra_has_service(right) {
+                dependent_left_join(l, right, condition.as_ref(), ctx)
+            } else {
+                let r = eval_algebra(right, ctx)?;
+                left_join(l, r, condition.as_ref(), ctx)
+            }
         }
         Algebra::Union { left, right } => {
             let mut l = eval_algebra(left, ctx)?;
@@ -1505,7 +1550,147 @@ fn eval_algebra(algebra: &Algebra, ctx: &ExecCtx<'_>) -> Result<Vec<Solution>, O
             object,
         } => eval_path_pattern(subject, path, object, ctx),
         Algebra::Graph { graph, inner } => eval_graph_pattern(graph, inner, ctx),
+        Algebra::Service {
+            endpoint,
+            silent,
+            text,
+            ..
+        } => eval_service_node(endpoint, *silent, text, ctx),
     }
+}
+
+/// True when a subtree contains a `SERVICE` node (used to choose dependent
+/// per-row dispatch for the right side of joins/optionals).
+fn algebra_has_service(algebra: &Algebra) -> bool {
+    match algebra {
+        Algebra::Service { .. } => true,
+        Algebra::Join { left, right }
+        | Algebra::LeftJoin { left, right, .. }
+        | Algebra::Minus { left, right }
+        | Algebra::Union { left, right } => algebra_has_service(left) || algebra_has_service(right),
+        Algebra::Filter { input, .. }
+        | Algebra::Extend { input, .. }
+        | Algebra::Distinct { input }
+        | Algebra::Project { input, .. }
+        | Algebra::OrderBy { input, .. }
+        | Algebra::Slice { input, .. }
+        | Algebra::Aggregate { input, .. }
+        | Algebra::Graph { inner: input, .. } => algebra_has_service(input),
+        _ => false,
+    }
+}
+
+/// Join where the right side contains a `SERVICE`: dispatch per left row so
+/// the remote query is constrained with VALUES over the row's bindings
+/// (SPARQL 1.1 Federated Query dependent evaluation).
+fn dependent_join(
+    left: Vec<Solution>,
+    right: &Algebra,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Solution>, OntolithError> {
+    let mut out = Vec::new();
+    for row in &left {
+        ctx.check()?;
+        let sub = ctx.with_fed(std::slice::from_ref(row));
+        let rows = eval_algebra(right, &sub)?;
+        for r in rows {
+            if let Some(m) = merge_solutions_compatible(row, &r, &sub)? {
+                out.push(m);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// OPTIONAL whose right side contains a `SERVICE`: evaluate the optional
+/// right per left row (dependent dispatch), preserving unmatched left rows.
+fn dependent_left_join(
+    left: Vec<Solution>,
+    right: &Algebra,
+    condition: Option<&Expression>,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Solution>, OntolithError> {
+    let mut out = Vec::new();
+    for row in &left {
+        let sub = ctx.with_fed(std::slice::from_ref(row));
+        let mut matched = false;
+        let rows = eval_algebra(right, &sub)?;
+        for r in rows {
+            ctx.check()?;
+            if let Some(m) = merge_solutions_compatible(row, &r, &sub)? {
+                let ok = condition
+                    .map(|c| eval_expr_bool(c, &m, &sub).unwrap_or(false))
+                    .unwrap_or(true);
+                if ok {
+                    out.push(m);
+                    matched = true;
+                }
+            }
+        }
+        if !matched {
+            out.push(row.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Evaluate one `SERVICE` node. With a fed context the endpoint (and any
+/// shared bindings) is resolved per propagated row; without one the inner
+/// pattern is dispatched once, unconstrained.
+fn eval_service_node(
+    endpoint: &ServiceEndpoint,
+    silent: bool,
+    text: &str,
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Solution>, OntolithError> {
+    let Some(client) = ctx.service else {
+        if silent {
+            return Ok(Vec::new());
+        }
+        return Err(OntolithError::Unsupported(
+            "SERVICE requires a federation client on the request",
+        ));
+    };
+    let bases: Vec<Solution> = if ctx.fed.is_empty() {
+        vec![Solution::new()]
+    } else {
+        ctx.fed.to_vec()
+    };
+    let mut out = Vec::new();
+    for base in &bases {
+        ctx.check()?;
+        let url = match endpoint {
+            ServiceEndpoint::Iri(iri) => iri.as_str().to_owned(),
+            ServiceEndpoint::Variable(var) => match base.get(var) {
+                Some(BoundValue::Iri(iri)) => iri.as_str().to_owned(),
+                _ if silent => continue,
+                _ => {
+                    return Err(OntolithError::Failed(format!(
+                        "SERVICE variable ?{var} is not bound to an IRI endpoint"
+                    )));
+                }
+            },
+        };
+        let propagated: Vec<(String, BoundValue)> = base
+            .bindings
+            .iter()
+            .filter(|(_, v)| matches!(v, BoundValue::Iri(_) | BoundValue::Literal(_)))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let rows = match client.evaluate(&url, text, &propagated) {
+            Ok(rows) => rows,
+            Err(_) if silent => continue,
+            Err(e) => return Err(e),
+        };
+        for row in rows {
+            let mut remote = Solution::new();
+            remote.bindings = row;
+            if let Some(m) = base.merge(&remote) {
+                out.push(m);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `GRAPH (iri|?var) { pattern }` evaluation: a constant IRI scopes the inner
@@ -1526,6 +1711,8 @@ fn eval_graph_pattern(
                 base: ctx.base,
                 bnode: RefCell::new(BnodeState::default()),
                 uuid: RefCell::new(*ctx.uuid.borrow()),
+                service: ctx.service,
+                fed: ctx.fed,
             };
             eval_algebra(inner, &sub_ctx)
         }
@@ -1542,6 +1729,8 @@ fn eval_graph_pattern(
                     base: ctx.base,
                     bnode: RefCell::new(BnodeState::default()),
                     uuid: RefCell::new(*ctx.uuid.borrow()),
+                    service: ctx.service,
+                    fed: ctx.fed,
                 };
                 let rows = eval_algebra(inner, &sub_ctx)?;
                 for mut s in rows {

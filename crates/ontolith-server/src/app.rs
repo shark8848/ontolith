@@ -1,5 +1,6 @@
 //! Application state and route handlers for L5 HTTP gateway.
 
+use crate::federation::HttpServiceClient;
 use crate::http::{HttpRequest, HttpResponse, now_ms};
 use crate::reasoning::{
     InferenceConfig, ReasoningReadService, base_read_service, reasoning_input_with_ontology,
@@ -1261,6 +1262,11 @@ impl AppState {
         if let Some(t) = timeout_ms {
             qreq = qreq.with_timeout(t);
         }
+        // SPARQL 1.1 Federated Query: SERVICE dispatch over HTTP (used only
+        // when the plan actually contains a SERVICE node).
+        qreq.service_client = Some(Arc::new(HttpServiceClient::new(Arc::clone(
+            &self.dictionary,
+        ))));
         qreq
     }
 
@@ -3086,6 +3092,7 @@ mod tests {
     use ontolith_core::domain::{GraphId, Iri, ObjectId};
     use ontolith_security::infrastructure::{CachingJwks, Jwks, JwksFetcher, JwksVerifier};
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     fn sparql_req(method: &str, query: &str) -> HttpRequest {
         let mut headers = HashMap::new();
@@ -4174,6 +4181,103 @@ mod tests {
         );
         serve.join().expect("serve turtle foreign");
         assert_eq!(resp.status, 403, "{}", String::from_utf8_lossy(&resp.body));
+    }
+
+    /// Accept `count` GET requests and answer each with a canned SPARQL
+    /// results body; the raw request head is recorded for assertions. The
+    /// body is picked by scanning for the percent-encoded IRI of the expected
+    /// propagated value.
+    fn serve_federation_sparql(
+        count: usize,
+        bodies: &[&str],
+        requests: Arc<Mutex<Vec<String>>>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bodies: Vec<String> = bodies.iter().map(|b| b.to_string()).collect();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept().expect("accept federation fetch");
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                requests.lock().unwrap().push(head.clone());
+                let body = bodies
+                    .iter()
+                    .find(|b| {
+                        head.contains("ex.org%2Fbob") && b.contains("Bob")
+                            || head.contains("ex.org%2Fcarol") && b.contains("Carol")
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/sparql-results+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(resp.as_bytes())
+                    .expect("write federation response");
+            }
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn service_federation_select_e2e_via_http() {
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let seed = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "INSERT DATA { \
+                     <http://ex.org/alice> <http://ex.org/knows> <http://ex.org/bob> . \
+                     <http://ex.org/alice> <http://ex.org/knows> <http://ex.org/carol> . \
+                 }",
+            ),
+        );
+        assert_eq!(seed.status, 200, "{}", String::from_utf8_lossy(&seed.body));
+
+        let bob_body = r#"{"head":{"vars":["o","n"]},"results":{"bindings":[
+            {"o":{"type":"uri","value":"http://ex.org/bob"},"n":{"type":"literal","value":"Bob"}}]}}"#;
+        let carol_body = r#"{"head":{"vars":["o","n"]},"results":{"bindings":[
+            {"o":{"type":"uri","value":"http://ex.org/carol"},"n":{"type":"literal","value":"Carol"}}]}}"#;
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let (addr, serve) =
+            serve_federation_sparql(2, &[bob_body, carol_body], Arc::clone(&requests));
+
+        let query = format!(
+            "SELECT ?o ?n WHERE {{ \
+                 ?s <http://ex.org/knows> ?o . \
+                 SERVICE <http://{addr}/sparql> {{ ?o <http://ex.org/name> ?n }} \
+             }}"
+        );
+        let resp = dispatch_for_test(&state, sparql_req("POST", &query));
+        serve.join().expect("federation responder");
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("Bob"), "missing Bob: {body}");
+        assert!(body.contains("Carol"), "missing Carol: {body}");
+        assert_eq!(body.matches("Bob").count(), 1, "duplicates: {body}");
+        assert_eq!(body.matches("Carol").count(), 1, "duplicates: {body}");
+
+        let heads = requests.lock().unwrap();
+        assert_eq!(heads.len(), 2, "one remote dispatch per local row");
+        let joined = heads.join("|");
+        assert!(
+            joined.contains("ex.org%2Fbob"),
+            "VALUES bob expected: {joined}"
+        );
+        assert!(
+            joined.contains("ex.org%2Fcarol"),
+            "VALUES carol expected: {joined}"
+        );
+        assert!(
+            joined.contains("VALUES"),
+            "dependent VALUES dispatch: {joined}"
+        );
     }
 
     #[test]

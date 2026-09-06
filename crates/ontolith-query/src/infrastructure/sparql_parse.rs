@@ -7,7 +7,8 @@
 use crate::domain::{
     AggregateExpr, AggregateFunction, AggregateSpec, Algebra, DescribeTargets, Expression,
     GraphRef, GraphTarget, OrderKey, PathExpression, ProjectionExpr, QueryKind, QueryPlan,
-    QueryPlanId, QueryRequest, TermPattern, TriplePattern, UpdateOp, UpdatePattern,
+    QueryPlanId, QueryRequest, ServiceEndpoint, TermPattern, TriplePattern, UpdateOp,
+    UpdatePattern,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue};
 use ontolith_core::error::OntolithError;
@@ -1258,6 +1259,44 @@ impl<'a> SparqlParser<'a> {
                 let subquery = self.parse_subquery_select()?;
                 acc = join(acc, subquery);
                 self.logical.push("subquery".into());
+            } else if self.eat_keyword("SERVICE") {
+                // SPARQL 1.1 Federated Query `SERVICE [SILENT] (iri|?var) {}`.
+                self.skip();
+                let silent = self.eat_keyword("SILENT");
+                self.skip();
+                let endpoint = self.parse_var_or_term(false)?;
+                let endpoint = match endpoint {
+                    TermPattern::Iri(iri) => ServiceEndpoint::Iri(iri),
+                    TermPattern::Variable(v) => ServiceEndpoint::Variable(v),
+                    _ => return Err(self.err("SERVICE endpoint must be an IRI or a variable")),
+                };
+                self.skip();
+                let body_start = self.pos;
+                let inner = self.parse_group_graph_pattern()?;
+                let raw = &self.input[body_start..self.pos];
+                let trimmed = raw.trim();
+                // Drop the outer `{ … }` braces; the body may itself contain
+                // balanced nested braces (OPTIONAL/UNION/sub-selects).
+                let body = trimmed
+                    .strip_prefix('{')
+                    .and_then(|r| r.strip_suffix('}'))
+                    .unwrap_or(trimmed)
+                    .trim()
+                    .to_owned();
+                acc = join(
+                    acc,
+                    Algebra::Service {
+                        endpoint,
+                        silent,
+                        text: body,
+                        inner: Box::new(inner),
+                    },
+                );
+                self.logical.push("service".into());
+                self.skip();
+                if self.peek_char() == Some('.') {
+                    self.bump();
+                }
             } else if self.peek_char() == Some('{') {
                 // Nested group or Union left side already in group: `{ A } UNION { B }`
                 let nested = self.parse_group_graph_pattern()?;
@@ -3031,6 +3070,7 @@ fn apply_subject_hint(algebra: &mut Algebra, node: ontolith_core::domain::NodeId
             true
         }
         Algebra::Path { .. } => false,
+        Algebra::Service { .. } => false,
         _ => false,
     }
 }
@@ -3045,6 +3085,7 @@ fn algebra_tag(a: &Algebra) -> &'static str {
         Algebra::Aggregate { .. } => "aggregate",
         Algebra::Path { .. } => "path",
         Algebra::Graph { .. } => "graph",
+        Algebra::Service { .. } => "service",
         Algebra::Identity => "identity",
         _ => "algebra",
     }
@@ -3189,6 +3230,9 @@ fn walk_physical(algebra: &Algebra, steps: &mut Vec<String>) {
         }
         Algebra::Graph { .. } => {
             steps.push("graph".into());
+        }
+        Algebra::Service { endpoint, .. } => {
+            steps.push(format!("service:{endpoint:?}"));
         }
     }
 }
@@ -3498,6 +3542,14 @@ fn collect_algebra_vars(algebra: &Algebra, out: &mut BTreeSet<String>) {
             }
             collect_algebra_vars(inner, out);
         }
+        Algebra::Service {
+            endpoint, inner, ..
+        } => {
+            if let ServiceEndpoint::Variable(v) = endpoint {
+                out.insert(v.clone());
+            }
+            collect_algebra_vars(inner, out);
+        }
     }
 }
 
@@ -3587,6 +3639,7 @@ fn algebra_contains_path(algebra: &Algebra) -> bool {
         | Algebra::Aggregate { input, .. } => algebra_contains_path(input),
         Algebra::Values { .. } => false,
         Algebra::Graph { inner, .. } => algebra_contains_path(inner),
+        Algebra::Service { inner, .. } => algebra_contains_path(inner),
     }
 }
 
@@ -3605,6 +3658,7 @@ mod tests {
             timeout_ms: None,
             cancel: None,
             consistency: ConsistencyLevel::Strong,
+            service_client: None,
         }
     }
 
@@ -3729,6 +3783,94 @@ mod tests {
             let text = format!("SELECT ?s ?o WHERE {{ {body} }}");
             let err = plan_query(&req(&text)).unwrap_err().message().to_string();
             assert!(!err.is_empty(), "illegal path accepted ({body})");
+        }
+    }
+
+    fn find_service(algebra: &Algebra) -> Option<&Algebra> {
+        match algebra {
+            s @ Algebra::Service { .. } => Some(s),
+            Algebra::Join { left, right }
+            | Algebra::LeftJoin { left, right, .. }
+            | Algebra::Minus { left, right }
+            | Algebra::Union { left, right } => find_service(left).or_else(|| find_service(right)),
+            Algebra::Filter { input, .. }
+            | Algebra::Extend { input, .. }
+            | Algebra::Distinct { input }
+            | Algebra::Project { input, .. }
+            | Algebra::OrderBy { input, .. }
+            | Algebra::Slice { input, .. }
+            | Algebra::Aggregate { input, .. }
+            | Algebra::Graph { inner: input, .. } => find_service(input),
+            _ => None,
+        }
+    }
+
+    /// SPARQL 1.1 Federated Query: `SERVICE [SILENT] (iri|?var) { … }` is
+    /// parsed into a `Service` algebra node carrying the verbatim inner group
+    /// body (for remote re-submission) and the endpoint/silent flags.
+    #[test]
+    fn service_grammar_parses_iri_and_variable_endpoints() {
+        let plan = plan_query(&req("SELECT * WHERE { \
+                 ?s <http://e/knows> ?o . \
+                 SERVICE SILENT <http://ep/sparql> { ?o <http://e/name> ?n } \
+             }"))
+        .expect("SERVICE SILENT <iri> parse");
+        let svc = find_service(&plan.algebra).expect("algebra contains service");
+        let Algebra::Service {
+            endpoint,
+            silent,
+            text,
+            inner,
+        } = svc
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            endpoint,
+            &ServiceEndpoint::Iri(Iri::new("http://ep/sparql"))
+        );
+        assert!(*silent);
+        assert_eq!(
+            text.trim(),
+            "?o <http://e/name> ?n",
+            "body must be the verbatim inner group without braces"
+        );
+        assert!(!text.contains('{') && !text.contains('}'));
+        assert!(
+            !matches!(inner.as_ref(), Algebra::Identity),
+            "inner group must contain the ?o name pattern"
+        );
+
+        let var_endpoint = plan_query(&req(
+            "SELECT * WHERE { ?s <http://e/knows> ?o . SERVICE ?ep { ?o <http://e/name> ?n } }",
+        ))
+        .expect("SERVICE ?var parse");
+        let svc = find_service(&var_endpoint.algebra).expect("variable endpoint service");
+        let Algebra::Service { endpoint, .. } = svc else {
+            unreachable!()
+        };
+        assert_eq!(endpoint, &ServiceEndpoint::Variable("ep".into()));
+
+        // Nested in OPTIONAL and after a UNION also parse.
+        let nested = plan_query(&req("SELECT * WHERE { ?s <http://e/knows> ?o . \
+                OPTIONAL { SERVICE <http://ep/sparql> { ?o <http://e/name> ?n } } }"))
+        .expect("SERVICE inside OPTIONAL parse");
+        assert!(find_service(&nested.algebra).is_some());
+    }
+
+    /// Malformed SERVICE forms are rejected deterministically.
+    #[test]
+    fn service_grammar_rejects_malformed_forms() {
+        for body in [
+            "SERVICE { ?s ?p ?o }",                          // missing endpoint
+            "SERVICE <http://ep/sparql>",                    // missing group
+            "SERVICE SILENT { ?s ?p ?o }",                   // SILENT without endpoint
+            "SERVICE 42 { ?s ?p ?o }",                       // literal endpoint
+            "SERVICE SILENT <http://e/p> { ?s ?p ?o } junk", // trailing junk
+        ] {
+            let text = format!("SELECT * WHERE {{ {body} }}");
+            let err = plan_query(&req(&text)).expect_err("must reject");
+            assert!(!err.message().is_empty(), "accepted {body}");
         }
     }
 }

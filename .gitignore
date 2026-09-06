@@ -10,3 +10,6 @@ prod/
 
 # Local RocksDB scratch data (drill leftovers; never commit)
 data/
+
+# Qoder agent worktrees (delegated agent scratch; never commit)
+.qoder/

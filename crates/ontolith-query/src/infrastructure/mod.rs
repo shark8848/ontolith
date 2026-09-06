@@ -352,9 +352,10 @@ mod tests {
     use super::*;
     use crate::application::QueryPipeline;
     use crate::domain::{
-        Algebra, BoundValue, QueryRequest, TenantScope, TermPattern, TriplePattern,
+        Algebra, BoundValue, QueryRequest, ServiceClient, TenantScope, TermPattern, TriplePattern,
     };
     use ontolith_core::domain::{Iri, LiteralValue, NodeId};
+    use ontolith_core::error::OntolithError;
     use ontolith_rdf::domain::{Quad, Term, Triple};
     use ontolith_storage::application::{
         DictionaryCodec, QuadRepository, StorageEngine, TripleRepository,
@@ -363,7 +364,9 @@ mod tests {
         InMemoryDictionary, InMemoryQuadRepository, InMemoryStorageEngine, InMemoryTripleRepository,
     };
     use ontolith_transaction::domain::TxnId;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     fn seed() -> (Arc<InMemoryStorageEngine>, Arc<dyn TripleRepository>) {
@@ -2909,5 +2912,272 @@ mod tests {
             .execute(&QueryRequest::new("DESCRIBE <http://ex.org/nobody>"))
             .unwrap();
         assert!(r.construct_triples.is_empty());
+    }
+
+    /// Recording fake SPARQL `SERVICE` client: logs every dispatch and returns
+    /// a `?n` row per propagated `?o` IRI (names come from `names`).
+    type DispatchCall = (String, String, Vec<(String, BoundValue)>);
+
+    struct FakeServiceClient {
+        calls: Arc<Mutex<Vec<DispatchCall>>>,
+        names: BTreeMap<String, String>,
+        fail: bool,
+    }
+
+    fn as_service_client(client: Arc<FakeServiceClient>) -> Arc<dyn ServiceClient> {
+        client
+    }
+
+    impl ServiceClient for FakeServiceClient {
+        fn evaluate(
+            &self,
+            endpoint: &str,
+            group_body: &str,
+            propagated: &[(String, BoundValue)],
+        ) -> Result<Vec<BTreeMap<String, BoundValue>>, OntolithError> {
+            self.calls.lock().unwrap().push((
+                endpoint.to_owned(),
+                group_body.to_owned(),
+                propagated.to_vec(),
+            ));
+            if self.fail {
+                return Err(OntolithError::failed("remote boom"));
+            }
+            let mut out = Vec::new();
+            for (var, value) in propagated {
+                if var == "o"
+                    && let BoundValue::Iri(iri) = value
+                    && let Some(name) = self.names.get(iri.as_str())
+                {
+                    let mut row = BTreeMap::new();
+                    row.insert(
+                        "n".to_owned(),
+                        BoundValue::Literal(LiteralValue::String(name.clone())),
+                    );
+                    out.push(row);
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    fn seed_knows_graph() -> (
+        Arc<InMemoryStorageEngine>,
+        Arc<InMemoryDictionary>,
+        Arc<dyn TripleRepository>,
+    ) {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+        let alice = dict.encode_node("http://ex.org/alice");
+        let knows = Iri::new("http://ex.org/knows");
+        let txn = TxnId::new(71);
+        for who in ["http://ex.org/bob", "http://ex.org/carol"] {
+            repo.insert(
+                txn,
+                Triple {
+                    subject: alice,
+                    predicate: knows.clone(),
+                    object: Term::Iri(Iri::new(who)),
+                },
+            )
+            .unwrap();
+        }
+        engine.commit_transaction(txn).unwrap();
+        (engine, dict, repo)
+    }
+
+    /// Join with a SERVICE on the right dispatches the remote query per left
+    /// row, propagating the row bindings as VALUES so the endpoint returns
+    /// only compatible solutions.
+    #[test]
+    fn service_join_dispatches_per_row_with_propagated_values() {
+        let (_engine, dict, repo) = seed_knows_graph();
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let client = Arc::new(FakeServiceClient {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            names: [
+                ("http://ex.org/bob".to_owned(), "Bob".to_owned()),
+                ("http://ex.org/carol".to_owned(), "Carol".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            fail: false,
+        });
+        let mut req = QueryRequest::new(
+            "SELECT ?o ?n WHERE { \
+                 ?s <http://ex.org/knows> ?o . \
+                 SERVICE <http://ep.example/sparql> { ?o <http://ex.org/name> ?n } \
+             }",
+        );
+        req.service_client = Some(as_service_client(Arc::clone(&client)));
+        let r = p.execute(&req).expect("federated select");
+        let mut pairs: Vec<(String, String)> = r
+            .solutions
+            .iter()
+            .map(|s| {
+                let o = match s.get("o").unwrap() {
+                    BoundValue::Iri(i) => i.as_str().to_owned(),
+                    other => panic!("expected iri o, got {other:?}"),
+                };
+                let n = match s.get("n").unwrap() {
+                    BoundValue::Literal(LiteralValue::String(v)) => v.clone(),
+                    other => panic!("expected string n, got {other:?}"),
+                };
+                (o, n)
+            })
+            .collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("http://ex.org/bob".to_owned(), "Bob".to_owned()),
+                ("http://ex.org/carol".to_owned(), "Carol".to_owned()),
+            ]
+        );
+
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "one remote dispatch per local row");
+        for (_endpoint, body, propagated) in calls.iter() {
+            assert_eq!(_endpoint, "http://ep.example/sparql");
+            assert_eq!(body.trim(), "?o <http://ex.org/name> ?n");
+            let o = propagated
+                .iter()
+                .find(|(v, _)| v == "o")
+                .expect("o propagated");
+            assert!(matches!(o.1, BoundValue::Iri(_)));
+        }
+    }
+
+    /// OPTIONAL over a SERVICE: unmatched local rows survive with the remote
+    /// variable unbound (dependent per-row dispatch still applies).
+    #[test]
+    fn service_optional_keeps_unmatched_rows() {
+        let (_engine, dict, repo) = seed_knows_graph();
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let client = Arc::new(FakeServiceClient {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            names: [("http://ex.org/bob".to_owned(), "Bob".to_owned())]
+                .into_iter()
+                .collect(),
+            fail: false,
+        });
+        let mut req = QueryRequest::new(
+            "SELECT ?o ?n WHERE { \
+                 ?s <http://ex.org/knows> ?o . \
+                 OPTIONAL { SERVICE <http://ep.example/sparql> { ?o <http://ex.org/name> ?n } } \
+             }",
+        );
+        req.service_client = Some(as_service_client(Arc::clone(&client)));
+        let r = p.execute(&req).expect("federated optional");
+        let mut rows: Vec<(String, Option<String>)> = r
+            .solutions
+            .iter()
+            .map(|s| {
+                let o = match s.get("o").unwrap() {
+                    BoundValue::Iri(i) => i.as_str().to_owned(),
+                    other => panic!("expected iri o, got {other:?}"),
+                };
+                let n = match s.get("n") {
+                    Some(BoundValue::Literal(LiteralValue::String(v))) => Some(v.clone()),
+                    None => None,
+                    other => panic!("unexpected n: {other:?}"),
+                };
+                (o, n)
+            })
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("http://ex.org/bob".to_owned(), Some("Bob".to_owned())),
+                ("http://ex.org/carol".to_owned(), None),
+            ]
+        );
+    }
+
+    /// A SERVICE as the whole WHERE clause dispatches once, unconstrained.
+    #[test]
+    fn service_standalone_dispatches_once_without_values() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+        let p = standard_pipeline_with_dictionary(repo, dict);
+        let client = Arc::new(FakeServiceClient {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            names: BTreeMap::new(),
+            fail: false,
+        });
+        let mut req = QueryRequest::new(
+            "SELECT * WHERE { SERVICE <http://ep.example/sparql> { ?x <http://ex.org/name> ?y } }",
+        );
+        req.service_client = Some(as_service_client(Arc::clone(&client)));
+        let r = p.execute(&req).expect("standalone service");
+        // Remote returned no rows (no propagated ?o), but the dispatch shape
+        // must be a single unconstrained call.
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].2.is_empty(), "no VALUES for a standalone service");
+        assert!(r.solutions.is_empty());
+    }
+
+    /// SERVICE SILENT swallows remote errors (empty contribution); a
+    /// non-SILENT failure aborts the query. A variable endpoint must be bound
+    /// by the enclosing group to an IRI.
+    #[test]
+    fn service_silent_and_variable_endpoint_semantics() {
+        let (_engine, dict, repo) = seed_knows_graph();
+        let p = standard_pipeline_with_dictionary(repo, dict);
+
+        let failing = FakeServiceClient {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            names: BTreeMap::new(),
+            fail: true,
+        };
+        let mut req = QueryRequest::new(
+            "SELECT * WHERE { \
+                 ?s <http://ex.org/knows> ?o . \
+                 SERVICE SILENT <http://ep.example/sparql> { ?o <http://ex.org/name> ?n } \
+             }",
+        );
+        req.service_client = Some(Arc::new(failing));
+        let r = p.execute(&req).expect("SILENT failure swallowed");
+        assert!(r.solutions.is_empty());
+
+        let failing = FakeServiceClient {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            names: BTreeMap::new(),
+            fail: true,
+        };
+        let mut req = QueryRequest::new(
+            "SELECT * WHERE { \
+                 ?s <http://ex.org/knows> ?o . \
+                 SERVICE <http://ep.example/sparql> { ?o <http://ex.org/name> ?n } \
+             }",
+        );
+        req.service_client = Some(Arc::new(failing));
+        let err = p.execute(&req).expect_err("non-SILENT failure propagates");
+        assert!(err.message().contains("remote boom"));
+
+        // Variable endpoint bound by a leading VALUES row.
+        let client = Arc::new(FakeServiceClient {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            names: BTreeMap::new(),
+            fail: false,
+        });
+        let mut req = QueryRequest::new(
+            "SELECT * WHERE { \
+                 VALUES ?ep { <http://ep.example/sparql> } \
+                 SERVICE ?ep { ?s <http://ex.org/knows> ?o } \
+             }",
+        );
+        req.service_client = Some(as_service_client(Arc::clone(&client)));
+        let r = p.execute(&req).expect("variable endpoint query");
+        assert!(r.solutions.is_empty());
+        let calls = client.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "http://ep.example/sparql");
     }
 }

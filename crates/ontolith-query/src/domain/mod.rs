@@ -1,6 +1,7 @@
 //! Query domain model (L3 — full SPARQL 1.1 Query core surface).
 
 use ontolith_core::domain::{ConsistencyLevel, Iri, LiteralValue, NodeId};
+use ontolith_core::error::OntolithError;
 use ontolith_rdf::domain::Term;
 use ontolith_transaction::domain::TxnId;
 use std::collections::BTreeMap;
@@ -335,8 +336,28 @@ pub enum Algebra {
         graph: TermPattern,
         inner: Box<Algebra>,
     },
+    /// SPARQL 1.1 Federated Query `SERVICE (iri|?var) { pattern }`. The inner
+    /// group pattern is dispatched to the remote endpoint through the
+    /// request's [`ServiceClient`]; `text` keeps the raw inner group source
+    /// (without its outer braces) so the client can re-submit it verbatim,
+    /// optionally constrained with VALUES for bindings propagated from the
+    /// enclosing group.
+    Service {
+        endpoint: ServiceEndpoint,
+        silent: bool,
+        text: String,
+        inner: Box<Algebra>,
+    },
     /// Empty identity multiset (one empty solution) — unit for joins.
     Identity,
+}
+
+/// `SERVICE` endpoint: a constant IRI or a variable bound by the enclosing
+/// group pattern (whose value supplies the endpoint URL per solution).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ServiceEndpoint {
+    Iri(Iri),
+    Variable(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,6 +543,16 @@ pub fn summarize_algebra(algebra: &Algebra) -> String {
         Algebra::Graph { graph, inner } => {
             format!("Graph({graph:?}, {})", summarize_algebra(inner))
         }
+        Algebra::Service {
+            endpoint,
+            silent,
+            text,
+            inner,
+        } => format!(
+            "Service({endpoint:?}, silent={silent}, body_len={}, {})",
+            text.len(),
+            summarize_algebra(inner)
+        ),
     }
 }
 
@@ -682,7 +713,24 @@ impl Solution {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Remote `SERVICE` dispatch hook (SPARQL 1.1 Federated Query). Implementations
+/// perform the actual SPARQL protocol exchange; the query crate only consumes
+/// the decoded solution rows so it stays network-free.
+pub trait ServiceClient: Send + Sync {
+    /// Run `SELECT * WHERE { <group_body> }` (optionally constrained with
+    /// VALUES over `propagated`) against `endpoint` and return the decoded
+    /// solution rows. `group_body` is the SERVICE inner group source without
+    /// its outer braces. Errors are returned verbatim; `SERVICE SILENT`
+    /// handling is the caller's responsibility.
+    fn evaluate(
+        &self,
+        endpoint: &str,
+        group_body: &str,
+        propagated: &[(String, BoundValue)],
+    ) -> Result<Vec<BTreeMap<String, BoundValue>>, OntolithError>;
+}
+
+#[derive(Clone)]
 pub struct QueryRequest {
     pub query: QueryText,
     pub txn_id: Option<TxnId>,
@@ -697,6 +745,23 @@ pub struct QueryRequest {
     /// Client-visible read consistency (SAS-0001 §8); single-node engines treat
     /// Strong/Session equivalently for committed data.
     pub consistency: ConsistencyLevel,
+    /// Optional SPARQL `SERVICE` federation client. `None` makes any SERVICE
+    /// pattern fail deterministically (or evaluate to empty under SILENT).
+    pub service_client: Option<Arc<dyn ServiceClient>>,
+}
+
+impl std::fmt::Debug for QueryRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryRequest")
+            .field("query", &self.query)
+            .field("txn_id", &self.txn_id)
+            .field("tenant", &self.tenant)
+            .field("tenant_scope", &self.tenant_scope)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("consistency", &self.consistency)
+            .field("service_client", &self.service_client.is_some())
+            .finish()
+    }
 }
 
 /// Tenant scope for a single query (P5-03): the reserved named-graph
@@ -809,6 +874,7 @@ impl QueryRequest {
             timeout_ms: None,
             cancel: None,
             consistency: ConsistencyLevel::Strong,
+            service_client: None,
         }
     }
 
@@ -838,6 +904,12 @@ impl QueryRequest {
 
     pub fn with_consistency(mut self, level: ConsistencyLevel) -> Self {
         self.consistency = level;
+        self
+    }
+
+    /// Attach a SPARQL `SERVICE` federation client.
+    pub fn with_service_client(mut self, client: Arc<dyn ServiceClient>) -> Self {
+        self.service_client = Some(client);
         self
     }
 

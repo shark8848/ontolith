@@ -5,6 +5,7 @@
 pub mod api;
 pub mod app;
 pub mod bootstrap;
+pub mod federation;
 #[cfg(feature = "grpc-backend")]
 pub mod grpc;
 pub mod http;
