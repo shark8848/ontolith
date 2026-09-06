@@ -2500,6 +2500,92 @@ mod tests {
         assert!(pairs.contains(&(BoundValue::Node(carol), BoundValue::Node(alice))));
     }
 
+    /// SPARQL 1.1 `^` PathElt grammar: `^!a` / `^!(a|^b)` is the inverse of
+    /// a negated property set, i.e. the negated set with forward/reverse
+    /// swapped. The engine must return exactly the same rows as the swapped
+    /// spelling `!^a` / `!(b|^a)`.
+    #[test]
+    fn inverse_of_negated_property_set_swaps_directions() {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+
+        let alice = dict.encode_node("http://ex.org/alice");
+        let bob = dict.encode_node("http://ex.org/bob");
+        let knows = Iri::new("http://ex.org/knows");
+        let likes = Iri::new("http://ex.org/likes");
+
+        let txn = TxnId::new(41);
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: knows,
+                object: Term::Iri(Iri::new("http://ex.org/bob")),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            txn,
+            Triple {
+                subject: alice,
+                predicate: likes,
+                object: Term::Iri(Iri::new("http://ex.org/carol")),
+            },
+        )
+        .unwrap();
+        repo.insert(
+            txn,
+            Triple {
+                subject: bob,
+                predicate: Iri::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+                object: Term::Iri(Iri::new("http://ex.org/Person")),
+            },
+        )
+        .unwrap();
+        engine.commit_transaction(txn).unwrap();
+
+        let p = standard_pipeline_with_dictionary(repo, dict);
+
+        let rows = |q: &str| -> Vec<(BoundValue, BoundValue)> {
+            let r = p.execute(&QueryRequest::new(q)).unwrap();
+            r.solutions
+                .iter()
+                .map(|s| (s.get("s").unwrap().clone(), s.get("o").unwrap().clone()))
+                .collect()
+        };
+
+        // `^!<knows>` == `!^<knows>` (single forward exclusion moved to reverse).
+        let via_inverse = rows("SELECT ?s ?o WHERE { ?s ^!<http://ex.org/knows> ?o }");
+        let via_reverse_spelling = rows("SELECT ?s ?o WHERE { ?s !^<http://ex.org/knows> ?o }");
+        assert_eq!(via_inverse.len(), 2);
+        assert_eq!(
+            sorted(&via_inverse),
+            sorted(&via_reverse_spelling),
+            "^!(p) must behave like !^(p)"
+        );
+
+        // `^!(<knows>|^<likes>)` == `!(<likes>|^<knows>)`: swapping the whole
+        // set exchanges the forward and reverse exclusions.
+        let via_inverse =
+            rows("SELECT ?s ?o WHERE { ?s ^!(<http://ex.org/knows>|^<http://ex.org/likes>) ?o }");
+        let via_swapped =
+            rows("SELECT ?s ?o WHERE { ?s !(<http://ex.org/likes>|^<http://ex.org/knows>) ?o }");
+        assert!(!via_inverse.is_empty());
+        assert_eq!(
+            sorted(&via_inverse),
+            sorted(&via_swapped),
+            "^(!(a|^b)) must behave like !(b|^a)"
+        );
+    }
+
+    fn sorted(v: &[(BoundValue, BoundValue)]) -> Vec<String> {
+        let mut out: Vec<String> = v.iter().map(|(s, o)| format!("{s:?} {o:?}")).collect();
+        out.sort();
+        out
+    }
+
     #[test]
     fn path_zero_length_question_mark_constant_endpoints_on_empty_data() {
         let engine = Arc::new(InMemoryStorageEngine::new());

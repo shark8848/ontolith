@@ -18,7 +18,7 @@ use ontolith_cluster::domain::{ClusterNodeId, LogPayload, SessionId};
 #[cfg(feature = "raft-backend")]
 use ontolith_cluster::infrastructure::raft::{RaftClusterConfig, RaftClusterRuntime};
 use ontolith_cluster::infrastructure::{ClusterConfig, InMemoryClusterRuntime};
-use ontolith_core::domain::{CanonicalEncode, ConsistencyLevel, NodeId, OntologyObject};
+use ontolith_core::domain::{CanonicalEncode, ConsistencyLevel, Iri, NodeId, OntologyObject};
 use ontolith_core::error::OntolithError;
 use ontolith_observability::domain::{
     MetricKind, MetricPoint, SpanEvent, SpanName, SpanStatus, TraceContext,
@@ -35,7 +35,8 @@ use ontolith_parser::infrastructure::{
     parse_rdf_xml_doc, parse_trig_doc, parse_turtle_doc,
 };
 use ontolith_query::domain::{
-    BoundValue, PatternCost, QueryExplain, QueryKind, QueryRequest, QueryResult,
+    BoundValue, PatternCost, QueryExplain, QueryKind, QueryPlan, QueryRequest, QueryResult,
+    TermPattern, TriplePattern, UpdateOp, UpdatePattern,
 };
 use ontolith_query::infrastructure::{update_pipeline, update_pipeline_with_read};
 use ontolith_rdf::domain::{Term, Triple};
@@ -1267,6 +1268,100 @@ impl AppState {
     /// (P6-03). Reads materialize the OWL 2 RL closure over the tenant's
     /// triples and run against an overlay read service; updates and explains
     /// skip materialization. The reasoning report is surfaced in the response.
+    /// Jena/Fuseki parity (input side): SPARQL Update `LOAD <http(s)://…>`
+    /// fetches the RDF document over HTTP and rewrites the operation in place
+    /// into a concrete `INSERT DATA` op, so the engine applies it atomically
+    /// and in request order inside its update transaction. Fetch failures
+    /// honor `SILENT` (operation skipped); otherwise the whole request fails
+    /// before any write. Only `http://` is implemented; `https://` returns a
+    /// deterministic error.
+    fn rewrite_remote_loads(&self, plan: &mut QueryPlan) -> Result<(), OntolithError> {
+        if plan.kind != QueryKind::Update || plan.update_ops.is_empty() {
+            return Ok(());
+        }
+        let has_remote = plan.update_ops.iter().any(
+            |op| matches!(op, UpdateOp::Load { source, .. } if remote_scheme(source.as_str())),
+        );
+        if !has_remote {
+            return Ok(());
+        }
+        let mut rewritten = Vec::with_capacity(plan.update_ops.len());
+        for op in std::mem::take(&mut plan.update_ops) {
+            let UpdateOp::Load {
+                silent,
+                source,
+                into,
+            } = &op
+            else {
+                rewritten.push(op);
+                continue;
+            };
+            if !remote_scheme(source.as_str()) {
+                rewritten.push(op);
+                continue;
+            }
+            let accept = "application/rdf+xml, text/turtle;q=0.9, application/trig;q=0.8, \
+                          application/n-triples;q=0.7, application/n-quads;q=0.6, \
+                          application/ld+json;q=0.5, text/plain;q=0.4";
+            match crate::jsonld::http_get(source.as_str(), accept) {
+                Err(_e) if *silent => {}
+                Err(e) => return Err(e),
+                Ok((_status, content_type, body)) => {
+                    let patterns =
+                        self.remote_load_patterns(source, into.as_ref(), &content_type, &body)?;
+                    rewritten.push(UpdateOp::InsertData(patterns));
+                }
+            }
+        }
+        plan.update_ops = rewritten;
+        Ok(())
+    }
+
+    /// Parse a fetched remote RDF document into graph-aware INSERT DATA
+    /// patterns: the document's default graph loads into `into` (or the
+    /// default graph when absent) and any named graphs keep their own names.
+    fn remote_load_patterns(
+        &self,
+        source: &Iri,
+        into: Option<&Iri>,
+        content_type: &str,
+        body: &str,
+    ) -> Result<Vec<UpdatePattern>, OntolithError> {
+        let format = detect_remote_rdf_format(source.as_str(), content_type)?;
+        let dict = self.dictionary.as_ref();
+        let parsed = match format {
+            ParseFormat::NTriples => parse_ntriples(body, dict)?,
+            ParseFormat::NQuads => parse_nquads(body, dict)?,
+            ParseFormat::Turtle => parse_turtle_doc(body, dict)?,
+            ParseFormat::TriG => parse_trig_doc(body, dict)?,
+            ParseFormat::JsonLd => {
+                if crate::jsonld::remote_context_enabled() {
+                    let loader = crate::jsonld::HttpRemoteContextLoader;
+                    parse_json_ld_doc_with_remote_context(body, dict, None, &loader)?
+                } else {
+                    parse_json_ld_doc(body, dict, None)?
+                }
+            }
+            ParseFormat::RdfXml => parse_rdf_xml_doc(body, dict, None)?,
+        };
+        let mut patterns = Vec::new();
+        for t in parsed.dataset.default_graph {
+            patterns.push(UpdatePattern {
+                graph: into.cloned(),
+                triple: remote_pattern_from_triple(&t),
+            });
+        }
+        for ng in parsed.dataset.named_graphs {
+            for t in ng.triples {
+                patterns.push(UpdatePattern {
+                    graph: Some(ng.name.clone()),
+                    triple: remote_pattern_from_triple(&t),
+                });
+            }
+        }
+        Ok(patterns)
+    }
+
     pub(crate) fn execute_sparql_with_inference(
         &self,
         ctx: &AuthContext,
@@ -1281,7 +1376,10 @@ impl AppState {
             Arc::clone(&self.storage),
             Some(Arc::clone(&self.dictionary)),
         );
-        let plan = pipeline.plan(&qreq)?;
+        let mut plan = pipeline.plan(&qreq)?;
+        // Jena/Fuseki parity: materialize remote `LOAD <http(s)://…>` sources
+        // into the op list before execution (see `rewrite_remote_loads`).
+        self.rewrite_remote_loads(&mut plan)?;
         let (reasoning, result) = if inference.is_enabled() && plan.kind != QueryKind::Update {
             let base = base_read_service(
                 Arc::clone(&self.triples),
@@ -2420,6 +2518,75 @@ fn parse_format_name(name: &str) -> Result<ParseFormat, OntolithError> {
     }
 }
 
+/// True when an `Iri` denotes a remote `http(s)://` fetch source.
+fn remote_scheme(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Resolve the RDF format of a remote `LOAD` document from the response
+/// Content-Type first, then the URL path extension; SPARQL Update defaults
+/// to Turtle (`text/turtle`) when nothing matches.
+fn detect_remote_rdf_format(url: &str, content_type: &str) -> Result<ParseFormat, OntolithError> {
+    let ct = content_type.to_ascii_lowercase();
+    if ct.contains("trig") {
+        return Ok(ParseFormat::TriG);
+    }
+    if ct.contains("turtle") {
+        return Ok(ParseFormat::Turtle);
+    }
+    if ct.contains("n-quads") || ct.contains("nquads") {
+        return Ok(ParseFormat::NQuads);
+    }
+    if ct.contains("n-triples") || ct.contains("ntriples") {
+        return Ok(ParseFormat::NTriples);
+    }
+    if ct.contains("json-ld") || ct.contains("ld+json") {
+        return Ok(ParseFormat::JsonLd);
+    }
+    if ct.contains("rdf+xml") || ct.contains("rdf/xml") || ct.contains("rdfxml") {
+        return Ok(ParseFormat::RdfXml);
+    }
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    if path.ends_with(".ttl") || path.ends_with(".turtle") {
+        return Ok(ParseFormat::Turtle);
+    }
+    if path.ends_with(".nt") || path.ends_with(".ntriples") {
+        return Ok(ParseFormat::NTriples);
+    }
+    if path.ends_with(".nq") || path.ends_with(".nquads") {
+        return Ok(ParseFormat::NQuads);
+    }
+    if path.ends_with(".trig") {
+        return Ok(ParseFormat::TriG);
+    }
+    if path.ends_with(".jsonld") || path.ends_with(".json") {
+        return Ok(ParseFormat::JsonLd);
+    }
+    if path.ends_with(".rdf") || path.ends_with(".xml") || path.ends_with(".rdfxml") {
+        return Ok(ParseFormat::RdfXml);
+    }
+    Ok(ParseFormat::Turtle)
+}
+
+/// Convert a parsed RDF `Triple` (dictionary-encoded subject/blank ids) into
+/// an `INSERT DATA` `TriplePattern`, preserving node identities.
+fn remote_pattern_from_triple(t: &Triple) -> TriplePattern {
+    let object = match &t.object {
+        Term::Iri(i) => TermPattern::Iri(i.clone()),
+        Term::Literal(l) => TermPattern::Literal(l.clone()),
+        Term::BlankNode(n) => TermPattern::Node(*n),
+    };
+    TriplePattern {
+        subject: TermPattern::Node(t.subject),
+        predicate: TermPattern::Iri(t.predicate.clone()),
+        object,
+    }
+}
+
 /// Dataset export wire formats (superset of [`SerializeFormat`] with RDF/XML).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExportFormat {
@@ -2933,6 +3100,36 @@ mod tests {
             headers,
             body: query.as_bytes().to_vec(),
         }
+    }
+
+    /// Serve one canned HTTP response on an ephemeral port and return its
+    /// address plus the serving thread (tests must `join` it).
+    fn serve_one_response(
+        status_line: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (status_line, content_type, body) = (
+            status_line.to_owned(),
+            content_type.to_owned(),
+            body.to_owned(),
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept canned response");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(resp.as_bytes())
+                .expect("write canned response");
+        });
+        (addr, handle)
     }
 
     fn explain_req(method: &str, query: &str) -> HttpRequest {
@@ -3772,6 +3969,211 @@ mod tests {
         );
         assert_eq!(read.status, 200);
         assert!(String::from_utf8_lossy(&read.body).contains("\"c\""));
+    }
+
+    #[test]
+    fn remote_load_fetches_turtle_into_named_graph() {
+        let doc = "@prefix ex: <http://ex.org/> .\nex:alice ex:name \"Alice\" .\nex:alice ex:knows ex:bob .\n";
+        let (addr, serve) = serve_one_response("HTTP/1.1 200 OK", "text/turtle", doc);
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let update = format!("LOAD <http://{addr}/doc.ttl> INTO GRAPH <http://ex.org/g1>");
+        let resp = dispatch_for_test(&state, sparql_req("POST", &update));
+        serve.join().expect("serve turtle");
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+        assert!(
+            String::from_utf8_lossy(&resp.body).contains("\"affected\":2"),
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+
+        let read = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "SELECT ?o WHERE { GRAPH <http://ex.org/g1> { <http://ex.org/alice> <http://ex.org/name> ?o } }",
+            ),
+        );
+        let rbody = String::from_utf8_lossy(&read.body);
+        assert!(rbody.contains("Alice"), "read: {rbody}");
+    }
+
+    #[test]
+    fn remote_load_default_graph_via_http_content_type() {
+        let doc = "<http://ex.org/a> <http://ex.org/b> \"c\" .\n";
+        let (addr, serve) = serve_one_response("HTTP/1.1 200 OK", "application/n-triples", doc);
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let update = format!("LOAD SILENT <http://{addr}/data.nt>");
+        let resp = dispatch_for_test(&state, sparql_req("POST", &update));
+        serve.join().expect("serve n-triples");
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+        assert!(
+            String::from_utf8_lossy(&resp.body).contains("\"affected\":1"),
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+
+        let read = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "SELECT ?o WHERE { <http://ex.org/a> <http://ex.org/b> ?o }",
+            ),
+        );
+        assert!(String::from_utf8_lossy(&read.body).contains("\"c\""));
+    }
+
+    #[test]
+    fn remote_load_trig_keeps_named_graphs_and_targets_default() {
+        let doc = "@prefix ex: <http://ex.org/> .\n\
+                   ex:s ex:p \"in-default\" .\n\
+                   ex:g1 { ex:s ex:p \"in-g1\" . }\n";
+        let (addr, serve) = serve_one_response("HTTP/1.1 200 OK", "application/trig", doc);
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let update = format!("LOAD <http://{addr}/ds.trig> INTO GRAPH <http://ex.org/target>");
+        let resp = dispatch_for_test(&state, sparql_req("POST", &update));
+        serve.join().expect("serve trig");
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+
+        // Default-graph portion lands in INTO GRAPH target; the document's own
+        // named graph keeps its name.
+        let target = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "SELECT ?o WHERE { GRAPH <http://ex.org/target> { <http://ex.org/s> <http://ex.org/p> ?o } }",
+            ),
+        );
+        let target_body = String::from_utf8_lossy(&target.body);
+        assert!(
+            target_body.contains("in-default") && !target_body.contains("in-g1"),
+            "target read: {target_body}"
+        );
+        let docg = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "SELECT ?o WHERE { GRAPH <http://ex.org/g1> { <http://ex.org/s> <http://ex.org/p> ?o } }",
+            ),
+        );
+        let docg_body = String::from_utf8_lossy(&docg.body);
+        assert!(docg_body.contains("in-g1"), "doc-graph read: {docg_body}");
+    }
+
+    #[test]
+    fn remote_load_fetch_error_honors_silent() {
+        // Non-SILENT: the failed fetch aborts the update request.
+        let (addr, serve) = serve_one_response("HTTP/1.1 500 Server Error", "text/plain", "boom");
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let update = format!("LOAD <http://{addr}/fail.ttl>");
+        let resp = dispatch_for_test(&state, sparql_req("POST", &update));
+        serve.join().expect("serve 500");
+        assert_eq!(resp.status, 500, "{}", String::from_utf8_lossy(&resp.body));
+        assert!(
+            String::from_utf8_lossy(&resp.body).contains("HTTP 500"),
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+
+        // SILENT: the operation is skipped and the request succeeds.
+        let (addr, serve) = serve_one_response("HTTP/1.1 500 Server Error", "text/plain", "boom");
+        let update = format!("LOAD SILENT <http://{addr}/fail.ttl>");
+        let resp = dispatch_for_test(&state, sparql_req("POST", &update));
+        serve.join().expect("serve 500 silent");
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+        assert!(
+            String::from_utf8_lossy(&resp.body).contains("\"affected\":0"),
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+    }
+
+    #[test]
+    fn remote_load_https_is_unsupported_unless_silent() {
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let resp = dispatch_for_test(
+            &state,
+            sparql_req("POST", "LOAD <https://example.org/data.ttl>"),
+        );
+        assert_eq!(resp.status, 501, "{}", String::from_utf8_lossy(&resp.body));
+        assert!(
+            String::from_utf8_lossy(&resp.body).contains("https:// not implemented"),
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+
+        let resp = dispatch_for_test(
+            &state,
+            sparql_req("POST", "LOAD SILENT <https://example.org/data.ttl>"),
+        );
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+        assert!(
+            String::from_utf8_lossy(&resp.body).contains("\"affected\":0"),
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+    }
+
+    #[test]
+    fn enforced_tenant_remote_load_respects_graph_namespace() {
+        let state = enforced_tenant_state();
+        let doc = "@prefix ex: <http://ex.org/> .\nex:alice ex:name \"Alice\" .\n";
+        let (addr, serve) = serve_one_response("HTTP/1.1 200 OK", "text/turtle", doc);
+        let update = format!("LOAD <http://{addr}/doc.ttl> INTO GRAPH <urn:tenant:acme:g>");
+        let resp = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                update.as_bytes(),
+                "acme",
+                "alice",
+            ),
+        );
+        serve.join().expect("serve turtle");
+        assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+        assert!(
+            String::from_utf8_lossy(&resp.body).contains("\"affected\":1"),
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+
+        let read = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                "SELECT ?o WHERE { GRAPH <urn:tenant:acme:g> { <http://ex.org/alice> <http://ex.org/name> ?o } }"
+                    .as_bytes(),
+                "acme",
+                "alice",
+            ),
+        );
+        let rbody = String::from_utf8_lossy(&read.body);
+        assert!(rbody.contains("Alice"), "read: {rbody}");
+
+        // A foreign INTO graph is rejected by the tenant plan validation.
+        let (addr, serve) = serve_one_response("HTTP/1.1 200 OK", "text/turtle", doc);
+        let update = format!("LOAD <http://{addr}/doc.ttl> INTO GRAPH <http://foreign.example/g>");
+        let resp = dispatch_for_test(
+            &state,
+            tenant_req(
+                "POST",
+                "/sparql",
+                HashMap::new(),
+                update.as_bytes(),
+                "acme",
+                "alice",
+            ),
+        );
+        serve.join().expect("serve turtle foreign");
+        assert_eq!(resp.status, 403, "{}", String::from_utf8_lossy(&resp.body));
     }
 
     #[test]

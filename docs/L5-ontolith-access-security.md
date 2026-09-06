@@ -1,7 +1,7 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.12.0  
+版本: 2.13.0  
 状态: Implemented (HTTP + gRPC + dual backend + file audit（SHA-256 哈希链）+ SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC 完整链路 R2+（JWKS 校验 + TTL 缓存刷新）+ full-chain tracing P5-05 + 租户管理（注册表 CRUD + 管理面代理）+ Ontology 载荷联动推理输入)  
 日期: 2026-09-06  
 对应 crate:
@@ -42,7 +42,7 @@ ontolith-management-server (L5 management plane)
 | GET | `/ready` `/readyz` | health:read | 就绪探针 |
 | GET | `/metrics` | metrics:read | Prometheus（含延迟/状态码/存储） |
 | GET | `/audit` | metrics:read | 审计 JSON（`?limit=`） |
-| GET/POST | `/sparql` | sparql:query | SPARQL Results JSON |
+| GET/POST | `/sparql` | sparql:query | SPARQL Results JSON；更新支持远程 `LOAD <http://…>`（server 层 `http_get` 抓取 + 格式探测 + 图感知 `INSERT DATA` 原位替换；SILENT/INTO GRAPH/命名图保留；enforced 租户 owned-graph 校验；`https://` 501） |
 | GET/POST | `/explain` | sparql:explain | 计划 Explain JSON |
 | POST | `/data` `/data/nt` `/data/turtle` `/data/trig` `/data/nq` `/data/rdfxml`（别名 `rdf-xml`/`rdf`） | data:write | 完整 L3 解析写入（含 RDF/XML） |
 | GET | `/data` | data:read | Fuseki 风格数据集导出（`?format=`/`Accept`：`ttl`/`trig`/`nq`/`nt`/`rdf+xml`；TenantMode=enforced 下仅导出调用方 owned graphs；默认图视图 = owned 图并集） |
@@ -377,3 +377,4 @@ ONTOLITH_API_KEY=...
 | 2026-08-08 | 2.9.0 | **OIDC 完整链路（R2+）**：`oidc.rs` 树内 JWKS/JWK（RFC 7517）+ RS256（RFC 7515 A.2.1 官方向量背书，自研无依赖大整数 RSA）+ HS256 + `exp`/`nbf`/`iss`/`aud` 策略 + RFC 8414 发现文档 issuer 强制匹配 + `JwksFetcher`/`CachingJwks`/`JwksVerifier` TTL 缓存刷新；server 接线 `ONTOLITH_OIDC_ISSUER`/`AUDIENCE`/`JWKS_URL`/`CACHE_TTL_SECS` + `ONTOLITH_JWT_LEEWAY_SECS`（file:///http:// 注入式传输，https 明确拒绝并文档化）；`/health`（HTTP+管理面）与 gRPC `HealthResponse` 暴露 `oidc` 姿态；security 18→24、server 44→49 测；R1 唯一剩余项勾选完成 |
 | 2026-08-10 | 2.10.0 | **租户管理（注册表 CRUD + 管理面代理）**：`ontolith-security` 新增 `Tenant`/`TenantApiKey`/`TenantStatus` + `TenantStore`/`MemoryTenantStore`/`TenantService`（create/update/delete/add_key/revoke_key，key 仅存 FNV-1a 摘要、原始值一次性返回），Enforced 鉴权按 key 摘要解析注册表（头匹配/disabled 拒绝/user 缺省 `api`，全局 key 退化为 legacy 回退）；`ontolith-storage` 独立 `tenant` CF + `tenant_cf_*` 字节级原语；网关承载 `/admin/tenants*` CRUD（仅 `system` 租户 + cluster:admin，RocksDB 键布局 `t:<id>`/`k:<digest>`，`create_missing_column_families` 自动增 CF）；管理面 `/admin/tenants*` ACL 代理到网关（读 `authorize_admin_view`/写 `authorize_admin_mutation`，`http_exchange` 最小 HTTP 客户端）；`/health` 暴露 `tenants` 姿态；security 24→29、storage 51→54、server 49→65 测 |
 | 2026-09-06 | 2.12.0 | **Jena/Fuseki 协议补齐（P0，HTTP 面）**：`GET /data` 数据集导出（全库或 enforced 租户 owned graphs；`?format=`/`Accept` 支持 `ttl`/`trig`/`nq`/`nt`/`rdf+xml`，Content-Type 对应）；ingest 支持 RDF/XML（`application/rdf+xml` Content-Type、`?format=rdf|rdfxml|rdf-xml|rdf/xml`、路径 `/data/rdfxml`/`/data/rdf-xml`/`/data/rdf`，路由补齐）；`/sparql` 结果协商 SRX（`application/sparql-results+xml`）/TSV/CSV（SELECT/ASK，`?format=`/`Accept`），JSON 默认兼容不变；SPARQL DESCRIBE HTTP 执行（描述图 JSON 与 CONSTRUCT 同构）；server 70→85 测 |
+| 2026-09-06 | 2.13.0 | **远程 `LOAD <http://…>`（Jena/Fuseki 数据面缺口 Wave 2，HTTP 面）**：`rewrite_remote_loads` 在 plan 构建后把 `http(s)://` 源 `UpdateOp::Load` 原位改写为图感知 `INSERT DATA`——`crate::jsonld::http_get` 同步抓取（Content-Type + 状态码，仅 `http://`；`https://` 确定性 501/`SILENT` 跳过）→ Content-Type/URL 后缀探测（NT/NQ/Turtle/TriG/JSON-LD/RDF-XML）→ parser 解析 → 文档默认图载入 `INTO GRAPH` 目标（缺省为默认图）、文档命名图保留原名；请求内顺序与单事务原子性保持（改写后仍由引擎统一执行）；`SILENT` 抓取失败跳过、非 SILENT 请求级 500；enforced 租户下 `INTO GRAPH`/命名图经引擎 `validate_tenant_update_plan` 校验（越权 403）；server 85→91 测（6 个 e2e：named graph、default+N-Triples、TriG 命名图保留、错误/SILENT、https 501、enforced 403） |

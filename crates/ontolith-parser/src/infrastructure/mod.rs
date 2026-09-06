@@ -3,6 +3,7 @@
 mod json_ld;
 mod nt;
 pub mod rdf_xml;
+pub mod sparql_results;
 pub mod term_lex;
 mod turtle;
 

@@ -1449,6 +1449,12 @@ impl<'a> SparqlParser<'a> {
                 self.skip();
                 self.expect_char(')')?;
                 invert_path(inner)
+            } else if self.peek_char() == Some('!') {
+                // `^!(:a|^b)` / `^!a` — the inverse of a negated property set
+                // is a negated property set with forward/reverse swapped.
+                self.bump();
+                let set = self.parse_negated_property_set()?;
+                invert_path(set)
             } else {
                 match self.parse_var_or_term(false)? {
                     TermPattern::Iri(iri) => PathExpression::InversePredicate(iri),
@@ -3558,6 +3564,32 @@ fn invert_path(path: PathExpression) -> PathExpression {
     }
 }
 
+/// True when the algebra tree (or any subtree) contains a property `Path`.
+#[cfg(test)]
+fn algebra_contains_path(algebra: &Algebra) -> bool {
+    match algebra {
+        Algebra::Path { .. } => true,
+        Algebra::Bgp(_) | Algebra::Identity => false,
+        Algebra::Join { left, right }
+        | Algebra::LeftJoin { left, right, .. }
+        | Algebra::Minus { left, right } => {
+            algebra_contains_path(left) || algebra_contains_path(right)
+        }
+        Algebra::Union { left, right } => {
+            algebra_contains_path(left) || algebra_contains_path(right)
+        }
+        Algebra::Filter { input, .. }
+        | Algebra::Extend { input, .. }
+        | Algebra::Distinct { input }
+        | Algebra::Project { input, .. }
+        | Algebra::OrderBy { input, .. }
+        | Algebra::Slice { input, .. }
+        | Algebra::Aggregate { input, .. } => algebra_contains_path(input),
+        Algebra::Values { .. } => false,
+        Algebra::Graph { inner, .. } => algebra_contains_path(inner),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3634,5 +3666,69 @@ mod tests {
     fn describe_without_targets_rejected() {
         let err = plan_query(&req("DESCRIBE WHERE { ?s ?p ?o }")).expect_err("no targets");
         assert!(err.message().contains("DESCRIBE"));
+    }
+
+    /// SPARQL 1.1 full property-path grammar battery (grouping/nesting pass).
+    /// Every form below is grammar-legal (§ 18.2.2.4 Path grammar) and must
+    /// plan to an algebra containing a `Path` node.
+    #[test]
+    fn property_path_full_11_grammar_accepts_all_legal_forms() {
+        // (predicate-sequence path) `(...)/...`, modifiers, inverses and
+        // negated sets, including the inverse-of-negation forms `^!a` /
+        // `^!(a|^b)` that SPARQL 1.1 permits via `^` PathElt.
+        let legal: &[&str] = &[
+            "?s <http://e/p>/<http://e/q> ?o",
+            "?s <http://e/p>|<http://e/q> ?o",
+            "?s (<http://e/p>/<http://e/q>)+ ?o",
+            "?s (<http://e/p>|<http://e/q>)* ?o",
+            "?s (<http://e/p>|<http://e/q>)? ?o",
+            "?s ^<http://e/p> ?o",
+            "?s ^(<http://e/p>/<http://e/q>) ?o",
+            "?s ^(<http://e/p>/<http://e/q>)+ ?o",
+            "?s !(<http://e/p>|^<http://e/q>) ?o",
+            "?s !^<http://e/p> ?o",
+            "?s !<http://e/p> ?o",
+            "?s !(<http://e/p>|^<http://e/q>|<http://e/r>) ?o",
+            "?s ^!<http://e/p> ?o",
+            "?s ^!(<http://e/p>|^<http://e/q>) ?o",
+            "?s ^!(<http://e/p>|^<http://e/q>)+ ?o",
+            "?s ^!a ?o",
+            "?s ^!(a|^<http://e/q>) ?o",
+            "?s !<http://e/p>* ?o",
+            "?s ^(<http://e/p>|<http://e/q>)* ?o",
+            "?s ((<http://e/p>|<http://e/q>)/<http://e/r>)+ ?o",
+            "?s (!(<http://e/p>|^<http://e/q>)) ?o",
+            "?s (<http://e/p>/<http://e/q>)|<http://e/r> ?o",
+            "?s (<http://e/p>)|^<http://e/q> ?o",
+        ];
+        for body in legal {
+            let text = format!("SELECT ?s ?o WHERE {{ {body} }}");
+            let plan = plan_query(&req(&text))
+                .unwrap_or_else(|e| panic!("legal path rejected ({body}): {}", e.message()));
+            assert_eq!(plan.kind, QueryKind::Select);
+            assert!(
+                algebra_contains_path(&plan.algebra),
+                "expected a Path node for {body}"
+            );
+        }
+    }
+
+    /// Grammar-illegal path forms must be rejected deterministically.
+    #[test]
+    fn property_path_full_11_grammar_rejects_illegal_forms() {
+        let illegal: &[&str] = &[
+            "?s ^ ?o",                           // bare inverse
+            "?s <http://e/p>/ ?o",               // trailing sequence slash
+            "?s (<http://e/p>|?o",               // unbalanced group
+            "?s !(<http://e/p>|<http://e/q> ?o", // unbalanced negation group
+            "?s <http://e/p>//<http://e/q> ?o",  // empty sequence element
+            "?s !() ?o",                         // empty negated set
+            "?s ^! ?o",                          // inverse of empty negation
+        ];
+        for body in illegal {
+            let text = format!("SELECT ?s ?o WHERE {{ {body} }}");
+            let err = plan_query(&req(&text)).unwrap_err().message().to_string();
+            assert!(!err.is_empty(), "illegal path accepted ({body})");
+        }
     }
 }
