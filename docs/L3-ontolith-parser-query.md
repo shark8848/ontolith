@@ -1,7 +1,7 @@
 # L3 — Parser & Query Engine 完整功能说明
 
 文档 ID: IMPL-L3-0001  
-版本: 2.20.0  
+版本: 2.21.0  
 状态: Implemented (full L3 core, not MVP-only)  
 日期: 2026-09-06  
 对应 crate:
@@ -59,7 +59,8 @@ SPARQL / RDF text
 | 内置函数子集 + SELECT 表达式投影 `(expr AS ?alias)` + 算术（`+ - * /`、一元负号） | ✅（函数：STR/UCASE/LCASE/STRLEN/CONCAT/SUBSTR/CONTAINS/STRSTARTS/STRENDS/STRAFTER/STRBEFORE/LANG/DATATYPE/IRI/URI/ABS/CEIL/FLOOR/ROUND/ISNUMERIC/IF/COALESCE/IN/NOT IN） |
 | EXISTS / NOT EXISTS / MINUS + 聚合扩展（GROUP_CONCAT/SEPARATOR、SAMPLE、DISTINCT 聚合）+ CAST（`xsd:`/`CAST(expr AS …)`）+ CONSTRUCT WHERE + 构造简写（`;`/`,`/`[]`） | ✅（compact 字面量模型下类型化语义受限） |
 | SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE） | ✅ |
-| 高级子查询（相关子查询等） / SERVICE 联邦 | ❌ 后续增强（SERVICE 联邦为 Jena/Fuseki P0 缺口） |
+| 高级子查询（相关子查询等） | ❌ 后续增强 |
+| SERVICE 联邦（SPARQL 1.1 Federated Query） | ✅（常量/变量 endpoint + 依赖式 join/left join（逐行绑定下推）+ 可序列化 IRI/字面量 VALUES 下推 + `SERVICE SILENT` 吞错；仅 `http://`——`https://` 需 TLS 客户端，后续轨；2026-09-06） |
 | 流式 Result 协议（网络层） | ✅（`/sparql` SRX/TSV/CSV 输出为 L5 接入层，见 L5） |
 
 ---
@@ -280,7 +281,7 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 
 ## 6. 已知限制（完整 L3 边界，非“未开工”）
 
-1. **SERVICE 联邦**、**高级子查询（相关子查询等）**、**远程 `LOAD <http(s)://…>`** 未实现（已支持完整聚合 GROUP BY/HAVING、嵌套 SELECT+LIMIT 子查询、子查询聚合、属性路径完整 1.1（分组/嵌套/取反与逆取反，W3C property-path 全用例）、EXISTS/NOT EXISTS/MINUS、DESCRIBE、SPARQL Results 输入解析 SRJ/SRX/TSV/CSV）。HAVING 中聚合调用需匹配投影聚合表达式（重写为别名求值）。  
+1. **高级子查询（相关子查询等）** 未实现（后续增强）。**SERVICE 联邦** 与远程 `LOAD <http://…>` 均已落地（仅 `http://`；`https://` 需 TLS 客户端，留后续轨）：SERVICE 联邦为 SPARQL 1.1 Federated Query（常量/变量 endpoint + 依赖式 join/left join + VALUES 下推 + `SERVICE SILENT`，见 §1 能力表与 2.21.0 变更行）；远程 LOAD 的 `http://` 抓取为 L5 server 层改写（见第 2 条）。已支持完整聚合 GROUP BY/HAVING、嵌套 SELECT+LIMIT 子查询、子查询聚合、属性路径完整 1.1（分组/嵌套/取反与逆取反，W3C property-path 全用例）、EXISTS/NOT EXISTS/MINUS、DESCRIBE、SPARQL Results 输入解析 SRJ/SRX/TSV/CSV。HAVING 中聚合调用需匹配投影聚合表达式（重写为别名求值）。  
 2. **SPARQL Update 高级形态**：已支持 `CLEAR/DROP [SILENT] DEFAULT|NAMED|ALL|GRAPH <g>`、`WITH <g>` 作用于 DELETE·INSERT…WHERE / DELETE WHERE（WHERE 以图 `g` 为默认图匹配，模板写入图 `g`）、`LOAD [SILENT] <src> [INTO GRAPH <g>]`（引擎层离线子集：`<src>` 为库内已有命名图，复制到默认图或目标图；L5 server 层 2026-09-06 起对 `http://` 源执行远程抓取——`http_get` + Content-Type/后缀格式探测（N-Triples/N-Quads/Turtle/TriG/JSON-LD/RDF-XML）→ 解析为图感知 `INSERT DATA` 原位替换操作（保持请求内顺序与单事务原子性；`SILENT` 失败跳过；文档默认图载入 `INTO GRAPH` 目标或默认图、文档命名图保留原名；enforced 租户命名空间校验由引擎 plan 校验兜底；`https://` 未实现，确定性 501）。`WITH` 仅组合 modify 形态（与规范一致）；DELETE/INSERT 模板中的 blank 节点按未绑定处理（跳过该三元组）；无匹配的更新为空操作不报错。  
 3. **JSON-LD** 为务实子集：`@reverse`/`@nest`/`@included`/`@json`/远程 `@context`（注入 loader，L5 仅 `http://`）/`@propagate`（W3C context 定义语义：默认 true，`false` 使生效 context 不传入子节点、子节点回退前一 context；2026-09-02）/`@import`（Pass 0 远程导入先行合并、导入 context 本地定义覆盖、远程被导入 context 含 `@import` 拒绝；2026-09-02）已支持；`@context` 无完整 term 定义（`@id` 为相对 IRI 的 `@type` 语义、`@container` 组合等边缘）按文档声明处理。  
 4. JOIN 为嵌套循环式 solution merge；BGP 模式序由代价优化器按实时统计（triple/predicate/subject/object 计数）做贪心选序 + 绑定传播（`EngineQueryStatistics` + `CostBasedOptimizer`），统计为均匀选择性启发式，尚无采样/直方图。  
@@ -330,3 +331,4 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 | 2026-09-06 | 2.18.0 | Jena/Fuseki 协议补齐（P0）：parser 新增 RDF/XML 生产读取器（quick-xml DOM，`rdf:Description`/typed-node/`about|ID|nodeID`、属性元素与嵌套空节点、`parseType=Resource|Collection|Literal`、`rdf:li`、作用域命名空间 + `xml:base`、Text/CDATA，不支持的构造确定性报错；parser 6 测）与 RDF/XML 写出（`serialize_rdf_xml`：Description/about|nodeID、datatype|xml:lang、QName 化命名空间）+ Turtle/TriG 写出（`serialize_dataset_with` 字典感知、修复 Turtle 旧分支多余 `.`）；SPARQL 结果协议输出 SRX/TSV/CSV（`ontolith-server/results.rs`，SELECT/ASK，cell 编码对齐 compliance `.parse_tsv_cell`：IRI `<…>`/`@lang`/`^^<dt>`/`_:` 标签）+ `/sparql` `?format=`/`Accept` 协商；`GET /data` 图导出（`?format=`/`Accept`：ttl/trig/nq/nt/rdf+xml，Content-Type 对应；租户 Enforced 下导出调用方 owned graphs，字典感知 subject 解码为 IRI）+ `/data` RDF/XML 入站（`application/rdf+xml`、`/data/rdfxml|rdf-xml|rdf`、`format=`）；DESCRIBE 执行（`QueryPlan.describe_targets`：`<iri>`/`?var`/`*` + 可选 WHERE，执行器按目标资源取 subject/object 双向三元组描述图并去重排序，无 WHERE 仅列出的 IRI；server JSON 图输出与 CONSTRUCT 同构）；parser 44 测，query 96 测（+7 DESCRIBE parse/exec），server lib 85 测（+1 HTTP e2e），fmt/clippy 零告警 |
 | 2026-09-06 | 2.19.0 | Jena/Fuseki 后续缺口收尾第一波（P0/P2 队列前半）：① **属性路径完整 1.1 语法收尾**——`parse_path_unary` 补 `^` PathElt 的逆取反形态 `^!a`/`^!(a|^b)`（取反集合 forward/reverse 交换，经 `invert_path`），分组/嵌套/取反/修饰符组合全量语法电池（24 合法 + 7 非法用例锁定）+ 执行等价测试（`^!(p)` ≡ `!^(p)`、`^!(a|^b)` ≡ `!(b|^a)`）；query 96→99 测；② **SPARQL Results 输入侧解析**——parser 新增 `infrastructure/sparql_results.rs`：SRJ（JSON）/SRX（XML）/TSV/CSV 结果文档解码为变量序 + 有序解绑定行/ASK 布尔（文档级 `ResultsTerm`，不触本地字典；literal 复用 core `LiteralValue`，TSV cell 支持反斜杠转义扫描与 `@lang`/`^^<dt>`/裸数字推断；CSV 兼容自身输出 TSV-cell 约定与 W3C 裸词法拼写）；`parse_results_by_content_type` Content-Type 分发；parser 44→49 测；已知限制第 1 条与能力表同步（SERVICE 联邦/高级子查询/远程 LOAD 保留缺口） |
 | 2026-09-06 | 2.20.0 | L5 数据面远程 `LOAD <http://…>` 落地（引擎层语义不变）：server `execute_sparql_with_inference` 在 plan 构建后调用 `rewrite_remote_loads`——对 `http(s)://` 源的 `UpdateOp::Load` 原位替换为图感知 `INSERT DATA`（`http_get` 抓取 → Content-Type/URL 后缀探测格式 → parser 解析 → 默认图载入 `INTO GRAPH`/默认图、文档命名图保留原名；`SILENT` 失败跳过、非 SILENT 请求级失败；enforced 租户下目标/命名图由引擎 `validate_tenant_update_plan` 兜底校验）；请求内操作顺序与单事务原子性保持；`https://` 确定性 501；server e2e 6 测（named graph/default/TriG 命名图/SILENT/501/enforced 403）；L3 已知限制第 2 条同步 |
+| 2026-09-06 | 2.21.0 | **SPARQL 1.1 SERVICE 联邦落地（Jena/Fuseki 后续缺口 Wave 3）**：query 新增 `Algebra::Service`（endpoint/silent/inner）+ `ServiceEndpoint::{Iri,Variable}` + `ServiceClient` trait（经 `AlgebraExecutor` 请求注入 service_client）；parser 支持 `SERVICE [SILENT] (iri|?var) {…}`（inner group 原文保留，供远端原样重提交）；执行器对含 SERVICE 的 join/optional 右侧改走依赖式 dependent join/left join（逐行下推绑定），常量/变量 endpoint 均可、`SERVICE SILENT` 吞错，可序列化 IRI/字面量 VALUES 下推（Blank/Node 无词法形式拒绝下推）；plain String VALUES 词法对齐 parser 序列化约定（省略 `^^xsd:string` 后缀）+ percent-encoding 严格 RFC 3986 期望；query 99→105 测。server 新增 `federation.rs` `HttpServiceClient`（共享 `jsonld::http_get` 抓取 `SELECT * WHERE {…}?query=`，percent-encode；Content-Type 缺省按 SRJ；结果经 parser `sparql_results` 输入解析 + 本地字典 `_:label` 回填 blank），`/sparql` 请求注入 `Arc<HttpServiceClient>`（绑定字典）；仅 `http://`——`https://` 经共享 http_get 确定性拒绝留后续轨；federation 单测 + HTTP e2e，server 91→95 测；能力表 SERVICE 行 ✅ + 已知限制第 1 条同步 |
