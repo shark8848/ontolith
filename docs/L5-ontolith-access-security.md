@@ -1,9 +1,9 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.11.0  
+版本: 2.12.0  
 状态: Implemented (HTTP + gRPC + dual backend + file audit（SHA-256 哈希链）+ SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC 完整链路 R2+（JWKS 校验 + TTL 缓存刷新）+ full-chain tracing P5-05 + 租户管理（注册表 CRUD + 管理面代理）+ Ontology 载荷联动推理输入)  
-日期: 2026-08-29  
+日期: 2026-09-06  
 对应 crate:
 
 - `crates/ontolith-server`
@@ -44,7 +44,8 @@ ontolith-management-server (L5 management plane)
 | GET | `/audit` | metrics:read | 审计 JSON（`?limit=`） |
 | GET/POST | `/sparql` | sparql:query | SPARQL Results JSON |
 | GET/POST | `/explain` | sparql:explain | 计划 Explain JSON |
-| POST | `/data` `/data/nt` `/data/turtle` `/data/trig` `/data/nq` | data:write | 完整 L3 解析写入 |
+| POST | `/data` `/data/nt` `/data/turtle` `/data/trig` `/data/nq` `/data/rdfxml`（别名 `rdf-xml`/`rdf`） | data:write | 完整 L3 解析写入（含 RDF/XML） |
+| GET | `/data` | data:read | Fuseki 风格数据集导出（`?format=`/`Accept`：`ttl`/`trig`/`nq`/`nt`/`rdf+xml`；TenantMode=enforced 下仅导出调用方 owned graphs；默认图视图 = owned 图并集） |
 | GET | `/cluster` `/cluster/status` `/cluster/membership` `/cluster/shards` `/cluster/route` `/cluster/failover` | health:read | L4 控制面只读 |
 | POST | `/cluster/heartbeat` `/tick` `/replicate` `/rebalance` `/partition` `/heal` | cluster:admin | L4 控制面变更 |
 | GET/POST | `/admin/tenants` | cluster:admin | 租户列表 / 创建（仅 `system` 租户可管理，见 §2.1） |
@@ -131,9 +132,9 @@ CONSTRUCT → `{ "results": { "triples": [...], "count": N } }`
 
 | 方式 | 格式 |
 |------|------|
-| path | `/data/nt` `/data/turtle` `/data/trig` `/data/nq` |
-| `?format=` | `nt` `turtle` `trig` `nq` |
-| Content-Type | `text/turtle`, `application/trig`, `application/n-triples`, `application/n-quads` |
+| path | `/data/nt` `/data/turtle` `/data/trig` `/data/nq` `/data/rdfxml`（别名 `rdf-xml`/`rdf`） |
+| `?format=` | `nt` `turtle` `trig` `nq` `rdfxml`/`rdf-xml`/`rdf` |
+| Content-Type | `text/turtle`, `application/trig`, `application/n-triples`, `application/n-quads`, `application/rdf+xml` |
 
 租户图隔离：
 
@@ -323,7 +324,7 @@ systemctl --user status ontolith-server
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
 | ontolith-security | **30** | 鉴权/权限/审计（**SHA-256 哈希链完整性验证 + legacy FNV-1a 兼容续链**）+ `TenantMode`/`TenantNamespace` 命名空间校验 + **树内 HS256 JWT**（FIPS/RFC 4231 向量、sign/verify 往返、篡改/过期/iss/aud 拒绝、Bearer 鉴权）+ **OIDC 完整链路**（RFC 7515 A.2.1 RS256 官方向量、RFC 7517 JWKS 解析/kid 选键/不可用键过滤、发现文档 issuer 强制匹配、oct 往返 + 篡改/过期/iss/aud 拒绝、TTL 缓存刷新与坏响应保留旧钥）+ **租户注册表**（`Tenant`/`TenantApiKey`/`TenantStatus`、id 校验与 `system` 保留、确定性 JSON、`MemoryTenantStore`/`TenantService` create/update/delete/add_key/revoke_key、key 仅存摘要、摘要碰撞拒绝） |
-| ontolith-server | **70** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**OIDC 链路（file:// 加载 + Bearer 认证往返、http:// JWKS 抓取、https 拒绝启动、`/health` jwt/oidc 姿态）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）**、**gRPC 网关（roundtrip insert/select + `traceparent` 回带、enforced 401、跨租户 403、health+oidc）**、**租户管理（网关 CRUD + key 生命周期 + 鉴权即时生效 + digest 不泄漏、非 `system` 403、管理面代理 + ACL）**、**Ontology 载荷联动推理输入（P1-01：`reasoning_input_with_ontology` 合并 tbox/abox 角色图）** |
+| ontolith-server | **85** | turtle 写入、SPARQL JSON、tenant graph、强制鉴权、**RocksDB reopen**、**TLS 终止（rustls 往返）**、**R2 非 loopback TLS 门禁**、**强制租户隔离（acme/other 互不可见、越权引用 403、默认图写盖章）**、**JWT Bearer（认证、伪造/过期 401、JWT 租户优先盖章）**、**OIDC 链路（file:// 加载 + Bearer 认证往返、http:// JWKS 抓取、https 拒绝启动、`/health` jwt/oidc 姿态）**、**Tracing 全链路（`traceparent` 延续、根/子 span 父链、`Traceparent` 回带、`/admin/traces`）**、**gRPC 网关（roundtrip insert/select + `traceparent` 回带、enforced 401、跨租户 403、health+oidc）**、**租户管理（网关 CRUD + key 生命周期 + 鉴权即时生效 + digest 不泄漏、非 `system` 403、管理面代理 + ACL）**、**Ontology 载荷联动推理输入（P1-01：`reasoning_input_with_ontology` 合并 tbox/abox 角色图）**、**RDF/XML 入站/导出与 `/data` 导出（ttl/trig/nq/nt/rdf+xml 协商）、SPARQL 结果 SRX/TSV/CSV 协商、DESCRIBE HTTP** |
 
 ---
 
@@ -333,7 +334,7 @@ systemctl --user status ontolith-server
 2. OIDC 完整链路已落地（JWKS + RS256/HS256 + claim 策略 + TTL 缓存刷新）；树内客户端仅支持 `file://`/`http://` JWKS，`https://` 需反向代理终结 TLS 或挂载快照（TLS 客户端为后续项）；RFC 8414 发现文档解析为库级能力，自动发现端点接线为后续项  
 3. 审计哈希链已升级为 **SHA-256**（2026-08-29，P5-04：`sha256(prev‖payload)`，schema 不变；升级前 FNV-1a 64 文件按摘要长度判别兼容续链，`verify_chain()` 混合链全量校验）  
 4. 租户隔离已升级为强制分库/行级（`ONTOLITH_TENANT_MODE=enforced`：命名图命名空间隔离 + 执行器租户视图）；分库物理隔离（每租户独立 RocksDB 实例）仍为后续增强  
-5. SPARQL Results JSON 为兼容子集（非完整 XML/CSV）  
+5. SPARQL Results 输出已覆盖 JSON / XML(SRX) / TSV / CSV（SELECT/ASK）；CSV 为 RFC 4180 引号 + TSV 术语 cell 语义（IRI `<…>`、字面量 `@lang`/`^^<datatype>`、`_:` 标签），结果集输入侧解析不在范围内  
 
 ---
 
@@ -375,3 +376,4 @@ ONTOLITH_API_KEY=...
 | 2026-08-08 | 2.8.0 | **P5-01 gRPC 网关接入**：tonic 0.12 + prost 0.13 + `protoc-bin-vendored` 3（`grpc-backend` feature 默认开，`--no-default-features` 回退构建通过）；`proto/ontolith/v1/sparql.proto` `SparqlService{Query,Health}`；`SparqlGateway` 复用 HTTP 共享执行路径 + metadata 鉴权（enforced 401/跨租户 403）+ `traceparent` 延续/回带 + 根/子 span；`serve_grpc` 独立 tokio runtime 线程；`ONTOLITH_GRPC_BIND`（默认 `127.0.0.1:50051`），`ontolith-server` bin 升级为真实 HTTP+gRPC 双网关；server 29→33 测 |
 | 2026-08-08 | 2.9.0 | **OIDC 完整链路（R2+）**：`oidc.rs` 树内 JWKS/JWK（RFC 7517）+ RS256（RFC 7515 A.2.1 官方向量背书，自研无依赖大整数 RSA）+ HS256 + `exp`/`nbf`/`iss`/`aud` 策略 + RFC 8414 发现文档 issuer 强制匹配 + `JwksFetcher`/`CachingJwks`/`JwksVerifier` TTL 缓存刷新；server 接线 `ONTOLITH_OIDC_ISSUER`/`AUDIENCE`/`JWKS_URL`/`CACHE_TTL_SECS` + `ONTOLITH_JWT_LEEWAY_SECS`（file:///http:// 注入式传输，https 明确拒绝并文档化）；`/health`（HTTP+管理面）与 gRPC `HealthResponse` 暴露 `oidc` 姿态；security 18→24、server 44→49 测；R1 唯一剩余项勾选完成 |
 | 2026-08-10 | 2.10.0 | **租户管理（注册表 CRUD + 管理面代理）**：`ontolith-security` 新增 `Tenant`/`TenantApiKey`/`TenantStatus` + `TenantStore`/`MemoryTenantStore`/`TenantService`（create/update/delete/add_key/revoke_key，key 仅存 FNV-1a 摘要、原始值一次性返回），Enforced 鉴权按 key 摘要解析注册表（头匹配/disabled 拒绝/user 缺省 `api`，全局 key 退化为 legacy 回退）；`ontolith-storage` 独立 `tenant` CF + `tenant_cf_*` 字节级原语；网关承载 `/admin/tenants*` CRUD（仅 `system` 租户 + cluster:admin，RocksDB 键布局 `t:<id>`/`k:<digest>`，`create_missing_column_families` 自动增 CF）；管理面 `/admin/tenants*` ACL 代理到网关（读 `authorize_admin_view`/写 `authorize_admin_mutation`，`http_exchange` 最小 HTTP 客户端）；`/health` 暴露 `tenants` 姿态；security 24→29、storage 51→54、server 49→65 测 |
+| 2026-09-06 | 2.12.0 | **Jena/Fuseki 协议补齐（P0，HTTP 面）**：`GET /data` 数据集导出（全库或 enforced 租户 owned graphs；`?format=`/`Accept` 支持 `ttl`/`trig`/`nq`/`nt`/`rdf+xml`，Content-Type 对应）；ingest 支持 RDF/XML（`application/rdf+xml` Content-Type、`?format=rdf|rdfxml|rdf-xml|rdf/xml`、路径 `/data/rdfxml`/`/data/rdf-xml`/`/data/rdf`，路由补齐）；`/sparql` 结果协商 SRX（`application/sparql-results+xml`）/TSV/CSV（SELECT/ASK，`?format=`/`Accept`），JSON 默认兼容不变；SPARQL DESCRIBE HTTP 执行（描述图 JSON 与 CONSTRUCT 同构）；server 70→85 测 |

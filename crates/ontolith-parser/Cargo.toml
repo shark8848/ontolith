@@ -8,3 +8,4 @@ ontolith-core = { path = "../ontolith-core" }
 ontolith-rdf = { path = "../ontolith-rdf" }
 ontolith-storage = { path = "../ontolith-storage", default-features = false }
 serde_json = "1"
+quick-xml = "0.37"

@@ -2,10 +2,10 @@
 
 use crate::application::{QueryReadService, UpdateWriteService};
 use crate::domain::{
-    AggregateExpr, AggregateFunction, AggregateSpec, Algebra, BoundValue, Expression, GraphRef,
-    GraphTarget, PathExpression, PreemptionReason, PreemptionToken, QueryKind, QueryPlan,
-    QueryRequest, QueryResult, Solution, TenantScope, TermPattern, TriplePattern, UpdateOp,
-    UpdatePattern,
+    AggregateExpr, AggregateFunction, AggregateSpec, Algebra, BoundValue, DescribeTargets,
+    Expression, GraphRef, GraphTarget, PathExpression, PreemptionReason, PreemptionToken,
+    QueryKind, QueryPlan, QueryRequest, QueryResult, Solution, TenantScope, TermPattern,
+    TriplePattern, UpdateOp, UpdatePattern,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue, NodeId};
 use ontolith_core::error::OntolithError;
@@ -180,6 +180,20 @@ impl AlgebraExecutor {
                     solutions,
                     boolean: None,
                     construct_triples: Vec::new(),
+                    affected: 0,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    timed_out,
+                    cancelled,
+                })
+            }
+            QueryKind::Describe => {
+                let triples = materialize_describe(plan, &solutions, &ctx)?;
+                Ok(QueryResult {
+                    kind: plan.kind,
+                    variables: Vec::new(),
+                    solutions: Vec::new(),
+                    boolean: None,
+                    construct_triples: triples,
                     affected: 0,
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     timed_out,
@@ -4472,6 +4486,124 @@ fn materialize_construct(
         }
     }
     out
+}
+
+/// DESCRIBE execution (SPARQL 1.1 §16.4): resolve the clause targets against
+/// the WHERE solutions and return every triple that mentions a described
+/// resource in subject or object position (symmetric description).
+fn materialize_describe(
+    plan: &QueryPlan,
+    solutions: &[Solution],
+    ctx: &ExecCtx<'_>,
+) -> Result<Vec<Triple>, OntolithError> {
+    // Each probe pair answers the two questions about a resource: which
+    // subject node to read outbound triples from, and which object term to
+    // find inbound (resource-as-object) triples with.
+    let mut probes: Vec<DescribeProbe> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    match &plan.describe_targets {
+        DescribeTargets::All => {
+            for sol in solutions {
+                for value in sol.bindings.values() {
+                    push_describe_resource(value, &mut probes, &mut seen, ctx)?;
+                }
+            }
+        }
+        DescribeTargets::List(targets) => {
+            for target in targets {
+                match target {
+                    TermPattern::Iri(iri) => {
+                        push_describe_resource(
+                            &BoundValue::Iri(iri.clone()),
+                            &mut probes,
+                            &mut seen,
+                            ctx,
+                        )?;
+                    }
+                    TermPattern::Variable(var) => {
+                        for sol in solutions {
+                            if let Some(value) = sol.get(var) {
+                                push_describe_resource(value, &mut probes, &mut seen, ctx)?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut triples: BTreeMap<String, Triple> = BTreeMap::new();
+    for probe in probes {
+        ctx.check()?;
+        if let Some(subj) = probe.subject {
+            for triple in ctx.read.by_subject(subj, ctx.txn_id)? {
+                triples.insert(triple_key(&triple), triple);
+            }
+        }
+        if let Some(obj) = probe.object {
+            for triple in ctx.read.by_object(&obj, ctx.txn_id)? {
+                triples.insert(triple_key(&triple), triple);
+            }
+        }
+    }
+    Ok(triples.into_values().collect())
+}
+
+/// Storage probes that describe one resource: subject node for outbound
+/// triples plus object term for inbound (resource-as-object) triples.
+#[derive(Debug, Clone)]
+struct DescribeProbe {
+    subject: Option<NodeId>,
+    object: Option<Term>,
+}
+
+fn push_describe_resource(
+    value: &BoundValue,
+    probes: &mut Vec<DescribeProbe>,
+    seen: &mut HashSet<String>,
+    ctx: &ExecCtx<'_>,
+) -> Result<(), OntolithError> {
+    let Some(probe) = describe_probe(value, ctx)? else {
+        return Ok(());
+    };
+    let key = format!("{:?}|{:?}", probe.subject, probe.object);
+    if seen.insert(key) {
+        probes.push(probe);
+    }
+    Ok(())
+}
+
+/// Translate a bound value into its describe probes: the subject node for
+/// outbound triples and the object term for inbound (resource-as-object)
+/// triples. Dictionary-backed nodes live in subject position as [`NodeId`]
+/// and in object position as `Term::Iri`, so the decoded value decides which
+/// object term matches the store; blank/unknown nodes use `Term::BlankNode`.
+fn describe_probe(
+    value: &BoundValue,
+    ctx: &ExecCtx<'_>,
+) -> Result<Option<DescribeProbe>, OntolithError> {
+    match value {
+        BoundValue::Literal(_) => Ok(None),
+        BoundValue::Iri(iri) => Ok(Some(DescribeProbe {
+            subject: ctx.read.node_for_iri(iri)?,
+            object: Some(Term::Iri(iri.clone())),
+        })),
+        BoundValue::Node(n) | BoundValue::Blank(n) => {
+            if let Some(decoded) = ctx.read.decode_node(*n)
+                && !decoded.starts_with("_:")
+            {
+                return Ok(Some(DescribeProbe {
+                    subject: Some(*n),
+                    object: Some(Term::Iri(Iri::new(decoded))),
+                }));
+            }
+            Ok(Some(DescribeProbe {
+                subject: Some(*n),
+                object: Some(Term::BlankNode(*n)),
+            }))
+        }
+    }
 }
 
 fn instantiate_node(

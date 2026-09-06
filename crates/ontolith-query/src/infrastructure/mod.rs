@@ -2720,4 +2720,108 @@ mod tests {
             "write to foreign tenant graph must be forbidden, got: {err}"
         );
     }
+
+    /// Dictionary-backed graph with inbound/outbound edges around alice/bob:
+    /// alice name/knows bob, bob knows alice (inbound for alice) + name.
+    fn seed_describe() -> (
+        Arc<InMemoryStorageEngine>,
+        Arc<InMemoryDictionary>,
+        Arc<dyn TripleRepository>,
+    ) {
+        let engine = Arc::new(InMemoryStorageEngine::new());
+        let dict = Arc::new(InMemoryDictionary::new());
+        let repo: Arc<dyn TripleRepository> =
+            Arc::new(InMemoryTripleRepository::new(Arc::clone(&engine)));
+        let alice = dict.encode_node("http://ex.org/alice");
+        let bob = dict.encode_node("http://ex.org/bob");
+        let txn = TxnId::new(1);
+        let insert = |s: NodeId, p: &str, o: Term| {
+            repo.insert(
+                txn,
+                Triple {
+                    subject: s,
+                    predicate: Iri::new(p),
+                    object: o,
+                },
+            )
+            .unwrap();
+        };
+        insert(
+            alice,
+            "http://ex.org/name",
+            Term::Literal(LiteralValue::String("Alice".into())),
+        );
+        insert(
+            alice,
+            "http://ex.org/knows",
+            Term::Iri(Iri::new("http://ex.org/bob")),
+        );
+        insert(
+            bob,
+            "http://ex.org/knows",
+            Term::Iri(Iri::new("http://ex.org/alice")),
+        );
+        insert(
+            bob,
+            "http://ex.org/name",
+            Term::Literal(LiteralValue::String("Bob".into())),
+        );
+        engine.commit_transaction(txn).unwrap();
+        (engine, dict, repo)
+    }
+
+    #[test]
+    fn describe_iri_returns_inbound_and_outbound_triples() {
+        let (engine, dict, repo) = seed_describe();
+        let p = update_pipeline(engine, dict, repo);
+        let r = p
+            .execute(&QueryRequest::new("DESCRIBE <http://ex.org/alice>"))
+            .unwrap();
+        assert_eq!(r.kind, crate::domain::QueryKind::Describe);
+        // Outbound: alice name "Alice" + alice knows bob.
+        // Inbound: bob knows alice.
+        assert_eq!(r.construct_triples.len(), 3, "{:?}", r.construct_triples);
+        let rendered = format!("{:?}", r.construct_triples);
+        assert!(rendered.contains("http://ex.org/name"));
+        assert!(rendered.contains("http://ex.org/knows"));
+        assert!(rendered.contains("Alice"));
+    }
+
+    #[test]
+    fn describe_variable_resolves_from_where_bindings() {
+        let (engine, dict, repo) = seed_describe();
+        let p = update_pipeline(engine, dict, repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "DESCRIBE ?s WHERE { ?s <http://ex.org/name> ?n }",
+            ))
+            .unwrap();
+        // Both named resources are described → the whole fixture graph.
+        assert_eq!(r.construct_triples.len(), 4, "{:?}", r.construct_triples);
+        let rendered = format!("{:?}", r.construct_triples);
+        assert!(rendered.contains("Bob"));
+        assert!(rendered.contains("Alice"));
+    }
+
+    #[test]
+    fn describe_star_covers_all_bound_resources() {
+        let (engine, dict, repo) = seed_describe();
+        let p = update_pipeline(engine, dict, repo);
+        let r = p
+            .execute(&QueryRequest::new(
+                "DESCRIBE * WHERE { ?s <http://ex.org/knows> ?o }",
+            ))
+            .unwrap();
+        assert_eq!(r.construct_triples.len(), 4, "{:?}", r.construct_triples);
+    }
+
+    #[test]
+    fn describe_unknown_iri_returns_empty_graph() {
+        let (engine, dict, repo) = seed_describe();
+        let p = update_pipeline(engine, dict, repo);
+        let r = p
+            .execute(&QueryRequest::new("DESCRIBE <http://ex.org/nobody>"))
+            .unwrap();
+        assert!(r.construct_triples.is_empty());
+    }
 }

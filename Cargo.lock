@@ -1288,6 +1288,7 @@ dependencies = [
  "ontolith-core",
  "ontolith-rdf",
  "ontolith-storage",
+ "quick-xml",
  "serde_json",
 ]
 

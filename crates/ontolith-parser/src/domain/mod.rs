@@ -4,7 +4,10 @@ use ontolith_rdf::domain::{Dataset, Quad, Triple};
 
 mod serialize;
 
-pub use serialize::{SerializeFormat, serialize_dataset, serialize_quad, serialize_triple};
+pub use serialize::{
+    SerializeFormat, serialize_dataset, serialize_dataset_with, serialize_quad, serialize_rdf_xml,
+    serialize_triple,
+};
 
 /// Concrete RDF syntax supported by the parser surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +17,8 @@ pub enum ParseFormat {
     NTriples,
     NQuads,
     JsonLd,
+    /// RDF/XML (RDF 1.1 XML syntax, pragmatic profile).
+    RdfXml,
 }
 
 impl ParseFormat {
@@ -24,6 +29,7 @@ impl ParseFormat {
             Self::NTriples => "n-triples",
             Self::NQuads => "n-quads",
             Self::JsonLd => "json-ld",
+            Self::RdfXml => "rdf-xml",
         }
     }
 
@@ -67,6 +73,10 @@ impl ParseRequest {
 
     pub fn json_ld(source_name: impl Into<String>) -> Self {
         Self::new(ParseFormat::JsonLd, source_name)
+    }
+
+    pub fn rdf_xml(source_name: impl Into<String>) -> Self {
+        Self::new(ParseFormat::RdfXml, source_name)
     }
 
     pub fn with_base(mut self, base: impl Into<String>) -> Self {

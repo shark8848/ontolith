@@ -4,6 +4,10 @@ use crate::http::{HttpRequest, HttpResponse, now_ms};
 use crate::reasoning::{
     InferenceConfig, ReasoningReadService, base_read_service, reasoning_input_with_ontology,
 };
+use crate::results::{
+    ResultFormat, detect_result_format, is_results_kind, sparql_results_csv, sparql_results_srx,
+    sparql_results_tsv,
+};
 #[cfg(feature = "rocksdb-backend")]
 use crate::tenants::RocksTenantStore;
 use ontolith_ai::application::SemanticSearchService;
@@ -23,10 +27,12 @@ use ontolith_observability::infrastructure::{
     InMemoryMetricSink, InMemoryTraceStore, TraceScope, current_trace, format_traceparent,
     generate_span_id, generate_trace_id, parse_traceparent, render_prometheus_text,
 };
-use ontolith_parser::domain::ParseFormat;
+use ontolith_parser::domain::{
+    ParseFormat, SerializeFormat, serialize_dataset_with, serialize_rdf_xml,
+};
 use ontolith_parser::infrastructure::{
     parse_json_ld_doc, parse_json_ld_doc_with_remote_context, parse_nquads, parse_ntriples,
-    parse_trig_doc, parse_turtle_doc,
+    parse_rdf_xml_doc, parse_trig_doc, parse_turtle_doc,
 };
 use ontolith_query::domain::{
     BoundValue, PatternCost, QueryExplain, QueryKind, QueryRequest, QueryResult,
@@ -584,13 +590,17 @@ impl AppState {
             ("GET", "/audit") => self.audit_route(&req),
             ("GET", "/sparql") | ("POST", "/sparql") => self.sparql(&req, false),
             ("GET", "/explain") | ("POST", "/explain") => self.sparql(&req, true),
+            ("GET", "/data") => self.export_data(&req),
             ("POST", "/data")
             | ("POST", "/data/nt")
             | ("POST", "/data/turtle")
             | ("POST", "/data/trig")
             | ("POST", "/data/nq")
             | ("POST", "/data/jsonld")
-            | ("POST", "/data/json-ld") => self.ingest(&req, path),
+            | ("POST", "/data/json-ld")
+            | ("POST", "/data/rdfxml")
+            | ("POST", "/data/rdf-xml")
+            | ("POST", "/data/rdf") => self.ingest(&req, path),
             ("GET", "/cluster") | ("GET", "/cluster/status") => self.cluster_status(&req),
             ("GET", "/cluster/membership") => self.cluster_membership(&req),
             ("GET", "/cluster/shards") => self.cluster_shards(&req),
@@ -1173,20 +1183,28 @@ impl AppState {
                 &effective_inference,
             )?;
 
-            // SPARQL Query Results JSON Format (W3C-inspired) when accept/format asks for it.
-            if format.contains("sparql-results") || format == "srj" || format == "json" {
-                return Ok(HttpResponse::json(
-                    200,
-                    "OK",
-                    sparql_results_json(
-                        &outcome.result,
-                        &ctx,
-                        consistency,
-                        outcome.reasoning.as_ref(),
-                        self.dictionary.as_ref(),
-                    ),
-                ));
+            // SPARQL Results content negotiation (SRX/TSV/CSV for SELECT/ASK;
+            // everything else keeps the JSON envelope).
+            let result_format = detect_result_format(format);
+            if result_format != ResultFormat::Json && is_results_kind(outcome.result.kind) {
+                let body = match result_format {
+                    ResultFormat::Srx => {
+                        sparql_results_srx(&outcome.result, self.dictionary.as_ref())
+                    }
+                    ResultFormat::Tsv => {
+                        sparql_results_tsv(&outcome.result, self.dictionary.as_ref())
+                    }
+                    ResultFormat::Csv => {
+                        sparql_results_csv(&outcome.result, self.dictionary.as_ref())
+                    }
+                    ResultFormat::Json => unreachable!(),
+                };
+                let mut resp = HttpResponse::new(200, "OK", body);
+                resp.headers
+                    .push(("Content-Type".into(), result_format.content_type().into()));
+                return Ok(resp);
             }
+
             Ok(HttpResponse::json(
                 200,
                 "OK",
@@ -1344,6 +1362,79 @@ impl AppState {
         Ok(plan)
     }
 
+    /// Fuseki-style dataset export: `GET /data` returns the dataset (or its
+    /// default graph) in the requested RDF serialization. Tenant-enforced
+    /// mode scopes the export to the caller's owned graphs; the default graph
+    /// view mirrors the SPARQL read semantics (union of owned graphs).
+    fn export_data(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let ctx = self.auth(req)?;
+        authorize(&self.audit, &ctx, "data", "read", now_ms())?;
+
+        let format = detect_export_format(req)?;
+        let dict: &dyn DictionaryCodec = self.dictionary.as_ref();
+        let mut ds = ontolith_rdf::domain::Dataset::new();
+
+        if self.tenant_mode == TenantMode::Enforced {
+            let ns = TenantNamespace::new(ctx.tenant.as_str());
+            for q in self.storage.named_graph_quads() {
+                let Some(graph) = &q.graph_name else { continue };
+                if !ns.is_owned(graph.as_str()) {
+                    continue;
+                }
+                ds.insert_named(graph.clone(), q.triple.clone());
+                ds.insert_default(q.triple);
+            }
+        } else {
+            for t in self.storage.default_graph_triples() {
+                ds.insert_default(t);
+            }
+            for q in self.storage.named_graph_quads() {
+                if let Some(graph) = &q.graph_name {
+                    ds.insert_named(graph.clone(), q.triple.clone());
+                }
+            }
+        }
+
+        let (body, content_type) = match format {
+            ExportFormat::NTriples => (
+                serialize_dataset_with(&ds, SerializeFormat::NTriples, Some(dict)),
+                "application/n-triples; charset=utf-8",
+            ),
+            ExportFormat::NQuads => (
+                serialize_dataset_with(&ds, SerializeFormat::NQuads, Some(dict)),
+                "application/n-quads; charset=utf-8",
+            ),
+            ExportFormat::Turtle => (
+                serialize_dataset_with(&ds, SerializeFormat::Turtle, Some(dict)),
+                "text/turtle; charset=utf-8",
+            ),
+            ExportFormat::TriG => (
+                serialize_dataset_with(&ds, SerializeFormat::TriG, Some(dict)),
+                "application/trig; charset=utf-8",
+            ),
+            ExportFormat::RdfXml => (
+                serialize_rdf_xml(&ds, Some(dict))?,
+                "application/rdf+xml; charset=utf-8",
+            ),
+        };
+        let mut resp = HttpResponse::new(200, "OK", body);
+        resp.headers
+            .push(("Content-Type".into(), content_type.into()));
+        self.audit.record(
+            now_ms(),
+            &ctx,
+            "read",
+            "data",
+            ontolith_security::domain::AuditOutcome::Allow,
+            format!(
+                "export format={} quads={}",
+                format.as_str(),
+                ds.triple_count()
+            ),
+        );
+        Ok(resp)
+    }
+
     fn ingest(&self, req: &HttpRequest, path: &str) -> Result<HttpResponse, OntolithError> {
         let ctx = self.auth(req)?;
         authorize(&self.audit, &ctx, "data", "write", now_ms())?;
@@ -1371,6 +1462,7 @@ impl AppState {
                         parse_json_ld_doc(text, dict, None)?
                     }
                 }
+                ParseFormat::RdfXml => parse_rdf_xml_doc(text, dict, None)?,
             };
 
             // Tenant isolation at write path (P5-03): enforced mode ALWAYS
@@ -2300,12 +2392,16 @@ fn detect_ingest_format(req: &HttpRequest, path: &str) -> Result<ParseFormat, On
         if ct.contains("json-ld") || ct.contains("ld+json") {
             return Ok(ParseFormat::JsonLd);
         }
+        if ct.contains("rdf+xml") || ct.contains("rdf/xml") || ct.contains("rdfxml") {
+            return Ok(ParseFormat::RdfXml);
+        }
     }
     Ok(match path {
         "/data/turtle" => ParseFormat::Turtle,
         "/data/trig" => ParseFormat::TriG,
         "/data/nq" => ParseFormat::NQuads,
         "/data/jsonld" | "/data/json-ld" => ParseFormat::JsonLd,
+        "/data/rdfxml" | "/data/rdf-xml" | "/data/rdf" => ParseFormat::RdfXml,
         _ => ParseFormat::NTriples,
     })
 }
@@ -2317,10 +2413,61 @@ fn parse_format_name(name: &str) -> Result<ParseFormat, OntolithError> {
         "ttl" | "turtle" => Ok(ParseFormat::Turtle),
         "trig" => Ok(ParseFormat::TriG),
         "jsonld" | "json-ld" | "json" => Ok(ParseFormat::JsonLd),
+        "rdf" | "rdfxml" | "rdf-xml" | "rdf/xml" => Ok(ParseFormat::RdfXml),
         other => Err(OntolithError::Failed(format!(
             "unsupported ingest format: {other}"
         ))),
     }
+}
+
+/// Dataset export wire formats (superset of [`SerializeFormat`] with RDF/XML).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportFormat {
+    NTriples,
+    NQuads,
+    Turtle,
+    TriG,
+    RdfXml,
+}
+
+impl ExportFormat {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NTriples => "n-triples",
+            Self::NQuads => "n-quads",
+            Self::Turtle => "turtle",
+            Self::TriG => "trig",
+            Self::RdfXml => "rdf-xml",
+        }
+    }
+}
+
+/// Resolve the requested export format from `?format=` / `Accept`, falling
+/// back to Turtle (default graph) for plain `GET /data`.
+fn detect_export_format(req: &HttpRequest) -> Result<ExportFormat, OntolithError> {
+    let raw = req
+        .query
+        .get("format")
+        .map(|s| s.as_str())
+        .or_else(|| req.header("accept"))
+        .unwrap_or("turtle")
+        .to_ascii_lowercase();
+    if raw.contains("n-quads") || raw.contains("nquads") || raw == "nq" {
+        return Ok(ExportFormat::NQuads);
+    }
+    if raw.contains("trig") {
+        return Ok(ExportFormat::TriG);
+    }
+    if raw.contains("n-triples") || raw.contains("ntriples") || raw == "nt" {
+        return Ok(ExportFormat::NTriples);
+    }
+    if raw.contains("rdf+xml") || raw.contains("rdf-xml") || raw.contains("rdfxml") {
+        return Ok(ExportFormat::RdfXml);
+    }
+    if raw.contains("turtle") || raw.contains("text/turtle") || raw == "ttl" {
+        return Ok(ExportFormat::Turtle);
+    }
+    Err(OntolithError::InvalidArgument("unsupported export format"))
 }
 
 /// Render the explain JSON shared by the HTTP and gRPC access paths (P5-01).
@@ -2390,8 +2537,9 @@ pub(crate) fn sparql_results_json(
             json_string(ctx.tenant.as_str()),
             json_string(consistency.as_str()),
         ),
-        QueryKind::Construct => {
-            // Compact construct summary + sample triples.
+        QueryKind::Construct | QueryKind::Describe => {
+            // Compact graph summary + sample triples (CONSTRUCT template
+            // result / DESCRIBE resource description graph).
             let mut triples = String::from("[");
             for (i, t) in result.construct_triples.iter().take(100).enumerate() {
                 if i > 0 {
@@ -3837,6 +3985,40 @@ mod tests {
     }
 
     #[test]
+    fn sparql_describe_via_http_returns_description_graph() {
+        let state =
+            AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
+        let ins = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "INSERT DATA { <http://ex.org/a> <http://ex.org/b> \"c\" . \
+                    <http://ex.org/x> <http://ex.org/d> <http://ex.org/a> }",
+            ),
+        );
+        assert_eq!(ins.status, 200);
+
+        let desc = dispatch_for_test(&state, sparql_req("POST", "DESCRIBE <http://ex.org/a>"));
+        assert_eq!(
+            desc.status,
+            200,
+            "body={}",
+            String::from_utf8_lossy(&desc.body)
+        );
+        let body = String::from_utf8_lossy(&desc.body);
+        assert!(
+            body.contains("\"count\":2"),
+            "outbound + inbound triple expected: {body}"
+        );
+        assert!(
+            body.contains("\"type\":\"uri\",\"value\":\"http://ex.org/a\"}"),
+            "described subject decoded to uri: {body}"
+        );
+        assert!(body.contains("\"http://ex.org/b\""), "body={body}");
+        assert!(body.contains("\"http://ex.org/d\""), "body={body}");
+    }
+
+    #[test]
     fn explain_via_http_includes_cost_estimates() {
         let state =
             AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
@@ -4650,5 +4832,200 @@ mod tests {
         assert!(sbody.contains("\"conforms\":false"), "body={sbody}");
         assert!(sbody.contains("\"result_count\":1"), "body={sbody}");
         assert!(sbody.contains("\"severity\""), "body={sbody}");
+    }
+
+    fn state_mem() -> Arc<AppState> {
+        AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default())
+    }
+
+    fn ct(resp: &HttpResponse) -> String {
+        resp.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    }
+
+    fn seed_nt(state: &Arc<AppState>, body: &[u8]) -> HttpResponse {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "content-type".to_owned(),
+            "application/n-triples".to_owned(),
+        );
+        dispatch_for_test(
+            state,
+            HttpRequest {
+                method: "POST".to_owned(),
+                path: "/data/nt".to_owned(),
+                query: HashMap::new(),
+                headers,
+                body: body.to_vec(),
+            },
+        )
+    }
+
+    #[test]
+    fn http_results_tsv_csv_srx_negotiation() {
+        let state = state_mem();
+        let ingest = seed_nt(
+            &state,
+            b"<urn:s> <urn:p> <urn:o> .\n<urn:s> <urn:name> \"Alice\"@en .",
+        );
+        assert_eq!(
+            ingest.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&ingest.body)
+        );
+
+        let select = "SELECT ?s ?name WHERE { ?s <urn:name> ?name }";
+
+        let tsv = dispatch_for_test(
+            &state,
+            sparql_req_with("POST", select, {
+                let mut q = HashMap::new();
+                q.insert("format".into(), "tsv".into());
+                q
+            }),
+        );
+        assert_eq!(tsv.status, 200);
+        assert!(ct(&tsv).contains("text/tab-separated"), "ct={}", ct(&tsv));
+        let tbody = String::from_utf8_lossy(&tsv.body);
+        assert!(tbody.starts_with("?s\t?name\n"), "body={tbody}");
+        assert!(tbody.contains("<urn:s>"), "body={tbody}");
+        assert!(tbody.contains("\"Alice\"@en"), "body={tbody}");
+
+        let csv = dispatch_for_test(
+            &state,
+            sparql_req_with("POST", select, {
+                let mut q = HashMap::new();
+                q.insert("format".into(), "csv".into());
+                q
+            }),
+        );
+        assert!(ct(&csv).contains("text/csv"), "ct={}", ct(&csv));
+        assert!(String::from_utf8_lossy(&csv.body).contains("<urn:s>"));
+
+        let srx = dispatch_for_test(
+            &state,
+            sparql_req_with("POST", select, {
+                let mut q = HashMap::new();
+                q.insert("format".into(), "srx".into());
+                q
+            }),
+        );
+        assert!(
+            ct(&srx).contains("application/sparql-results+xml"),
+            "ct={}",
+            ct(&srx)
+        );
+        let xbody = String::from_utf8_lossy(&srx.body);
+        assert!(xbody.contains("<uri>urn:s</uri>"), "body={xbody}");
+        assert!(
+            xbody.contains("<literal xml:lang=\"en\">Alice</literal>"),
+            "body={xbody}"
+        );
+
+        // ASK keeps boolean semantics in TSV.
+        let ask = dispatch_for_test(
+            &state,
+            sparql_req_with("POST", "ASK { <urn:s> <urn:p> <urn:o> }", {
+                let mut q = HashMap::new();
+                q.insert("format".into(), "tsv".into());
+                q
+            }),
+        );
+        assert_eq!(String::from_utf8_lossy(&ask.body), "true\n");
+    }
+
+    #[test]
+    fn http_rdf_xml_ingest_and_data_export() {
+        let state = state_mem();
+        let xml = r#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:ex="http://example.org/">
+  <ex:Person rdf:about="http://example.org/a">
+    <ex:name xml:lang="en">Alice</ex:name>
+  </ex:Person>
+</rdf:RDF>"#;
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "application/rdf+xml".to_owned());
+        let ingest = dispatch_for_test(
+            &state,
+            HttpRequest {
+                method: "POST".to_owned(),
+                path: "/data".to_owned(),
+                query: HashMap::new(),
+                headers,
+                body: xml.as_bytes().to_vec(),
+            },
+        );
+        assert_eq!(
+            ingest.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&ingest.body)
+        );
+        let ibody = String::from_utf8_lossy(&ingest.body);
+        assert!(ibody.contains("\"format\":\"rdf-xml\""), "body={ibody}");
+
+        // Shorthand path routing: POST /data/rdfxml selects the RDF/XML parser.
+        let xml2 = xml.replace("http://example.org/a", "http://example.org/b");
+        let ingest2 = dispatch_for_test(
+            &state,
+            HttpRequest {
+                method: "POST".to_owned(),
+                path: "/data/rdfxml".to_owned(),
+                query: HashMap::new(),
+                headers: HashMap::new(),
+                body: xml2.as_bytes().to_vec(),
+            },
+        );
+        assert_eq!(
+            ingest2.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&ingest2.body)
+        );
+        assert!(String::from_utf8_lossy(&ingest2.body).contains("\"format\":\"rdf-xml\""));
+
+        // Round-trip query: type + language literal survived the RDF/XML parse.
+        let ask = dispatch_for_test(
+            &state,
+            sparql_req(
+                "POST",
+                "ASK { <http://example.org/a> a <http://example.org/Person> ; <http://example.org/name> \"Alice\"@en }",
+            ),
+        );
+        assert_eq!(ask.status, 200, "{}", String::from_utf8_lossy(&ask.body));
+        assert!(String::from_utf8_lossy(&ask.body).contains("\"boolean\":true"));
+
+        // Export in Turtle / RDF-XML with content negotiation.
+        for (param, expected_ct, needle) in [
+            ("ttl", "text/turtle", "<http://example.org/a>"),
+            (
+                "rdf+xml",
+                "application/rdf+xml",
+                "rdf:about=\"http://example.org/a\"",
+            ),
+            ("nq", "application/n-quads", "<http://example.org/a>"),
+        ] {
+            let mut q = HashMap::new();
+            q.insert("format".to_owned(), param.to_owned());
+            let resp = dispatch_for_test(
+                &state,
+                HttpRequest {
+                    method: "GET".to_owned(),
+                    path: "/data".to_owned(),
+                    query: q,
+                    headers: HashMap::new(),
+                    body: Vec::new(),
+                },
+            );
+            assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
+            assert!(ct(&resp).contains(expected_ct), "ct={}", ct(&resp));
+            let body = String::from_utf8_lossy(&resp.body);
+            assert!(body.contains(needle), "format={param} body={body}");
+        }
     }
 }

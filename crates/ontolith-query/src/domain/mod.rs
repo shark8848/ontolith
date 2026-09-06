@@ -345,6 +345,16 @@ pub struct OrderKey {
     pub ascending: bool,
 }
 
+/// DESCRIBE clause resource spec (SPARQL 1.1 §16.4).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DescribeTargets {
+    /// `DESCRIBE *` — every non-literal resource bound by the WHERE clause.
+    All,
+    /// `DESCRIBE <iri> ?var …` — the listed IRIs plus every resource a listed
+    /// variable binds to (variables left unbound contribute nothing).
+    List(Vec<TermPattern>),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryPlan {
     pub id: QueryPlanId,
@@ -368,6 +378,8 @@ pub struct QueryPlan {
     pub pattern_costs: Vec<PatternCost>,
     /// SELECT projection expressions `(expr AS ?alias)` (non-aggregate).
     pub projection_exprs: Vec<ProjectionExpr>,
+    /// DESCRIBE clause resource spec (only for `QueryKind::Describe`).
+    pub describe_targets: DescribeTargets,
 }
 
 /// One `(expr AS ?alias)` SELECT projection item.

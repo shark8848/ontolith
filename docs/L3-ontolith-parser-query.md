@@ -1,9 +1,9 @@
 # L3 — Parser & Query Engine 完整功能说明
 
 文档 ID: IMPL-L3-0001  
-版本: 2.9.0  
+版本: 2.18.0  
 状态: Implemented (full L3 core, not MVP-only)  
-日期: 2026-08-07  
+日期: 2026-09-06  
 对应 crate:
 
 - `crates/ontolith-parser`
@@ -37,7 +37,7 @@ SPARQL / RDF text
 
 | 能力域 | 状态 |
 |--------|------|
-| RDF 交换语法 N-Triples / N-Quads / Turtle / TriG | ✅ |
+| RDF 交换语法 N-Triples / N-Quads / Turtle / TriG / RDF/XML | ✅（RDF/XML 为生产读取器：`rdf:Description`/typed-node、`about`/`ID`/`nodeID`、属性元素与嵌套空节点、`parseType=Resource|Collection|Literal`、`rdf:li`、作用域命名空间与 `xml:base`、Text/CDATA；不支持的构造确定性报错） |
 | 流式解析事件 `RdfEvent` + Sink | ✅ |
 | 结构化解析错误（行/列） | ✅ |
 | SPARQL SELECT / ASK / CONSTRUCT 核心 | ✅ |
@@ -49,7 +49,7 @@ SPARQL / RDF text
 | timeout + 协作式 cancel + 异步抢占 token | ✅ |
 | 经 L2 SPO/POS/OSP 访问 | ✅ |
 | 属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`） | ✅ |
-| RDF 序列化导出（N-Triples / N-Quads 写出，`SerializeFormat`） | ✅ |
+| RDF 序列化导出（`SerializeFormat`：N-Triples / N-Quads / Turtle / TriG / RDF-XML 写出） | ✅（`GET /data` 全库/默认图/租户范围导出，见 L5） |
 | JSON-LD（`@context` 子集：term/前缀/`@vocab`/`@base`/`@language`/keyword 别名、`@id`/`@type`/`@value`/`@list`/`@set`/`@language`/`@index` 容器、命名图 `@graph`、嵌套节点） | ✅（RDF 1.0/1.1 务实子集） |
 | SPARQL Update（INSERT DATA / DELETE DATA / DELETE·INSERT…WHERE / DELETE WHERE） | ✅ |
 | SPARQL Update 高级形态（CLEAR/DROP 图作用域、WITH 图作用域 DELETE·INSERT…WHERE、LOAD 本地图复制） / DESCRIBE 执行 | ✅（LOAD 为本地命名图复制子集，远程 HTTP 抓取未实现） |
@@ -59,7 +59,7 @@ SPARQL / RDF text
 | EXISTS / NOT EXISTS / MINUS + 聚合扩展（GROUP_CONCAT/SEPARATOR、SAMPLE、DISTINCT 聚合）+ CAST（`xsd:`/`CAST(expr AS …)`）+ CONSTRUCT WHERE + 构造简写（`;`/`,`/`[]`） | ✅（compact 字面量模型下类型化语义受限） |
 | SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE） | ✅ |
 | 高级子查询（相关子查询等） / EXISTS / 服务联邦 | ❌ 后续增强 |
-| 流式 Result 协议（网络层） | ❌ 属 L5 接入层 |
+| 流式 Result 协议（网络层） | ✅（`/sparql` SRX/TSV/CSV 输出为 L5 接入层，见 L5） |
 
 ---
 
@@ -161,7 +161,7 @@ Query text
 | DELETE { tpl } INSERT { tpl } WHERE { pattern } / DELETE WHERE { pattern } | ✅ |
 | ASK WHERE { ... } | ✅ → `boolean` |
 | CONSTRUCT { template } WHERE { ... } | ✅ → `construct_triples` |
-| DESCRIBE | 识别 kind，执行 `Unsupported` |
+| DESCRIBE `<iri>` ?var … / `DESCRIBE *` [WHERE { pattern }] | ✅ → 描述图（`construct_triples`）：WHERE 求解目标资源（含 `*`=WHERE 全部绑定资源），对该资源取 subject/object 双向提及的三元组去重；无 WHERE 时仅描述列出的 IRI |
 | UPDATE（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE） | ✅ → `affected` 计数 |
 | PREFIX / BASE | ✅ |
 
@@ -270,8 +270,8 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 
 | Crate | 测试数 | 覆盖 |
 |-------|--------|------|
-| parser | 32 | NT/NQ/Turtle/TriG/集合/blank 属性表/流式/定位错误/JSON-LD（`@context` 展开/值对象/容器/命名图/`@reverse`/`@nest`/`@included`/`@json`/远程 `@context` loader/错误路径） |
-| query | 46 | SELECT/JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/ASK/DISTINCT/ORDER/LIMIT/PREFIX/完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）/SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE）/子查询基线/属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）/Explain/timeout/cancel/txn/hint |
+| parser | 44 | NT/NQ/Turtle/TriG/RDF-XML 读/写往返/集合/blank 属性表/流式/定位错误/JSON-LD（`@context` 展开/值对象/容器/命名图/`@reverse`/`@nest`/`@included`/`@json`/远程 `@context` loader/错误路径） |
+| query | 96 | SELECT/JOIN/OPTIONAL/UNION/FILTER/BIND/VALUES/CONSTRUCT/ASK/DESCRIBE/DISTINCT/ORDER/LIMIT/PREFIX/完整聚合（GROUP BY/HAVING、COUNT(DISTINCT)/SUM/AVG/MIN/MAX、子查询聚合）/SPARQL Update（INSERT/DELETE DATA、DELETE·INSERT…WHERE、DELETE WHERE、CLEAR/DROP/LOAD/WITH 图作用域）/子查询基线/属性路径最小集（`/`、`+`、`*`、`?`、`|`、`^`）/Explain/timeout/cancel/txn/hint/tenant scope |
 | storage 回归 | 24 | 绿 |
 | core 回归 | 11 | 绿 |
 
@@ -279,7 +279,7 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 
 ## 6. 已知限制（完整 L3 边界，非“未开工”）
 
-1. **属性路径扩展（分组/嵌套更完整 1.1 语法）**、**高级子查询（相关子查询等）**、**EXISTS/NOT EXISTS**、**SERVICE** 未实现（已支持完整聚合 GROUP BY/HAVING、嵌套 SELECT+LIMIT 子查询、子查询聚合与属性路径最小集 `p1/p2`、`+`、`*`、`?`、`|`、`^`）。HAVING 中聚合调用需匹配投影聚合表达式（重写为别名求值）。  
+1. **SERVICE 联邦**、**属性路径完整 1.1 扩展（分组/嵌套更复杂形态）**、**高级子查询（相关子查询等）**、**远程 `LOAD <http(s)://…>`** 未实现（已支持完整聚合 GROUP BY/HAVING、嵌套 SELECT+LIMIT 子查询、子查询聚合、属性路径最小集 `p1/p2`、`+`、`*`、`?`、`|`、`^`、负集合最小集、EXISTS/NOT EXISTS/MINUS、DESCRIBE）。HAVING 中聚合调用需匹配投影聚合表达式（重写为别名求值）。  
 2. **SPARQL Update 高级形态**：已支持 `CLEAR/DROP [SILENT] DEFAULT|NAMED|ALL|GRAPH <g>`、`WITH <g>` 作用于 DELETE·INSERT…WHERE / DELETE WHERE（WHERE 以图 `g` 为默认图匹配，模板写入图 `g`）、`LOAD [SILENT] <src> [INTO GRAPH <g>]`（离线子集：`<src>` 为库内已有命名图，复制到默认图或目标图；远程 HTTP 抓取留待网络层）。`WITH` 仅组合 modify 形态（与规范一致）；DELETE/INSERT 模板中的 blank 节点按未绑定处理（跳过该三元组）；无匹配的更新为空操作不报错。  
 3. **JSON-LD** 为务实子集：`@reverse`/`@nest`/`@included`/`@json`/远程 `@context`（注入 loader，L5 仅 `http://`）/`@propagate`（W3C context 定义语义：默认 true，`false` 使生效 context 不传入子节点、子节点回退前一 context；2026-09-02）/`@import`（Pass 0 远程导入先行合并、导入 context 本地定义覆盖、远程被导入 context 含 `@import` 拒绝；2026-09-02）已支持；`@context` 无完整 term 定义（`@id` 为相对 IRI 的 `@type` 语义、`@container` 组合等边缘）按文档声明处理。  
 4. JOIN 为嵌套循环式 solution merge；BGP 模式序由代价优化器按实时统计（triple/predicate/subject/object 计数）做贪心选序 + 绑定传播（`EngineQueryStatistics` + `CostBasedOptimizer`），统计为均匀选择性启发式，尚无采样/直方图。  
@@ -325,3 +325,4 @@ logical 含 `optimize:before->after`（代价优化为 `optimize(cost):...`）�
 | 2026-08-07 | 2.15.0 | 新增否定与聚合/类型能力：`Expression::Exists`/`Algebra::Minus`（EXISTS/NOT EXISTS 以当前绑定并入 VALUES+Join 求值，MINUS 共享变量差集，表达式求值链接入抢占 ctx）+ 聚合扩展（GROUP_CONCAT + SEPARATOR、SAMPLE、SUM/AVG/MIN/MAX DISTINCT、多 HAVING 合并）+ CAST（`xsd:type(expr)` 前缀函数与 `CAST(expr AS xsd:…)`，integer/decimal/double/float/boolean/string）+ CONSTRUCT WHERE（模板即 WHERE 模式）+ 构造/查询语法（`;` 与 `,` 简写、`[]` 空白节点属性列表、BIND scope 仅计真正绑定）+ IRI subject 字典桥匹配（`bind_pattern` Node↔IRI、`bound_node` 索引特化、模板实例化 `node_for_iri`）；negation 11→1、aggregates 12→3、construct 逗号/CONSTRUCT WHERE 转正、cast 6 项 parse-error 全解除；W3C 192→229 PASS（parse-error 109→56，drift=0） |
 | 2026-08-07 | 2.16.0 | 完整 datatype/lang 字面量模型（L0→L5 自底向上）：`LiteralValue` 增 `Lang`/`Typed`/`Float`/`Double` 变体（core 规范化编码与 RocksDB term codec 新 tag，旧库兼容）；Turtle/N-Triples/SPARQL 查询解析保留 `@lang` 与 `^^datatype`（Turtle 数字词法：指数→xsd:double、含点无指数→xsd:decimal、整数→xsd:integer）；求值按 SPARQL 语义：XPath 数值提升算术、RDFterm-equal 值相等、数值/字符串/lang 比较、完整 CAST（含 string 词法校验与 integer 截断）、字符串函数 lang/datatype 规则、STRDT/STRLANG、ABS/CEIL/FLOOR/ROUND 保类型、ENCODE_FOR_URI、NOW/RAND、日期函数（YEAR…TZ）、IN 错误语义；聚合 SUM/AVG 数值等级传播、GROUP_CONCAT lang 合并；server JSON 输出 datatype/xml:lang；compliance 数值按值归一；query 66→67 测，W3C 229→265 PASS（+36），drift=0 |
 | 2026-08-07 | 2.17.0 | compliance harness 与字符串函数语义收尾：harness 数值归一（decimal/double 按 f64 bits 值比较、float 展宽 f64、XSD 布尔词法归一）+ 结果比对 bnode 标签位置化映射（标签无关）+ `ExecCtx` 注入 BASE、`IRI()/URI()` 相对 IRI 解析 + `CONCAT` 全参数同 lang 才保 lang + `STRBEFORE/STRAFTER` 参数兼容语义（两 simple/xsd:string、同 lang、左 lang+右 simple，否则错误；命中保左 lang 含空串参数、未命中 plain 空串）+ `STRDT/STRLANG/LANGMATCHES/TIMEZONE` 错误语义；W3C 265→284 PASS（+19：cast 6、functions 11、csv-tsv-res 2），drift=0 |
+| 2026-09-06 | 2.18.0 | Jena/Fuseki 协议补齐（P0）：parser 新增 RDF/XML 生产读取器（quick-xml DOM，`rdf:Description`/typed-node/`about|ID|nodeID`、属性元素与嵌套空节点、`parseType=Resource|Collection|Literal`、`rdf:li`、作用域命名空间 + `xml:base`、Text/CDATA，不支持的构造确定性报错；parser 6 测）与 RDF/XML 写出（`serialize_rdf_xml`：Description/about|nodeID、datatype|xml:lang、QName 化命名空间）+ Turtle/TriG 写出（`serialize_dataset_with` 字典感知、修复 Turtle 旧分支多余 `.`）；SPARQL 结果协议输出 SRX/TSV/CSV（`ontolith-server/results.rs`，SELECT/ASK，cell 编码对齐 compliance `.parse_tsv_cell`：IRI `<…>`/`@lang`/`^^<dt>`/`_:` 标签）+ `/sparql` `?format=`/`Accept` 协商；`GET /data` 图导出（`?format=`/`Accept`：ttl/trig/nq/nt/rdf+xml，Content-Type 对应；租户 Enforced 下导出调用方 owned graphs，字典感知 subject 解码为 IRI）+ `/data` RDF/XML 入站（`application/rdf+xml`、`/data/rdfxml|rdf-xml|rdf`、`format=`）；DESCRIBE 执行（`QueryPlan.describe_targets`：`<iri>`/`?var`/`*` + 可选 WHERE，执行器按目标资源取 subject/object 双向三元组描述图并去重排序，无 WHERE 仅列出的 IRI；server JSON 图输出与 CONSTRUCT 同构）；parser 44 测，query 96 测（+7 DESCRIBE parse/exec），server lib 85 测（+1 HTTP e2e），fmt/clippy 零告警 |

@@ -12,6 +12,7 @@ pub mod jsonld;
 pub mod logcenter;
 pub mod management;
 pub mod reasoning;
+pub mod results;
 pub mod runtime;
 pub mod tenants;
 

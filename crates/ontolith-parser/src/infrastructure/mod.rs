@@ -2,6 +2,7 @@
 
 mod json_ld;
 mod nt;
+pub mod rdf_xml;
 pub mod term_lex;
 mod turtle;
 
@@ -13,9 +14,11 @@ use ontolith_storage::application::DictionaryCodec;
 pub use self::json_ld::RemoteContextLoader;
 use self::json_ld::{parse_json_ld, parse_json_ld_with_remote_context};
 use self::nt::{LineFormat, parse_document_streaming};
+use self::rdf_xml::parse_rdf_xml;
 use self::turtle::{parse_trig, parse_turtle};
 
-/// Production RDF parser: N-Triples, N-Quads, Turtle, TriG.
+/// Production RDF parser: N-Triples, N-Quads, Turtle, TriG, JSON-LD subset,
+/// and RDF/XML (pragmatic profile).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BasicRdfParser;
 
@@ -44,7 +47,8 @@ impl RdfParser for BasicRdfParser {
             stats.triple_count = sink.dataset.default_graph.len();
             stats.quad_count = sink.dataset.triple_count();
         } else {
-            // Turtle / TriG: triple_count from sink events; add named graph triples into totals.
+            // Turtle / TriG / RDF-XML: triple_count from sink events; add named
+            // graph triples into totals.
             stats.triple_count = sink.dataset.default_graph.len();
             stats.quad_count = sink
                 .dataset
@@ -76,6 +80,7 @@ impl RdfParser for BasicRdfParser {
             ParseFormat::Turtle => parse_turtle(input, dictionary, request.base_iri.clone(), sink),
             ParseFormat::TriG => parse_trig(input, dictionary, request.base_iri.clone(), sink),
             ParseFormat::JsonLd => parse_json_ld(input, dictionary, request.base_iri.clone(), sink),
+            ParseFormat::RdfXml => parse_rdf_xml(input, dictionary, request.base_iri.clone(), sink),
         }
     }
 }
@@ -118,6 +123,14 @@ pub fn parse_json_ld_doc(
         input,
         dictionary,
     )
+}
+
+pub fn parse_rdf_xml_doc(
+    input: &str,
+    dictionary: &dyn DictionaryCodec,
+    base_iri: Option<String>,
+) -> Result<ParseOutput, OntolithError> {
+    rdf_xml::parse_rdf_xml_doc(input, dictionary, base_iri)
 }
 
 pub fn parse_json_ld_doc_with_remote_context(

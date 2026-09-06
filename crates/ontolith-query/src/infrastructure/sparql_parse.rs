@@ -5,9 +5,9 @@
 //! VALUES, DISTINCT, ORDER BY, LIMIT/OFFSET, PREFIX/BASE.
 
 use crate::domain::{
-    AggregateExpr, AggregateFunction, AggregateSpec, Algebra, Expression, GraphRef, GraphTarget,
-    OrderKey, PathExpression, ProjectionExpr, QueryKind, QueryPlan, QueryPlanId, QueryRequest,
-    TermPattern, TriplePattern, UpdateOp, UpdatePattern,
+    AggregateExpr, AggregateFunction, AggregateSpec, Algebra, DescribeTargets, Expression,
+    GraphRef, GraphTarget, OrderKey, PathExpression, ProjectionExpr, QueryKind, QueryPlan,
+    QueryPlanId, QueryRequest, TermPattern, TriplePattern, UpdateOp, UpdatePattern,
 };
 use ontolith_core::domain::{Iri, LanguageTag, LiteralValue};
 use ontolith_core::error::OntolithError;
@@ -104,25 +104,6 @@ impl<'a> SparqlParser<'a> {
         };
         self.logical.push(format!("detect_kind:{}", kind.as_str()));
 
-        if kind == QueryKind::Describe {
-            return Ok(QueryPlan {
-                id: plan_id(self.input),
-                kind,
-                algebra: Algebra::Identity,
-                update_ops: Vec::new(),
-                prefixes: self.prefixes.clone(),
-                base: self.base.clone(),
-                from: Vec::new(),
-                from_named: Vec::new(),
-                logical_steps: self.logical.clone(),
-                physical_steps: vec![format!("unsupported:{}", kind.as_str())],
-                construct_template: Vec::new(),
-                estimated_rows: None,
-                pattern_costs: Vec::new(),
-                projection_exprs: Vec::new(),
-            });
-        }
-
         if kind == QueryKind::Update {
             let update_ops = self.parse_update_ops()?;
             return Ok(QueryPlan {
@@ -140,6 +121,7 @@ impl<'a> SparqlParser<'a> {
                 estimated_rows: None,
                 pattern_costs: Vec::new(),
                 projection_exprs: Vec::new(),
+                describe_targets: DescribeTargets::List(Vec::new()),
             });
         }
 
@@ -151,6 +133,7 @@ impl<'a> SparqlParser<'a> {
         let mut star_projection = false;
         let mut construct_template = Vec::new();
         let mut construct_where_consumed = false;
+        let mut describe_targets = DescribeTargets::List(Vec::new());
 
         if kind == QueryKind::Select {
             self.skip();
@@ -258,6 +241,33 @@ impl<'a> SparqlParser<'a> {
                 self.logical
                     .push(format!("construct_template:{}", construct_template.len()));
             }
+        } else if kind == QueryKind::Describe {
+            self.skip();
+            if self.peek_char() == Some('*') {
+                self.bump();
+                describe_targets = DescribeTargets::All;
+                self.logical.push("describe:*".into());
+            } else {
+                let mut targets = Vec::new();
+                loop {
+                    self.skip();
+                    if self.peek_char() == Some('?') || self.peek_char() == Some('$') {
+                        targets.push(TermPattern::Variable(self.parse_var_name()?));
+                    } else if self.peek_char() == Some('<') || self.looking_at_prefixed_name() {
+                        let iri = Iri::parse(self.parse_iri_or_prefixed()?)?;
+                        targets.push(TermPattern::Iri(iri));
+                    } else {
+                        break;
+                    }
+                }
+                if targets.is_empty() {
+                    return Err(
+                        self.err("DESCRIBE requires '*' or at least one IRI/variable target")
+                    );
+                }
+                self.logical.push(format!("describe:{}", targets.len()));
+                describe_targets = DescribeTargets::List(targets);
+            }
         }
 
         self.skip();
@@ -304,6 +314,10 @@ impl<'a> SparqlParser<'a> {
             Algebra::Bgp(construct_template.clone())
         } else if self.peek_char() == Some('{') {
             self.parse_group_graph_pattern()?
+        } else if kind == QueryKind::Describe {
+            // DESCRIBE with no WHERE clause describes the listed IRIs only;
+            // target variables stay unbound and contribute nothing.
+            Algebra::Identity
         } else if let Some(hint_subj) = parse_subject_hint(self.input)? {
             // legacy full-scan with subject hint
             self.logical.push("apply_subject_filter".into());
@@ -334,6 +348,15 @@ impl<'a> SparqlParser<'a> {
         }
 
         self.skip();
+
+        // DESCRIBE exposes a graph, not grouped rows: GROUP BY / HAVING would
+        // silently change which bindings describe targets resolve from, so
+        // reject them explicitly (ORDER BY / LIMIT / OFFSET stay legal).
+        if kind == QueryKind::Describe
+            && (self.looking_at_keyword("GROUP") || self.looking_at_keyword("HAVING"))
+        {
+            return Err(self.err("GROUP BY / HAVING are not supported with DESCRIBE"));
+        }
 
         // GROUP BY — appears after the WHERE group, before solution modifiers.
         let mut groups: Vec<String> = Vec::new();
@@ -546,6 +569,7 @@ impl<'a> SparqlParser<'a> {
             estimated_rows: None,
             pattern_costs: Vec::new(),
             projection_exprs,
+            describe_targets,
         })
     }
 
@@ -3561,5 +3585,54 @@ mod tests {
              FILTER(CONTAINS(STR(?o), \"中文\")) }"))
         .expect("parse should not panic");
         assert_eq!(plan.kind, QueryKind::Select);
+    }
+
+    #[test]
+    fn describe_parses_explicit_targets_and_where() {
+        let plan = plan_query(&req("PREFIX foaf: <http://xmlns.com/foaf/0.1/> \
+             DESCRIBE <http://ex.org/alice> foaf:knows ?x WHERE { \
+                 ?x <http://ex.org/name> ?n \
+             }"))
+        .expect("describe with WHERE should parse");
+        assert_eq!(plan.kind, QueryKind::Describe);
+        let DescribeTargets::List(targets) = &plan.describe_targets else {
+            panic!("expected explicit target list");
+        };
+        assert_eq!(targets.len(), 3);
+        assert_eq!(
+            targets[0],
+            TermPattern::Iri(Iri::new("http://ex.org/alice"))
+        );
+        assert_eq!(
+            targets[1],
+            TermPattern::Iri(Iri::new("http://xmlns.com/foaf/0.1/knows"))
+        );
+        assert_eq!(targets[2], TermPattern::Variable("x".into()));
+        assert!(
+            plan.physical_steps
+                .iter()
+                .any(|s| s != "unsupported:DESCRIBE")
+        );
+    }
+
+    #[test]
+    fn describe_star_and_bare_iri_forms() {
+        let star = plan_query(&req("DESCRIBE * WHERE { ?s ?p ?o . FILTER(?o = 1) }"))
+            .expect("DESCRIBE * should parse");
+        assert_eq!(star.kind, QueryKind::Describe);
+        assert!(matches!(star.describe_targets, DescribeTargets::All));
+
+        let bare = plan_query(&req("DESCRIBE <urn:resource>")).expect("bare describe");
+        assert!(matches!(
+            &bare.describe_targets,
+            DescribeTargets::List(t) if t.len() == 1
+        ));
+        assert_eq!(bare.algebra, Algebra::Identity);
+    }
+
+    #[test]
+    fn describe_without_targets_rejected() {
+        let err = plan_query(&req("DESCRIBE WHERE { ?s ?p ?o }")).expect_err("no targets");
+        assert!(err.message().contains("DESCRIBE"));
     }
 }
