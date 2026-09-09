@@ -1375,6 +1375,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-build",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

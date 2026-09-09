@@ -1,9 +1,9 @@
 # L5 — Access Layer & Security Baseline
 
 文档 ID: IMPL-L5-0001  
-版本: 2.14.0  
+版本: 2.15.0  
 状态: Implemented (HTTP + gRPC + dual backend + file audit（SHA-256 哈希链）+ SPARQL Results JSON + management server + enforced tenant isolation P5-03 + OIDC 完整链路 R2+（JWKS 校验 + TTL 缓存刷新）+ full-chain tracing P5-05 + 租户管理（注册表 CRUD + 管理面代理）+ Ontology 载荷联动推理输入)  
-日期: 2026-09-06  
+日期: 2026-09-09  
 对应 crate:
 
 - `crates/ontolith-server`
@@ -42,7 +42,7 @@ ontolith-management-server (L5 management plane)
 | GET | `/ready` `/readyz` | health:read | 就绪探针 |
 | GET | `/metrics` | metrics:read | Prometheus（含延迟/状态码/存储） |
 | GET | `/audit` | metrics:read | 审计 JSON（`?limit=`） |
-| GET/POST | `/sparql` | sparql:query | SPARQL Results JSON；更新支持远程 `LOAD <http://…>`（server 层 `http_get` 抓取 + 格式探测 + 图感知 `INSERT DATA` 原位替换；SILENT/INTO GRAPH/命名图保留；enforced 租户 owned-graph 校验；`https://` 501）；查询另支持 SPARQL 1.1 `SERVICE <http://…>` 联邦（请求内注入 `HttpServiceClient`，依赖式 dispatch + SILENT + VALUES 下推；仅 `http://`，`https://` 留后续轨） |
+| GET/POST | `/sparql` | sparql:query | SPARQL Results JSON；更新支持远程 `LOAD <http(s)://…>`（server 层 `http_get` 抓取 + 格式探测 + 图感知 `INSERT DATA` 原位替换；SILENT/INTO GRAPH/命名图保留；enforced 租户 owned-graph 校验；`https://` 自 2026-09-09 起经树内 rustls 客户端）；查询另支持 SPARQL 1.1 `SERVICE <http(s)://…>` 联邦（请求内注入 `HttpServiceClient`，依赖式 dispatch + SILENT + VALUES 下推；`http://`/`https://` 均支持） |
 | GET/POST | `/explain` | sparql:explain | 计划 Explain JSON |
 | POST | `/data` `/data/nt` `/data/turtle` `/data/trig` `/data/nq` `/data/rdfxml`（别名 `rdf-xml`/`rdf`） | data:write | 完整 L3 解析写入（含 RDF/XML） |
 | GET | `/data` | data:read | Fuseki 风格数据集导出（`?format=`/`Accept`：`ttl`/`trig`/`nq`/`nt`/`rdf+xml`；TenantMode=enforced 下仅导出调用方 owned graphs；默认图视图 = owned 图并集） |
@@ -379,3 +379,4 @@ ONTOLITH_API_KEY=...
 | 2026-09-06 | 2.12.0 | **Jena/Fuseki 协议补齐（P0，HTTP 面）**：`GET /data` 数据集导出（全库或 enforced 租户 owned graphs；`?format=`/`Accept` 支持 `ttl`/`trig`/`nq`/`nt`/`rdf+xml`，Content-Type 对应）；ingest 支持 RDF/XML（`application/rdf+xml` Content-Type、`?format=rdf|rdfxml|rdf-xml|rdf/xml`、路径 `/data/rdfxml`/`/data/rdf-xml`/`/data/rdf`，路由补齐）；`/sparql` 结果协商 SRX（`application/sparql-results+xml`）/TSV/CSV（SELECT/ASK，`?format=`/`Accept`），JSON 默认兼容不变；SPARQL DESCRIBE HTTP 执行（描述图 JSON 与 CONSTRUCT 同构）；server 70→85 测 |
 | 2026-09-06 | 2.13.0 | **远程 `LOAD <http://…>`（Jena/Fuseki 数据面缺口 Wave 2，HTTP 面）**：`rewrite_remote_loads` 在 plan 构建后把 `http(s)://` 源 `UpdateOp::Load` 原位改写为图感知 `INSERT DATA`——`crate::jsonld::http_get` 同步抓取（Content-Type + 状态码，仅 `http://`；`https://` 确定性 501/`SILENT` 跳过）→ Content-Type/URL 后缀探测（NT/NQ/Turtle/TriG/JSON-LD/RDF-XML）→ parser 解析 → 文档默认图载入 `INTO GRAPH` 目标（缺省为默认图）、文档命名图保留原名；请求内顺序与单事务原子性保持（改写后仍由引擎统一执行）；`SILENT` 抓取失败跳过、非 SILENT 请求级 500；enforced 租户下 `INTO GRAPH`/命名图经引擎 `validate_tenant_update_plan` 校验（越权 403）；server 85→91 测（6 个 e2e：named graph、default+N-Triples、TriG 命名图保留、错误/SILENT、https 501、enforced 403） |
 | 2026-09-06 | 2.14.0 | **`/sparql` 查询侧 SPARQL 1.1 SERVICE 联邦（Jena/Fuseki 后续缺口 Wave 3，HTTP 面）**：query 引擎支持 `SERVICE [SILENT] (iri|?var) {…}`（常量/变量 endpoint；含 SERVICE 的 join/optional 右侧依赖式 dispatch；`SERVICE SILENT` 吞错；可序列化 IRI/字面量 VALUES 下推）；server 新增 `crate::federation::HttpServiceClient`——对远端执行 `SELECT * WHERE {…}?query=`（percent-encode）+ 共享 `crate::jsonld::http_get` 抓取（Content-Type 缺省按 SPARQL Results JSON），响应经 parser `sparql_results` 输入解析 + 本地字典 `_:label` 回填 blank；仅 `http://`，`https://` 经共享 http_get 确定性拒绝（501，后续轨）；`/sparql` 请求注入 `Arc<HttpServiceClient>`（绑定字典）；server 91→95 测（federation 单测 + HTTP e2e） |
+| 2026-09-09 | 2.15.0 | **远程抓取 `https://` 落地（Jena/Fuseki 后续缺口 Wave 4，HTTP 面）**：`crate::jsonld::http_get` 新增 `https://` 分支——树内 rustls 0.23（ring provider）同步 TLS 客户端，信任锚为 `webpki-roots` Mozilla CA 集合 + 可选附加 PEM env `ONTOLITH_REMOTE_FETCH_CA_BUNDLE`（内部 PKI/自签端点）；三条出站路径统一受益：SPARQL Update 远程 `LOAD <https://…>`、`SERVICE <https://…>` 联邦、JSON-LD 远程 `@context`（`HttpRemoteContextLoader` 改走共享 `http_get`，删除重复的原裸 TCP 传输块）；响应解析抽出共享 `parse_http_response`；原「`https://` 确定性 501」e2e 改写为抓取失败语义（非 SILENT 500 / SILENT 跳过）；新增 6 测（rcgen 自签 TLS 服务往返、未信任证书/非 2xx 拒绝、env bundle 调度、loader https、非 http scheme 拒绝；env 测试模块级 ENV_LOCK 串行化、证书互不交叉），server 95→101 测；`webpki-roots` Tier B 登记；L3 2.21.0→2.22.0 同步 |

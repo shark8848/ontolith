@@ -22,9 +22,10 @@ use std::sync::Arc;
 const FEDERATION_ACCEPT: &str = "application/sparql-results+json, \
     application/sparql-results+xml;q=0.9, text/tab-separated-values;q=0.8, text/csv;q=0.7";
 
-/// SPARQL `SERVICE` over HTTP(S). Only `http://` is implemented (the shared
-/// fetch helper rejects `https://` deterministically); `SILENT` handling is
-/// the executor's job.
+/// SPARQL `SERVICE` over HTTP(S): `http://` uses the raw TCP request and
+/// `https://` the in-tree rustls client of the shared fetch helper (Mozilla
+/// `webpki-roots` + optional `ONTOLITH_REMOTE_FETCH_CA_BUNDLE` PEM bundle);
+/// `SILENT` handling is the executor's job.
 #[derive(Clone)]
 pub struct HttpServiceClient {
     dictionary: Arc<dyn DictionaryCodec>,

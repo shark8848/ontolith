@@ -20,6 +20,7 @@ grpc-backend = ["dep:tonic", "dep:prost", "dep:tokio", "dep:tonic-build", "dep:p
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.2.0"
+webpki-roots = "0.26"
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"], optional = true }

@@ -1279,8 +1279,9 @@ impl AppState {
     /// into a concrete `INSERT DATA` op, so the engine applies it atomically
     /// and in request order inside its update transaction. Fetch failures
     /// honor `SILENT` (operation skipped); otherwise the whole request fails
-    /// before any write. Only `http://` is implemented; `https://` returns a
-    /// deterministic error.
+    /// before any write. Both `http://` (raw TCP) and `https://` (in-tree
+    /// rustls client, `webpki-roots` + optional
+    /// `ONTOLITH_REMOTE_FETCH_CA_BUNDLE`) are supported.
     fn rewrite_remote_loads(&self, plan: &mut QueryPlan) -> Result<(), OntolithError> {
         if plan.kind != QueryKind::Update || plan.update_ops.is_empty() {
             return Ok(());
@@ -4099,23 +4100,25 @@ mod tests {
     }
 
     #[test]
-    fn remote_load_https_is_unsupported_unless_silent() {
+    fn remote_load_https_fetch_failure_unless_silent() {
+        // https:// is supported since Wave 4 (in-tree rustls client); an
+        // unreachable endpoint fails the whole request unless SILENT.
         let state =
             AppState::new_memory("127.0.0.1:8080".to_owned(), HeaderAuthenticator::default());
         let resp = dispatch_for_test(
             &state,
-            sparql_req("POST", "LOAD <https://example.org/data.ttl>"),
+            sparql_req("POST", "LOAD <https://127.0.0.1:1/data.ttl>"),
         );
-        assert_eq!(resp.status, 501, "{}", String::from_utf8_lossy(&resp.body));
+        assert_eq!(resp.status, 500, "{}", String::from_utf8_lossy(&resp.body));
         assert!(
-            String::from_utf8_lossy(&resp.body).contains("https:// not implemented"),
+            String::from_utf8_lossy(&resp.body).contains("remote fetch"),
             "body={}",
             String::from_utf8_lossy(&resp.body)
         );
 
         let resp = dispatch_for_test(
             &state,
-            sparql_req("POST", "LOAD SILENT <https://example.org/data.ttl>"),
+            sparql_req("POST", "LOAD SILENT <https://127.0.0.1:1/data.ttl>"),
         );
         assert_eq!(resp.status, 200, "{}", String::from_utf8_lossy(&resp.body));
         assert!(
