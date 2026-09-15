@@ -2,8 +2,8 @@
 
 文档 ID: SYNC-PROJ-0001
 目标看板: <https://github.com/users/shark8848/projects/2>（用户级 Projects v2）
-数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.73，2026-09-02）
-状态: Active（Classic PAT 已配置，随增量同步；2026-08-29 全量同步完成：65 条（63 更新 + 2 新建）0 失败，回读 total=65；2026-08-30 新增 WBS-02 JSON-LD 导入卡 + 备份调度接入管理面卡（均已完成/P1），回读 total=67；2026-09-02 增量待同步：REL-PROD-0002 卡（已完成）——本环境无 `/tmp/gh_token`，同步跳过，契约保持）
+数据源: [PROGRESS.md](./PROGRESS.md)（单一事实源，版本 0.1.79，2026-09-15）
+状态: Active（Classic PAT 就位：`/tmp/gh_token` + `~/.gh_token` 兜底；**2026-09-15 全量同步欠账清零**：68 条 → ok=68 updated=67 fail=0，新建 REL-PROD-0002 卡（2026-09-02 起挂账），回读 total=68、状态逐条一致、无未完成项；历史：2026-08-29 全量 65 条 0 失败，2026-08-30 新增 WBS-02/备份调度两卡回读 total=67）
 
 ## 1. 认证要求（重要，勿重复探索）
 
@@ -134,6 +134,7 @@ TOKEN=$(cat /tmp/gh_token); PROJECT_ID="..."; FIELD_ID="..."; STATUS_DONE="已�
    ```bash
    bash scripts/sync-github-projects.sh /path/to/items.tsv
    ```
-   前置：Classic PAT（`project` scope）写入 `/tmp/gh_token`（chmod 600）。
+   前置：Classic PAT（`project` scope）写入 `/tmp/gh_token`（chmod 600），缺失时回退 `~/.gh_token`（持久副本）；
+   两者皆无则脚本报错退出（不再静默带空 token 请求）。
 3. 回填 PROGRESS.md 变更记录：`已同步到 GitHub Projects #2（SYNC-PROJ-0001）`。
 4. commit + push 同步记录（origin 推送契约见 AGENTS.md）。
