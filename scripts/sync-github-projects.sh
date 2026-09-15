@@ -2,13 +2,23 @@
 # 同步 PROGRESS.md 条目到 GitHub Projects #2（用户级 Projects v2，SYNC-PROJ-0001）。
 # 用法: scripts/sync-github-projects.sh [items.tsv]
 #   items.tsv 每行: 标题<TAB>状态<TAB>[优先级]；状态 ∈ 未开始|进行中|已完成，优先级 ∈ P0|P1|P2（可空）。
-# 前置: Classic PAT（project scope）写入 /tmp/gh_token（chmod 600）。幂等：按标题匹配，缺失创建，存在只更新字段。
+# 前置: Classic PAT（project scope）写入 /tmp/gh_token（chmod 600）；缺失时回退 ~/.gh_token
+#       （持久副本，机器重启后 /tmp 会清空；同一令牌可复用于其它项目）。缺令牌即报错退出。
+# 幂等：按标题匹配，缺失创建，存在只更新字段。
 # 看板/字段 ID（projects/2）：
 #   项目 PVT_kwHOAsUzTs4Bfxo4 · Status PVTSSF_lAHOAsUzTs4Bfxo4zhaCHXU（Todo f75ad846 / In progress 47fc9ee4 / Done 98236657）
 #   Priority PVTSSF_lAHOAsUzTs4Bfxo4zhaCH3g（P0 b43f28f8 / P1 3cd6b8a4 / P2 aadc3c89）
 set -uo pipefail
 TSV="${1:-/tmp/sync-items.tsv}"
-TOKEN=$(cat /tmp/gh_token)
+if [ -r /tmp/gh_token ]; then
+  TOKEN=$(cat /tmp/gh_token)
+elif [ -r "${HOME}/.gh_token" ]; then
+  TOKEN=$(cat "${HOME}/.gh_token")
+else
+  echo "[sync] 未找到令牌：请把 Classic PAT（project scope）写入 /tmp/gh_token 或 ~/.gh_token（chmod 600）" >&2
+  exit 1
+fi
+[ -n "$TOKEN" ] || { echo "[sync] 令牌为空" >&2; exit 1; }
 PROJ=PVT_kwHOAsUzTs4Bfxo4
 F_STATUS=PVTSSF_lAHOAsUzTs4Bfxo4zhaCHXU
 F_PRIO=PVTSSF_lAHOAsUzTs4Bfxo4zhaCH3g

@@ -16,14 +16,16 @@
      (classic)），勾选 `project` scope（读写 Projects v2；仅读可勾
      `read:project`）。格式以 `ghp_` 开头。
   2. **GitHub App 安装令牌**，权限 `Projects: Read and write`（用户项目）。
-- 令牌放 `/tmp/gh_token`（chmod 600），勿入库。
+- 令牌放 `/tmp/gh_token`（chmod 600），并在 `~/.gh_token` 留持久副本（机器重启后 `/tmp` 会清空）；
+  `scripts/sync-github-projects.sh` 依次回退读取，缺令牌时报错退出而非静默带空 token 请求。
+  **两个位置均勿入库**；同一令牌可复用于其它项目的看板同步（各仓脚本同款解析顺序）。
 - 组织级 Projects 才支持 fine-grained PAT（org 级 `Projects` 权限）；本项目为
   用户级，不在其列。
 
 ## 2. 读取看板（首次同步先执行）
 
 ```bash
-TOKEN=$(cat /tmp/gh_token)
+TOKEN=$(cat /tmp/gh_token 2>/dev/null || cat ~/.gh_token)
 # 1) 项目 node ID（number=2）
 curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   https://api.github.com/graphql -d '{"query":"query{user(login:\"shark8848\"){projectV2(number:2){id title url}}}"}'
