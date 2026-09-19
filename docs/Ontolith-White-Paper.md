@@ -6,7 +6,7 @@
 | 字段 | 值 |
 |------|-----|
 | 文档编号 | WP-0001 |
-| 版本 | 1.2.0 |
+| 版本 | 1.3.0 |
 | 状态 | Published |
 | 发布日期 | 2026-09-19 |
 | 项目 | Ontolith |
@@ -22,12 +22,12 @@ Ontolith 是一个用 Rust 编写的**云原生本体运行时与分布式语义
 
 与传统的三元组库或图数据库不同，Ontolith 从设计之初即确立了四条主张：
 
-- **Standards First（标准优先）**：对外行为严格遵循 W3C 语义网标准（RDF 1.1、SPARQL 1.1、SHACL、GeoSPARQL）。
+- **Standards First（标准优先）**：对外行为以 W3C 语义网标准（RDF 1.1、SPARQL 1.1、SHACL、GeoSPARQL）为准绳，并以 profile 锁定的合规套件作为回归门禁。
 - **Reasoning Native（原生推理）**：前向链推理与 SHACL 数据形状校验作为一等公民内建于运行时。
 - **Cloud Native（云原生）**：分层可替换架构 + 分布式数据面（多进程 Raft），面向水平扩展与在线运维。
 - **Rust Powered（Rust 驱动）**：控制面与数据面全部以 Rust 实现，以类型系统与所有权模型换取内存安全与可验证的可靠性。
 
-当前 Ontolith 已完成 **L0–L9 分层内核**的实现，覆盖 16 个 crate 的工作区，并在合规性上取得 **完整 W3C SPARQL 套件 492/492 全绿、SHACL 核心套件 98/98 全绿** 的成果，核心 SLO 实测达标（成功率 100%、P95=0ms）。R1–R4 全计划里程碑判定完成度约 100%，并已完成首次单节点生产发布与真实的发布/回滚演练。
+当前 Ontolith 已完成 **L0–L9 分层内核**的实现，覆盖 16 个 crate 的工作区。合规性上：vendored W3C `rdf-tests` SPARQL 1.1 测试集（28 个 feature manifest）经 runner 全量遍历后，profile 锁定的 **492 条可判定测试条目全绿（492/492、fail=0、drift=0）**，W3C SHACL 核心套件的 **98 条可运行条目全绿（121 个 `sht:Validate` 中的可执行者，drift=0）**。核心 SLO 在 R1 基线窗口（管理面 runtime probe、20 样本；阈值 success ≥ 99%、P95 ≤ 250 ms）实测 success 100%、P95 0 ms、max 3 ms。R1–R4 全计划里程碑判定完成度约 100%，并已完成首次单节点生产发布与真实的发布/回滚演练。
 
 ---
 
@@ -94,7 +94,7 @@ Ontolith 采用自底向上的分层内核，各层职责清晰、接口冻结�
 | L1 | `ontolith-rdf` | Term/triple/quad/graph/dataset 值模型 |
 | L2 | `ontolith-storage` | 存储抽象 + 内存/RocksDB 适配器 |
 | L2 | `ontolith-transaction` | 事务生命周期与协调 |
-| L3 | `ontolith-parser` | RDF 解析层（Turtle/TriG/RDF-XML） |
+| L3 | `ontolith-parser` | RDF 解析与序列化（N-Triples / N-Quads / Turtle / TriG / RDF-XML + JSON-LD 1.0/1.1 务实子集） |
 | L3 | `ontolith-query` | SPARQL 解析/优化/执行管线 |
 | L4 | `ontolith-cluster` | 集群一致性与控制面原语（Raft 数据面） |
 | L5 | `ontolith-server` | 访问边界与 HTTP/gRPC 网关 |
@@ -134,12 +134,13 @@ Ontolith 采用自底向上的分层内核，各层职责清晰、接口冻结�
 
 ### 4.2 SPARQL 查询引擎
 
-- **解析与执行**：Turtle/TriG + SPARQL 核心代数、优化器与绑定引擎。
+- **RDF 解析与序列化**：N-Triples / N-Quads / Turtle / TriG / RDF-XML 读写齐备，另支持 JSON-LD 1.0/1.1 务实子集（`@context` 展开、值对象、容器、嵌套节点、命名图 quads，及 `@reverse` / `@nest` / `@included` / `@json` / 远程 `@context` loader）；数据面经网关 `POST /data/{nt,nq,turtle,trig,rdf-xml,json-ld}` 入库。
+- **查询执行**：SPARQL 1.1 核心代数、优化器与绑定引擎。
 - **完整聚合**：`GROUP BY` / `HAVING`、`COUNT(DISTINCT)` / `SUM` / `AVG` / `MIN` / `MAX`、子查询聚合。
 - **属性路径**：`/`、`+`、`*`、`?`、`|`、`^` 最小完备集。
 - **SPARQL Update**：`INSERT DATA` / `DELETE DATA` / `DELETE·INSERT…WHERE` / `DELETE WHERE` + 图管理 `ADD` / `COPY` / `MOVE` / `CREATE`（含 SILENT、USING/USING NAMED）。
 - **数据集子句**：`FROM` / `FROM NAMED` / `USING` / `USING NAMED`（§18.2.1/§18.2.2 语义）。
-- **合规基线**：完整 W3C `rdf-tests` sparql11 套件经 manifest 驱动 runner 达成 **492/492 全绿（fail=0、drift=0）**。
+- **合规基线**：vendored W3C `rdf-tests` sparql11 测试集（28 个 feature manifest）由 manifest 驱动 runner 以自研 Turtle 解析器全量遍历，profile 锁定 492 条可判定测试条目 **492/492 全绿（fail=0、drift=0、missing=0）**；结果比对覆盖 SRX / SRJ / TSV / CSV / Turtle / ASK 与 RDF 图比对，profile 漂移会直接使测试失败。
 
 ### 4.3 分布式一致性（L4）
 
@@ -153,14 +154,14 @@ Ontolith 采用自底向上的分层内核，各层职责清晰、接口冻结�
 
 - **前向链推理引擎**：RDFS（rdfs5/6/7/8/9）、属性公理（prp-inv1/2、prp-symp、prp-fp/ifp、prp-key、属性链）、类公理（cax-sco、cls-svf/avf/int/uni/maxc2、hasValue）、等价（eq-sym/trans/rep）等规则集，带迭代上限与墙钟超时护栏，支持一致性 ⊥ 检测。
 - **SHACL 数据形状校验**：目标/核心约束组件全齐，`sh:path` 支持 inverse/alternative/sequence/zeroOrMore/oneOrMore/zeroOrOne 属性路径表达式全量。
-- **合规基线**：W3C SHACL 核心套件 **98/98 全绿**。
+- **合规基线**：W3C SHACL 核心套件（vendored `w3c/data-shapes` core，121 个 `sht:Validate` 条目中 98 条可运行）**98/98 全绿（drift=0）**；profile 另记录 12 项 path/* 属性路径与 shacl-shacl 元校验转绿。
 
 ### 4.5 接入与安全（L5）
 
-- **双网关**：HTTP（`ONTOLITH_BIND`，默认 `127.0.0.1:8080`）+ gRPC（`ONTOLITH_GRPC_BIND`，默认 `127.0.0.1:50051`，tonic + prost），共享同一执行路径与鉴权契约。
+- **双网关**：HTTP（`ONTOLITH_BIND`，默认 `127.0.0.1:8080`）+ gRPC（`ONTOLITH_GRPC_BIND`，默认 `127.0.0.1:50051`，tonic + prost，由 `grpc-backend` feature 默认开启），共享同一执行路径与鉴权契约；gRPC 表面为 `SparqlService{Query, Health}`（metadata `x-api-key` / `x-ontolith-tenant` / `x-ontolith-user` 同构鉴权），更新与批量入库类操作现阶段仅经 HTTP 网关。
 - **强制认证**：`ONTOLITH_AUTH_MODE=enforced` 下要求 `X-API-Key` / `X-Ontolith-Tenant` / `X-Ontolith-User`；跨租户访问返回 403。
 - **租户隔离**：强制分库/行级隔离（`TenantMode` + `urn:tenant:<t>` 命名空间，越权引用 403）。
-- **OIDC / JWT**：树内 HS256 验证（RFC 7519 子集 + 常量时间签名比对），完整 OIDC 链路（JWKS / RS256）。
+- **OIDC / JWT**：两条链路均已落地——树内 HS256 共享密钥验证（RFC 7519 子集 + 常量时间签名比对），以及完整 OIDC 链路：JWKS（RFC 7517）拉取与缓存、RS256 验签、Provider 发现（RFC 8414）、`iss` / `aud` / `exp` / `nbf` 校验与 claim → `AuthContext` 映射；JWKS 传输可注入，生产可锁定静态快照。
 - **管理面 TLS**：rustls 进程内终止；R2 门禁——非 loopback bind 无 TLS 拒绝启动。
 - **审计**：文件审计 + SHA-256 哈希链，加密级哈希升级。
 - **ACL 读写分离**：`ONTOLITH_MANAGEMENT_READ_KEY` / `ONTOLITH_MANAGEMENT_WRITE_KEY`。
@@ -172,7 +173,7 @@ Ontolith 采用自底向上的分层内核，各层职责清晰、接口冻结�
 
 ### 4.7 AI-Native 扩展（L8）
 
-- **语义检索**：热路径 top-10 < 1ms（KPI 门禁背书）；RocksDB 持久化与增量更新。
+- **语义检索**：10k 条目向量库上 top-10 召回实测 0.36 ms（embed-only 变体 0.46 ms），P8-02 门禁天花板：embed-only top-10 < 1 ms、search top-10 < 2 ms；RocksDB 持久化与增量更新。
 - **代理集成**：plugin-api `Retrieval` 能力 + `AgentTool` 契约 + `SemanticRetrievalTool` 示例。
 - **远程 embedding**：外部 HTTP provider + 确定性多探针 LSH 近似索引（ADR-0006）。
 
@@ -189,12 +190,13 @@ Ontolith 采用自底向上的分层内核，各层职责清晰、接口冻结�
 | 领域 | 选型 |
 |------|------|
 | 语言 | Rust（全工作区，rust-toolchain 固定） |
-| 持久化 | RocksDB（可选后端） |
-| 共识 | openraft（Raft） |
-| gRPC | tonic 0.12 + prost 0.13 |
-| TLS | rustls（进程内终止） |
-| 管理控制台 | Vite SPA + 零依赖 Node API server |
-| HTTPS 信任锚 | webpki-roots |
+| 持久化 | RocksDB（可选后端，`rocksdb-backend`） |
+| 共识 | openraft `=0.9.25`（Tier A 锁定，`raft-backend`） |
+| gRPC | tonic 0.12 + prost 0.13（`grpc-backend`，`protoc-bin-vendored` 3） |
+| TLS | rustls 0.23（进程内终止，ring / std / tls12） |
+| Feature 回退 | `--no-default-features` 可构建纯内存、无共识、无 gRPC 的轻量形态 |
+| 管理控制台 | Vite 8 SPA + 零依赖 Node API server |
+| HTTPS 信任锚 | webpki-roots 0.26 |
 
 ### 5.2 质量门禁
 
@@ -206,8 +208,12 @@ Ontolith 采用自底向上的分层内核，各层职责清晰、接口冻结�
 | `cargo clippy --workspace --all-targets -- -D warnings` | 静态分析（零告警） |
 | `./scripts/ci-local.sh` | 本地质量门禁 |
 | `ONTOLITH_W3C_SUBSET_STRICT=1 ./scripts/ci-local.sh` | 严格子集门禁 |
+| `cargo +nightly miri test -p ontolith-core -p ontolith-rdf -p ontolith-transaction` | Miri（敏感模块 UB 检测） |
+| `RUSTFLAGS="-Zsanitizer=address" cargo +nightly test` | ASan / LSan 内存安全门禁 |
 
-CI 覆盖：GitHub Actions + 本地 ci-local + 存储微基准（bench 阈值断言硬门禁）+ 语义检索门禁 + license 审计 + 依赖登记审计 + cargo-audit CVE 观测。R1 正式验收包 G1–G5 全 PASS（workspace 20 test binary 全绿、W3C 492/492、SHACL 97/98→98/98）。
+CI 作业（GitHub Actions，与本地 ci-local 同构）：`check`（fmt/clippy/全量测）· `w3c-subset` · `w3c-subset-strict` · `w3c-subset-strict-readiness` · `r2-gates`（TLS/OIDC/审计）· `r3-gates`（GeoSPARQL/租户/HA）· `retrieval-gates`（L8 KPI）· `rocksdb-smoke` · `miri-sanitizer` · `bench`（存储微基准阈值断言硬门禁）· `license-audit` · `dependency-audit`（P0-03 依赖登记硬门禁 + cargo-audit CVE 观测）；Miri/sanitizer 资产（2026-09-02）：core/rdf/transaction 38 测 + storage 内存引擎 35 测全绿、ASan 73 测全绿。
+
+R1 正式验收包（ACC-R1-0001，2026-08-08）G1–G5 全 PASS：当时口径为 20 个 test binary / 400 测全绿、w3c11 492/492、shacl 97/98（唯一缺口 `uniqueLang-002` 词法差异 profile 锁定，已于后续闭合至 98/98）；至 0.1.81 基线已演进至 621 测。
 
 ---
 
@@ -264,6 +270,7 @@ curl -sG http://127.0.0.1:8080/sparql \
 | L6 推理与验证（SHACL 98/98） | 已完成 ~100% |
 | L7 企业运维与发布 | 已完成 ~100% |
 | L8 AI-Native | 已完成 ~100% |
+| L9 GeoSPARQL（scoped capability） | 已完成 ~100% |
 | R1–R4 全计划 | 已完成 ~100% |
 
 ### 8.2 已交付里程碑
@@ -278,7 +285,7 @@ curl -sG http://127.0.0.1:8080/sparql \
 
 - L0–L3 内核已收敛至全量完成（含字典 GC/vacuum 的管理面接线）；后续仅为已声明的增强轨：RDF-star、Decimal 任意精度、IRI 完整百分号编码/host 语法（backlog），以及 set-semantics 哈希索引、统计直方图等性能轨。
 - 多区域 active-active 语义（当前 SAS 规范中标记为 deferred）。
-- 持续的 W3C / SHACL 合规欠账清零与性能基准演进。
+- 持续的合规面拓宽（当前 profile 锁定的 492 + 98 条零欠账，后续按需纳入更多 W3C manifest 变体）与性能基准演进。
 
 ---
 
@@ -290,6 +297,6 @@ curl -sG http://127.0.0.1:8080/sparql \
 
 ---
 
-> 本白皮书基于 Ontolith 代码仓库现状与既有规范（SAS-0001 v1.2.0）、进度台账（PROG-0001 v0.1.81）编制，反映截至 2026-09 的工程实现状态。
+> 本白皮书基于 Ontolith 代码仓库现状与既有规范（SAS-0001 v1.2.0）、进度台账（PROG-0001 v0.1.82）编制，反映截至 2026-09 的工程实现状态。
 >
-> 变更记录：1.0.0（2026-09-19）首版；1.1.0（2026-09-19）同步 L0–L3 内核收尾（§4.1 核心能力、§8.1 完成度概览、§8.3 演进方向）；1.2.0（2026-09-19）同步字典 GC/vacuum 提升为 `StorageEngine` 契约并接入管理面端点（§4.1、§8.1、§8.3）。
+> 变更记录：1.0.0（2026-09-19）首版；1.1.0（2026-09-19）同步 L0–L3 内核收尾（§4.1 核心能力、§8.1 完成度概览、§8.3 演进方向）；1.2.0（2026-09-19）同步字典 GC/vacuum 提升为 `StorageEngine` 契约并接入管理面端点（§4.1、§8.1、§8.3）；1.3.0（2026-09-19）逐项回归代码口径：合规数字补完整限定（§摘要 / §4.2 / §4.4）、补齐解析与入库格式清单（§3.2 / §4.2）、OIDC 与 gRPC 能力面改写为可验证描述（§4.5）、L8 延迟改引实测与门禁天花板（§4.7）、技术选型补版本与 feature 回退（§5.1）、质量门禁补 Miri/ASan/LSan 与 CI 作业全表并纠正 R1 验收包当时口径（§5.2）、§8.1 补 L9 行；同步修正 [README](../README.md) 中与代码矛盾的过时段落（常驻网关、crate 地图、合规口径、管理面端点清单）。
