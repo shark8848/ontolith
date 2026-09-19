@@ -128,6 +128,22 @@ pub trait StorageEngine: Send + Sync {
         Ok(0)
     }
 
+    /// Reclaim dictionary entries that no longer back any live statement,
+    /// retained MVCC version, or in-flight transaction (L2 §7 item 5: dict GC).
+    /// Returns the number of entries removed; engines without a value
+    /// dictionary have nothing to reclaim and return `0`.
+    fn gc_dictionary(&self) -> Result<usize, OntolithError> {
+        Ok(0)
+    }
+
+    /// Physically compact the managed storage to reclaim space held by
+    /// tombstones (deletes, pruned versions, dictionary GC). Returns the number
+    /// of column families compacted; engines without physical compaction
+    /// return `0`.
+    fn vacuum(&self) -> Result<usize, OntolithError> {
+        Ok(0)
+    }
+
     /// Read the default graph as of a committed version; pruned versions fall
     /// back to the oldest retained version.
     fn triples_at_version_in_txn(&self, _version: u64, txn_id: Option<TxnId>) -> Vec<Triple> {

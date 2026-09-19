@@ -176,6 +176,8 @@ impl ManagementState {
             ("POST", "/admin/data/backup") => self.admin_data_backup(&req),
             ("GET", "/admin/data/backup/schedule") => self.admin_data_backup_schedule_get(&req),
             ("POST", "/admin/data/backup/schedule") => self.admin_data_backup_schedule(&req),
+            ("POST", "/admin/storage/gc-dictionary") => self.admin_storage_gc_dictionary(&req),
+            ("POST", "/admin/storage/vacuum") => self.admin_storage_vacuum(&req),
             ("GET", "/admin/tenants") => self.admin_tenants_list(&req),
             ("POST", "/admin/tenants") => self.admin_tenants_create(&req),
             ("PUT", p) if p.starts_with("/admin/tenants/") => self.admin_tenants_update(&req, p),
@@ -771,6 +773,41 @@ impl ManagementState {
             format!(
                 r#"{{"enabled":{},"interval_seconds":{}}}"#,
                 enabled, interval,
+            ),
+        ))
+    }
+
+    /// Dictionary GC (`POST /admin/storage/gc-dictionary`): drop dictionary
+    /// entries no longer referenced by live statements, retained MVCC versions or
+    /// in-flight transactions, and report how many were reclaimed (L2 §7 item 5).
+    /// Guarded by the same ACL as every other control-plane mutation: RBAC
+    /// `cluster/admin` plus the management write key when an ACL is configured.
+    fn admin_storage_gc_dictionary(
+        &self,
+        req: &HttpRequest,
+    ) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_mutation(req)?;
+        let removed = self.app.storage.gc_dictionary()?;
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(r#"{{"status":"ok","removed":{}}}"#, removed),
+        ))
+    }
+
+    /// Storage compaction (`POST /admin/storage/vacuum`): physically compact the
+    /// managed column families to reclaim tombstone space left by deletes, pruned
+    /// versions and dictionary GC (L2 §7). Write-key mutation like every other
+    /// storage-side control-plane operation.
+    fn admin_storage_vacuum(&self, req: &HttpRequest) -> Result<HttpResponse, OntolithError> {
+        let _ = self.authorize_admin_mutation(req)?;
+        let compacted = self.app.storage.vacuum()?;
+        Ok(HttpResponse::json(
+            200,
+            "OK",
+            format!(
+                r#"{{"status":"ok","column_families_compacted":{}}}"#,
+                compacted
             ),
         ))
     }
@@ -2436,6 +2473,79 @@ mod tests {
         // Read key can read status.
         let resp = dispatch_for_test(&state, req_with_key("GET", "/admin/data/backup", "r"));
         assert_eq!(resp.status, 200);
+    }
+
+    #[test]
+    fn storage_gc_and_vacuum_endpoints_enforce_management_acl() {
+        let acl = ManagementAcl {
+            read_key: Some("r".to_owned()),
+            write_key: Some("w".to_owned()),
+        };
+        let state = test_state_with_acl(HeaderAuthenticator::default(), acl);
+
+        for path in ["/admin/storage/gc-dictionary", "/admin/storage/vacuum"] {
+            let resp = dispatch_for_test(&state, post_json(path, "{}", None));
+            assert_eq!(resp.status, 403, "{path} must require a key");
+            let resp = dispatch_for_test(&state, post_json(path, "{}", Some("r")));
+            assert_eq!(resp.status, 403, "{path} must not accept the read key");
+        }
+
+        // The in-memory engine has no dictionary and nothing to compact: the
+        // trait defaults report zero reclaimed entries.
+        let resp = dispatch_for_test(
+            &state,
+            post_json("/admin/storage/gc-dictionary", "{}", Some("w")),
+        );
+        assert_eq!(resp.status, 200);
+        assert!(
+            String::from_utf8_lossy(&resp.body).contains(r#""removed":0"#),
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        let resp = dispatch_for_test(&state, post_json("/admin/storage/vacuum", "{}", Some("w")));
+        assert_eq!(resp.status, 200);
+        assert!(
+            String::from_utf8_lossy(&resp.body).contains(r#""column_families_compacted":0"#),
+            "body={}",
+            String::from_utf8_lossy(&resp.body)
+        );
+    }
+
+    /// End-to-end on the durable engine: a value interned without any statement
+    /// referencing it is reclaimed through the management endpoint, which reports
+    /// the reclaimed count.
+    #[cfg(feature = "rocksdb-backend")]
+    #[test]
+    fn storage_gc_endpoint_reclaims_dictionary_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppState::new_rocksdb(
+            "127.0.0.1:8080".to_owned(),
+            HeaderAuthenticator::default(),
+            dir.path().join("db"),
+        )
+        .expect("rocksdb app state");
+        app.dictionary.encode_node("urn:dict:orphan-via-endpoint");
+        let acl = ManagementAcl {
+            write_key: Some("w".to_owned()),
+            ..ManagementAcl::default()
+        };
+        let state = ManagementState::new(app, "127.0.0.1:9091".to_owned(), acl, 10, false, None);
+
+        let resp = dispatch_for_test(
+            &state,
+            post_json("/admin/storage/gc-dictionary", "{}", Some("w")),
+        );
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        assert!(body.contains(r#""removed":1"#), "body={body}");
+
+        let resp = dispatch_for_test(&state, post_json("/admin/storage/vacuum", "{}", Some("w")));
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        assert!(
+            body.contains(r#""column_families_compacted":13"#),
+            "body={body}"
+        );
     }
 
     #[test]

@@ -50,7 +50,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | P0-04 RFC 流程落地 | 已完成 | RFC-0001 评审回填完成（2026-08-09：Reviewers=sharky-ai，契约与实现逐项核验，转正式 Accepted） |
 | P0-05 进度台账 | 已完成 | PROG-0001 |
 | P1-01 Knowledge Object 领域模型 | 已完成 | 100%，L0+L1+序列化 Part II + Ontology 载荷联动 reasoner（2026-08-29：`OntologyPayload`/`load_ontology_payload` + server 推理输入合并） |
-| P1-02 Node 标识与字典管理器 | 已完成 | 100%，字典 epoch 语义收尾（2026-08-29：内存/Rocks `clear_dictionary` + epoch 持久化 + reopen/备份恢复测试） |
+| P1-02 Node 标识与字典管理器 | 已完成 | 100%，字典 epoch 语义收尾（2026-08-29：内存/Rocks `clear_dictionary` + epoch 持久化 + reopen/备份恢复测试）+ 字典 GC/vacuum 与运维面接线（2026-09-19） |
 | P1-03 存储抽象接口 | 已完成 | 接口版本 0.1.0 冻结 |
 | P1-04 确定性标识与规范化编码规则 | 已完成 | RFC-0001 评审回填转正式 Accepted（2026-08-09） |
 | P2-01 RocksDB 适配 | 已完成 | 索引 CF 调优（bloom/块缓存/压缩）+ tuning() 姿态 |
@@ -112,6 +112,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 | ikc-log-center Rust SDK 接入（规划中，Python 方案已回退） | 已完成 | 平台服务日志接入 log-center：crate `log-center-sdk` 0.1.0 集成（logcenter 模块 + gateway/management 启动与 access 日志结构化上报 + W3C trace_id），server 65→68 测，冒烟实测入库；PROG-0001 0.1.62→0.1.63（2026-08-10） |
 | WBS-02 JSON-LD 导入 | 已完成 | 2026-08-30，`ontolith-parser` JSON-LD 1.0/1.1 务实子集（`@context` 展开/值对象/容器/嵌套节点/命名图 quads + `@reverse`/`@nest`/`@included`/`@json`/远程 `@context` loader），server ingest 接通 `/data/json-ld` + `ONTOLITH_JSONLD_REMOTE_CONTEXT`；parser 26→32、server 75→76 测；PROG-0001 0.1.68→0.1.69 |
 | 备份调度接入管理面（运维轨） | 已完成 | P2-05，2026-08-30：`StorageEngine::create_backup` 抽象 + 管理面 `/admin/data/backup*` 按需/定时备份 + `ONTOLITH_BACKUP_DIR`/`ONTOLITH_BACKUP_INTERVAL_SECONDS` + Rocks 端到端备份→恢复验证；server 71→75 测；PROG-0001 0.1.67→0.1.68 |
+| 字典 GC / vacuum 接入管理面（运维轨） | 已完成 | P2-05，2026-09-19：`StorageEngine::gc_dictionary`/`vacuum` 契约提升（默认 `Ok(0)`）+ 管理面 `POST /admin/storage/gc-dictionary`、`POST /admin/storage/vacuum`（写 key + `cluster/admin` RBAC，回报回收条数/压缩列族数）；storage 63→64、server 101→103 测；L2 3.3.0 / OPS-L5-0002 1.2.0；PROG-0001 0.1.80→0.1.81 |
 
 ## 4. 写入操作（GraphQL）
 

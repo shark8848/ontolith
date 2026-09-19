@@ -476,70 +476,6 @@ impl RocksDbStorageEngine {
         Ok(used)
     }
 
-    /// Reclaim dictionary entries that no live data, retained MVCC version, or
-    /// in-flight transaction references (L2 §7 item 5: dict GC). Unreferenced
-    /// fwd (value→id) and rev (id→value) mappings are dropped in a single
-    /// durable batch under the commit lock. `next_node_id` stays monotonic, so a
-    /// GC'd lexical form that reappears later is simply re-interned with a fresh
-    /// id. Returns the number of dictionary entries removed.
-    pub fn gc_dictionary(&self) -> Result<usize, OntolithError> {
-        let _commit = self
-            .commit_lock
-            .lock()
-            .map_err(|_| OntolithError::InvalidState("commit lock poisoned"))?;
-        let used = self.collect_referenced_node_ids()?;
-        let cf_fwd = self.cf(CF_DICT_FWD)?;
-        let cf_rev = self.cf(CF_DICT_REV)?;
-        let mut batch = RocksBatch::default();
-        let mut removed = 0usize;
-        // rev keys are encode_u64(id) → value bytes; iterate to find orphans.
-        let doomed: Vec<(Vec<u8>, Vec<u8>)> = self
-            .db
-            .iterator_cf(cf_rev, IteratorMode::Start)
-            .filter_map(|item| item.ok())
-            .filter_map(|(k, v)| {
-                let id = decode_u64(&k).ok()?;
-                (!used.contains(&id)).then(|| (k.to_vec(), v.to_vec()))
-            })
-            .collect();
-        for (rev_key, fwd_value) in doomed {
-            batch.delete_cf(cf_rev, &rev_key[..]);
-            batch.delete_cf(cf_fwd, &fwd_value[..]);
-            removed += 1;
-        }
-        if removed > 0 {
-            self.durable_write(batch)?;
-        }
-        Ok(removed)
-    }
-
-    /// Physically compact every managed column family (L2 §7: compaction /
-    /// vacuum), reclaiming space held by tombstones from deletes, pruned
-    /// versions, and [`Self::gc_dictionary`]. Safe to call concurrently with
-    /// reads; RocksDB serializes compactions internally.
-    pub fn vacuum(&self) -> Result<(), OntolithError> {
-        for name in [
-            CF_TRIPLES,
-            CF_QUADS,
-            CF_SPO_INDEX,
-            CF_POS_INDEX,
-            CF_OSP_INDEX,
-            CF_GSPO_INDEX,
-            CF_GPOS_INDEX,
-            CF_GOSP_INDEX,
-            CF_DICT_FWD,
-            CF_DICT_REV,
-            CF_VERSIONS,
-            CF_VERSIONS_QUADS,
-            CF_WAL,
-        ] {
-            if let Ok(cf) = self.cf(name) {
-                self.db.compact_range_cf::<&[u8], &[u8]>(cf, None, None);
-            }
-        }
-        Ok(())
-    }
-
     fn cf(&self, name: &str) -> Result<&rocksdb::ColumnFamily, OntolithError> {
         self.db
             .cf_handle(name)
@@ -2180,6 +2116,72 @@ impl StorageEngine for RocksDbStorageEngine {
         Ok(pruned.len())
     }
 
+    /// Reclaim dictionary entries that no live data, retained MVCC version, or
+    /// in-flight transaction references (L2 §7 item 5: dict GC). Unreferenced
+    /// fwd (value→id) and rev (id→value) mappings are dropped in a single
+    /// durable batch under the commit lock. `next_node_id` stays monotonic, so a
+    /// GC'd lexical form that reappears later is simply re-interned with a fresh
+    /// id.
+    fn gc_dictionary(&self) -> Result<usize, OntolithError> {
+        let _commit = self
+            .commit_lock
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("commit lock poisoned"))?;
+        let used = self.collect_referenced_node_ids()?;
+        let cf_fwd = self.cf(CF_DICT_FWD)?;
+        let cf_rev = self.cf(CF_DICT_REV)?;
+        let mut batch = RocksBatch::default();
+        let mut removed = 0usize;
+        // rev keys are encode_u64(id) → value bytes; iterate to find orphans.
+        let doomed: Vec<(Vec<u8>, Vec<u8>)> = self
+            .db
+            .iterator_cf(cf_rev, IteratorMode::Start)
+            .filter_map(|item| item.ok())
+            .filter_map(|(k, v)| {
+                let id = decode_u64(&k).ok()?;
+                (!used.contains(&id)).then(|| (k.to_vec(), v.to_vec()))
+            })
+            .collect();
+        for (rev_key, fwd_value) in doomed {
+            batch.delete_cf(cf_rev, &rev_key[..]);
+            batch.delete_cf(cf_fwd, &fwd_value[..]);
+            removed += 1;
+        }
+        if removed > 0 {
+            self.durable_write(batch)?;
+        }
+        Ok(removed)
+    }
+
+    /// Physically compact every managed column family (L2 §7: compaction /
+    /// vacuum), reclaiming space held by tombstones from deletes, pruned
+    /// versions, and dictionary GC. Safe to call concurrently with reads;
+    /// RocksDB serializes compactions internally.
+    fn vacuum(&self) -> Result<usize, OntolithError> {
+        let mut compacted = 0usize;
+        for name in [
+            CF_TRIPLES,
+            CF_QUADS,
+            CF_SPO_INDEX,
+            CF_POS_INDEX,
+            CF_OSP_INDEX,
+            CF_GSPO_INDEX,
+            CF_GPOS_INDEX,
+            CF_GOSP_INDEX,
+            CF_DICT_FWD,
+            CF_DICT_REV,
+            CF_VERSIONS,
+            CF_VERSIONS_QUADS,
+            CF_WAL,
+        ] {
+            if let Ok(cf) = self.cf(name) {
+                self.db.compact_range_cf::<&[u8], &[u8]>(cf, None, None);
+                compacted += 1;
+            }
+        }
+        Ok(compacted)
+    }
+
     fn triples_at_version_in_txn(&self, version: u64, txn_id: Option<TxnId>) -> Vec<Triple> {
         let retained = self
             .retained_versions
@@ -3248,6 +3250,40 @@ mod tests {
             engine.decode_node(subj).as_deref(),
             Some("urn:dict:live-subject")
         );
+    }
+
+    /// The management plane only ever sees `Arc<dyn StorageEngine>`, so dictionary
+    /// GC and vacuum must be reached through trait dispatch rather than the
+    /// trait defaults (which are no-ops for dictionary-less engines).
+    #[test]
+    fn rocksdb_dictionary_gc_and_vacuum_dispatch_through_storage_engine_trait() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(RocksDbStorageEngine::open(dir.path()).unwrap());
+        let storage = Arc::clone(&engine) as Arc<dyn StorageEngine>;
+        let subj = engine.encode_node("urn:dict:trait-subject");
+        let orphan = engine.encode_node("urn:dict:trait-orphan");
+        let txn = TxnId::new(1);
+        storage
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![WriteOperation::PutTriple(Triple {
+                    subject: subj,
+                    predicate: Iri::new("urn:p"),
+                    object: Term::Iri(Iri::new("urn:o")),
+                })],
+            })
+            .unwrap();
+        storage.commit_transaction(txn).unwrap();
+        // The interned-but-unreferenced `orphan` is reclaimed through the trait.
+        assert_eq!(storage.gc_dictionary().unwrap(), 1);
+        assert!(engine.decode_node(orphan).is_none());
+        assert_eq!(
+            engine.decode_node(subj).as_deref(),
+            Some("urn:dict:trait-subject")
+        );
+        // Vacuum reports the managed data column families and keeps data intact.
+        assert_eq!(storage.vacuum().unwrap(), 13);
+        assert_eq!(storage.stats().triple_count, 1);
     }
 
     #[test]

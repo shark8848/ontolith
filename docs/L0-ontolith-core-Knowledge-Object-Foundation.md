@@ -1,7 +1,7 @@
 # L0 — ontolith-core Knowledge Object 基座功能说明
 
 文档 ID: IMPL-L0-0001  
-版本: 1.3.0  
+版本: 1.3.1  
 状态: Implemented  
 日期: 2026-09-19  
 对应 crate: `crates/ontolith-core`  
@@ -329,8 +329,8 @@ CanonicalEncode, CanonicalWriter
 | Statement KO | 已实现（2026-09-02：`StatementObject` = KO header + Quad，`ObjectType::Statement`，`from_triple`/`from_quad` + 单测） | 字典/审计/版本化等挂载点按需扩展 |
 | IRI 校验 | 基线启发式（`parse`）+ **严格子集可选 API 已提供**（`Iri::parse_strict`/`is_strict`，RFC 3986 §3.1 scheme + RFC 3987 §2.2 禁用字符集，2026-09-19） | 百分号编码/host 语法的完整 RFC 3986 §3 解析（按需） |
 | Literal Decimal | `f64` 位型确定性 | 十进制任意精度类型 |
-| Canonical 规范文档 | 代码即规范 | 独立 RFC/编码规范文档（P1-04） |
-| 序列化 Part II | 已做（确定性二进制 `KoCodec`，含 KO 容器全量往返） | 独立编码规范 RFC（P1-04 关联） |
+| Canonical 规范文档 | **已交付**：[RFC-0001 规范编码与磁盘布局](../rfc/0001-canonical-encoding-and-disk-layout.md)（Status: Accepted，2026-08-09 评审回填），将原本“代码即规范”的编码/字典不变量写成可评审契约 | 编码规则变更走 RFC 修订流程 |
+| 序列化 Part II | 已做（确定性二进制 `KoCodec`，含 KO 容器全量往返） | 规范文档已由 RFC-0001（Accepted，2026-08-09）承接，P1-04 关联页已闭合 |
 | 应用服务 | application 占位 | 若需要 KO 仓储端口再扩 |
 | Ontology 载荷联动 | 已完成（P1-01，2026-08-29：`ontolith-reasoner::domain::ontology` 角色图物化 + server `ONTOLITH_ONTOLOGY_{TBOX,ABOX,ANNOTATION,RULE,PROVENANCE}` env 接线） | 预留：KO 持久化仓储（当前载荷源自存储中命名图，`OntologyObject` 由配置构建） |
 
@@ -344,6 +344,7 @@ CanonicalEncode, CanonicalWriter
 | 2026-08-06 | 1.1.0 | 序列化 Part II：`domain/serialization.rs` 新增无依赖确定性二进制编解码（`KoCodec`/`encode_ko`/`decode_ko`），覆盖 Header/Metadata/Graph/Dataset/Ontology/Rule/Version 往返与损坏拒绝，+8 测 |
 | 2026-08-29 | 1.2.0 | Ontology 载荷联动（P1-01）：`OntologyObject` 角色图引用 → `OntologyPayload` 物化契约（tbox/abox/annotation/rule/provenance）与 `OntologyGraphReader` 读端口；联动实现落在 reasoner/server（见 §7），+4 测（reasoner 98→102） |
 | 2026-09-19 | 1.3.0 | IRI 严格校验可选 API（§8 收尾）：`Iri::parse_strict`（RFC 3986 §3.1 scheme 文法 + RFC 3987 §2.2 禁用 ASCII 字符集，非 ASCII 接受）与 `Iri::is_strict`；opt-in 设计，热路径 `parse`/`new` 语义与性能不变；失败返回 `InvalidArgument`；+3 测（core 20→23） |
+| 2026-09-19 | 1.3.1 | 台账纠偏（§8）：「Canonical 规范文档」与「序列化 Part II」两行原标为待做，实际已由 [RFC-0001](../rfc/0001-canonical-encoding-and-disk-layout.md)（Status: Accepted，2026-08-09）交付；仅改文档状态，无代码变更 |
 
 ---
 

@@ -1,7 +1,7 @@
 # L2 — Storage & Transaction Kernel 功能说明
 
 文档 ID: IMPL-L2-0001  
-版本: 3.2.0  
+版本: 3.3.0  
 状态: Implemented (in-memory + RocksDB durable adapter)  
 日期: 2026-09-19  
 对应 crate:
@@ -110,7 +110,7 @@ L0 新增 `ConsistencyLevel { Strong, Session, Eventual }`。
 - `epoch()`：映射表世代（`clear_dictionary` 时递增并持久化）  
 - `len` / `contains_value`（查询不分配）  
 - **`clear_dictionary`**（P1-02）：同一耐久 batch 内清空 fwd/rev 并推高 epoch  
-- **`gc_dictionary`**（L2 §7 第 5 条收尾，2026-09-19）：回收未被任何存活数据引用的字典条目，返回移除条数（见 §3.7）
+- **`gc_dictionary`**（L2 §7 第 5 条收尾，2026-09-19）：回收未被任何存活数据引用的字典条目，返回移除条数；已提升为 `StorageEngine` 契约方法并接入管理面运维端点（见 §3.7 与 OPS-L5-0002 §7）
 
 ### 3.7 RocksDB 耐久适配（v3）
 
@@ -122,7 +122,7 @@ L0 新增 `ConsistencyLevel { Strong, Session, Eventual }`。
 | 写路径 | stage → WAL CF；commit → triples/quads + WAL Committed（同一 RocksDB batch） |
 | 读路径 | 纯 CF 前缀扫描（主 CF 与 SPO/POS/OSP + GSPO/GPOS/GOSP 索引 CF），不依赖打开时重建的内存二级索引 |
 | 字典 | 双向 CF 持久化；`encode_node` 幂等；`clear_dictionary` 推高 epoch；`gc_dictionary` 回收孤儿条目 |
-| GC | `collect_referenced_node_ids` 汇总存活 keep-set（triples/quads + MVCC 留存版本快照 + 在途 staged 事务 + blank-node 宾语 id），`gc_dictionary` 在提交锁下一个耐久 batch 删除 fwd/rev 孤儿；`vacuum` 对语句/命名图/六索引/字典/版本/WAL 共 13 个数据 CF `compact_range_cf` 回收 tombstone |
+| GC | `collect_referenced_node_ids` 汇总存活 keep-set（triples/quads + MVCC 留存版本快照 + 在途 staged 事务 + blank-node 宾语 id），`gc_dictionary` 在提交锁下一个耐久 batch 删除 fwd/rev 孤儿；`vacuum` 对语句/命名图/六索引/字典/版本/WAL 共 13 个数据 CF `compact_range_cf` 回收 tombstone；两者已上升为 `StorageEngine` 契约方法（默认 `Ok(0)`），经管理面 `POST /admin/storage/gc-dictionary` / `POST /admin/storage/vacuum` 对外可调 |
 | 备份 | `create_backup` / `restore_backup`（RocksDB BackupEngine，提交锁串行化 + flush 后快照） |
 | 隔离 | `rocksdb::` 仅在 `infrastructure/rocks.rs` |
 | 治理 | [ADR-0001](../adr/0001-rocksdb-storage-backend.md)、[依赖登记](./DEPENDENCY_REGISTER.md) |
@@ -184,9 +184,10 @@ ontolith-storage/src/
 2. **真 MVCC 版本链** — 磁盘 MVCC 版本 CF（大端版本前缀 ‖ 物理键，版本内前缀扫描隔离）与内存版本链（提交后不可变图快照）双轨；跨重启持久（WAL 回放重建版本链）、版本保留上限可配（默认 16）；读 = 指定版本已提交 ∪ 本 txn staged。  
 3. **IndexMaintenance::Async 已实现**（2026-09-02，P2-04）——延迟索引维护：提交写主 CF + `index_pending` 积压，后台维护线程按 `meta.index_watermark` 追赶索引 CF；读路径水位未追上时回退主 CF 扫描。  
 4. **命名图六置换** 已补（`GraphIndex` 新增 `by_subject`/`by_predicate`/`by_object` + `matching_in_named_graphs`）；默认图语句仍走 `TripleIndexes`。  
-5. **字典 GC / 压缩 / vacuum 已做**（2026-09-19）——`RocksDbStorageEngine::gc_dictionary()` 保守回收未被引用条目（keep-set 覆盖存活 triple/quad、MVCC 留存版本、在途 staged 写入与 blank-node 宾语 id，因此旧版本快照读数仍可解析主语）；`vacuum()` 进一步物理压缩各 CF 回收 tombstone；`next_node_id` 保持单调，GC 掉的词法形式再现时重新 intern 为新 id。两者为手动/计时刻的 inherent 运维 API，**尚未接入管理面端点**（归 P2-05 运维轨）。  
+5. **字典 GC / 压缩 / vacuum 已做并接入运维面**（2026-09-19）——`StorageEngine::gc_dictionary()`（RocksDB 实现）保守回收未被引用条目（keep-set 覆盖存活 triple/quad、MVCC 留存版本、在途 staged 写入与 blank-node 宾语 id，因此旧版本快照读数仍可解析主语）；`StorageEngine::vacuum()` 进一步物理压缩各 CF 回收 tombstone 并返回压缩列族数；`next_node_id` 保持单调，GC 掉的词法形式再现时重新 intern 为新 id。两者已由 inherent API 提升为 `StorageEngine` 契约方法（无字典/无压缩语义的后端默认返 `0`），并接入管理面端点 `POST /admin/storage/gc-dictionary`、`POST /admin/storage/vacuum`（写 key + `cluster/admin` RBAC，响应返回回收条数 / 压缩列族数；见 OPS-L5-0002 §7）。  
 6. 构建需要本机能编译 `librocksdb-sys`（C++ 工具链）。  
 7. SOP/PSO/OPS 已维护，L3 matching 组合过滤；未单独暴露 SOP 扫描 API。  
+8. **字典 GC keep-set 的跨 CF 边界（设计约束，ADR-0004 数据面前置条件）**——已核查：`semantic` CF 键为 `encode_term` 自包含词法编码（ontolith-ai）、`tenant` CF 存租户记录文本、`raft` CF 当前仅承载 `LogPayload::Data { shard_id, op: String }`（不携带 `NodeId`），故不纳入 keep-set 也无误删风险。**若后续按 ADR-0004 将含 `NodeId` 的批写直接落入 `raft` CF（已提交未应用日志），`collect_referenced_node_ids` 必须扩展至 raft CF 扫描**，否则 GC 可能回收尚未 apply 的条目 id，导致副本应用时主语不可解析。  
 
 ---
 
@@ -199,6 +200,7 @@ ontolith-storage/src/
 | 2026-07-17 | 3.0.0 | RocksDB 适配（CF 布局、崩溃恢复、feature 门控、ADR-0001） |
 | 2026-08-06 | 3.1.0 | 命名图六置换索引：`GraphIndex` 位置索引（subject/predicate/object）与组合匹配 API，插入/删除/按主语删除同步维护，+4 测 |
 | 2026-09-19 | 3.2.0 | 字典 GC 与 vacuum 落地（§7 第 5 条收尾）：`RocksDbStorageEngine::collect_referenced_node_ids`（存活 triples/quads + MVCC 留存版本 + 在途 staged 事务 + blank-node 宾语 id 组成 keep-set）、`gc_dictionary`（提交锁下单个耐久 batch 删 fwd/rev 孤儿，返回回收条数，`next_node_id` 单调不重发）、`vacuum`（全 CF `compact_range_cf` 回收 tombstone）；+2 测（孤儿回收/剪枝后回收/存活不误删/reopen 持久/vacuum 后数据完好）；§3.6/§3.7 同步修正过时的“内存索引重建”描述 |
+| 2026-09-19 | 3.3.0 | **GC/vacuum 提升为可运维能力（A 类收口）**：`gc_dictionary` / `vacuum` 从 inherent API 上升为 `StorageEngine` 契约方法（默认 `Ok(0)`，无字典/无压缩后端无需实现；`vacuum` 改返压缩列族数），经 `Arc<dyn StorageEngine>` 动态调度；新增契约调度测（storage 63→64）；§7 第 5 条改写为已接入管理面，并新增第 8 条 ADR-0004 keep-set 跨 CF 设计约束；端点契约见 OPS-L5-0002 §7 |
 
 ---
 

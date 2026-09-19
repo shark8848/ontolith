@@ -6,7 +6,7 @@
 | 字段 | 值 |
 |------|-----|
 | 文档编号 | WP-0001 |
-| 版本 | 1.1.0 |
+| 版本 | 1.2.0 |
 | 状态 | Published |
 | 发布日期 | 2026-09-19 |
 | 项目 | Ontolith |
@@ -129,7 +129,7 @@ Ontolith 采用自底向上的分层内核，各层职责清晰、接口冻结�
 - **IRI 校验**：基线启发式校验之外提供 opt-in 严格校验 API（`Iri::parse_strict` / `is_strict`，RFC 3986 §3.1 scheme 文法 + RFC 3987 §2.2 禁用字符集），供入口与导入门禁使用。
 - **存储后端**：内存引擎 + 可选 RocksDB 耐久后端；磁盘 MVCC 版本链跨重启持久；耐久写入走 fsync，并具备 BackupEngine 备份/恢复与调度。
 - **索引结构**：纯 CF 索引扫描（SPO / POS / OSP + 命名图 GSPO / GPOS / GOSP），配合 bloom filter / 块缓存 / 压缩调优，并支持 Async 索引维护（水位 + 后台追赶）。
-- **字典与空间回收**：双向值↔id 字典持久化，epoch 语义与单调不重发的 id 分配；`gc_dictionary` 保守回收未被（存活语句 / MVCC 留存版本 / 在途事务 / blank-node 宾语）引用的字典条目，`vacuum` 对各数据 CF 物理压缩回收 tombstone。
+- **字典与空间回收**：双向值↔id 字典持久化，epoch 语义与单调不重发的 id 分配；`gc_dictionary` 保守回收未被（存活语句 / MVCC 留存版本 / 在途事务 / blank-node 宾语）引用的字典条目，`vacuum` 对各数据 CF 物理压缩回收 tombstone。两者已上升为 `StorageEngine` 契约方法，并经管理面端点 `POST /admin/storage/gc-dictionary` / `POST /admin/storage/vacuum`（写 key + `cluster/admin` RBAC）对外运维，响应分别回报回收条数与压缩列族数。
 - **幂等写入**：Put 集合语义去重、重放去重、重复 commit 拒绝、Delete 不存在为 no-op。
 
 ### 4.2 SPARQL 查询引擎
@@ -258,7 +258,7 @@ curl -sG http://127.0.0.1:8080/sparql \
 | 维度 | 状态 |
 |------|------|
 | 仓库与 crate 骨架（16 crate） | 已完成 ~100% |
-| L0–L3 内核（语义/存储/查询） | 已完成 ~99%（收尾项 2026-09-19 全部闭合：严格 IRI 校验、set-semantics API、字典 GC/vacuum） |
+| L0–L3 内核（语义/存储/查询） | 已完成 ~100%（收尾项与运维接线 2026-09-19 全部闭合：严格 IRI 校验、set-semantics API、字典 GC/vacuum 契约化 + 管理面端点） |
 | L4 集群与一致性（多进程 Raft） | 已完成 ~100% |
 | L5 接入与安全基线 | 已完成 ~100% |
 | L6 推理与验证（SHACL 98/98） | 已完成 ~100% |
@@ -276,7 +276,7 @@ curl -sG http://127.0.0.1:8080/sparql \
 
 ### 8.3 后续演进方向
 
-- L0–L3 内核已收敛至全量完成；后续仅为已声明的可选扩展轨：RDF-star、Decimal 任意精度、IRI 百分号编码完整语法、字典 GC/vacuum 接入管理面端点。
+- L0–L3 内核已收敛至全量完成（含字典 GC/vacuum 的管理面接线）；后续仅为已声明的增强轨：RDF-star、Decimal 任意精度、IRI 完整百分号编码/host 语法（backlog），以及 set-semantics 哈希索引、统计直方图等性能轨。
 - 多区域 active-active 语义（当前 SAS 规范中标记为 deferred）。
 - 持续的 W3C / SHACL 合规欠账清零与性能基准演进。
 
@@ -290,6 +290,6 @@ curl -sG http://127.0.0.1:8080/sparql \
 
 ---
 
-> 本白皮书基于 Ontolith 代码仓库现状与既有规范（SAS-0001 v1.2.0）、进度台账（PROG-0001 v0.1.80）编制，反映截至 2026-09 的工程实现状态。
+> 本白皮书基于 Ontolith 代码仓库现状与既有规范（SAS-0001 v1.2.0）、进度台账（PROG-0001 v0.1.81）编制，反映截至 2026-09 的工程实现状态。
 >
-> 变更记录：1.0.0（2026-09-19）首版；1.1.0（2026-09-19）同步 L0–L3 内核收尾（§4.1 核心能力、§8.1 完成度概览、§8.3 演进方向）。
+> 变更记录：1.0.0（2026-09-19）首版；1.1.0（2026-09-19）同步 L0–L3 内核收尾（§4.1 核心能力、§8.1 完成度概览、§8.3 演进方向）；1.2.0（2026-09-19）同步字典 GC/vacuum 提升为 `StorageEngine` 契约并接入管理面端点（§4.1、§8.1、§8.3）。

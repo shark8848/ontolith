@@ -1,9 +1,9 @@
 # L5 — Management Platform SLO Baseline
 
 文档 ID: OPS-L5-0002  
-版本: 1.1.0  
+版本: 1.2.0  
 状态: Active (R1 baseline)  
-日期: 2026-07-23
+日期: 2026-09-19  
 
 ---
 
@@ -208,7 +208,28 @@ SLO（R1）：
 
 ---
 
-## 7. 关联
+## 7. 管理面字典回收与压缩（P2-05 运维轨，2026-09-19）
+
+RocksDB 后端的值字典会随删除与版本剪枝积累孤儿条目，删除产生的 tombstone 也要
+物理压缩才释放空间。两者自 2026-09-19 提升为 `StorageEngine` 契约方法
+（`gc_dictionary` / `vacuum`；无值字典或无物理压缩语义的后端返回 `0`），并经管理面
+ACL 暴露（同 §6：RBAC `cluster/admin` + `x-ontolith-management-key` 写 key）。
+
+### 端点
+
+- `POST /admin/storage/gc-dictionary` —— 回收未被任何存活语句、MVCC 留存版本或在途
+  事务引用的字典条目，返回 `{"status":"ok","removed":N}`（N = 回收条数）。
+- `POST /admin/storage/vacuum` —— 对 13 个数据列族执行 `compact_range`，回收删除、
+  版本剪枝与字典 GC 留下的 tombstone，返回
+  `{"status":"ok","column_families_compacted":N}`。
+
+两者都是同步操作，建议按需（如大批量删除后）或低峰定时执行。GC 在提交锁下用单个
+耐久 batch 落盘；`next_node_id` 单调不回退，被回收的词法形式再次出现时重新 intern
+为新 id，因此旧版本快照的读数不会被错误解析。
+
+---
+
+## 8. 关联
 
 - `docs/L5-ontolith-access-security.md`
 - `docs/L5-systemd-service.md`
