@@ -1,9 +1,9 @@
 # L2 — Storage & Transaction Kernel 功能说明
 
 文档 ID: IMPL-L2-0001  
-版本: 3.1.0  
+版本: 3.2.0  
 状态: Implemented (in-memory + RocksDB durable adapter)  
-日期: 2026-07-17  
+日期: 2026-09-19  
 对应 crate:
 
 - `crates/ontolith-storage`
@@ -106,8 +106,11 @@ L0 新增 `ConsistencyLevel { Strong, Session, Eventual }`。
 
 ### 3.6 字典
 
-- `epoch()`：映射表世代（clear/replace 时递增；当前仅暴露，默认 0）  
-- `len` / `contains_value`（查询不分配）
+- `encode_node` / `decode_node` / `dictionary_len`：双向映射，幂等分配（`next_node_id` 单调，永不重用已发号）  
+- `epoch()`：映射表世代（`clear_dictionary` 时递增并持久化）  
+- `len` / `contains_value`（查询不分配）  
+- **`clear_dictionary`**（P1-02）：同一耐久 batch 内清空 fwd/rev 并推高 epoch  
+- **`gc_dictionary`**（L2 §7 第 5 条收尾，2026-09-19）：回收未被任何存活数据引用的字典条目，返回移除条数（见 §3.7）
 
 ### 3.7 RocksDB 耐久适配（v3）
 
@@ -115,10 +118,12 @@ L0 新增 `ConsistencyLevel { Strong, Session, Eventual }`。
 |----|------|
 | Feature | `rocksdb-backend`（workspace 默认开启） |
 | 入口 | `open_durable_engine(path)` / `RocksDbStorageEngine::open` |
-| 列族 | `meta`, `dict_fwd`, `dict_rev`, `triples`, `quads`, `wal` |
+| 列族 | `meta`, `dict_fwd`, `dict_rev`, `triples`, `quads`, `wal`, `versions`, `versions_quads`, `spo_index`/`pos_index`/`osp_index`, `gspo_index`/`gpos_index`/`gosp_index`, `index_pending`, `raft`, `semantic`, `tenant` |
 | 写路径 | stage → WAL CF；commit → triples/quads + WAL Committed（同一 RocksDB batch） |
-| 读路径 | 打开时从 CF 重建内存六索引；查询走内存索引（与 InMemory 同 API） |
-| 字典 | 双向 CF 持久化；`encode_node` 幂等 |
+| 读路径 | 纯 CF 前缀扫描（主 CF 与 SPO/POS/OSP + GSPO/GPOS/GOSP 索引 CF），不依赖打开时重建的内存二级索引 |
+| 字典 | 双向 CF 持久化；`encode_node` 幂等；`clear_dictionary` 推高 epoch；`gc_dictionary` 回收孤儿条目 |
+| GC | `collect_referenced_node_ids` 汇总存活 keep-set（triples/quads + MVCC 留存版本快照 + 在途 staged 事务 + blank-node 宾语 id），`gc_dictionary` 在提交锁下一个耐久 batch 删除 fwd/rev 孤儿；`vacuum` 对语句/命名图/六索引/字典/版本/WAL 共 13 个数据 CF `compact_range_cf` 回收 tombstone |
+| 备份 | `create_backup` / `restore_backup`（RocksDB BackupEngine，提交锁串行化 + flush 后快照） |
 | 隔离 | `rocksdb::` 仅在 `infrastructure/rocks.rs` |
 | 治理 | [ADR-0001](../adr/0001-rocksdb-storage-backend.md)、[依赖登记](./DEPENDENCY_REGISTER.md) |
 
@@ -179,7 +184,7 @@ ontolith-storage/src/
 2. **真 MVCC 版本链** — 磁盘 MVCC 版本 CF（大端版本前缀 ‖ 物理键，版本内前缀扫描隔离）与内存版本链（提交后不可变图快照）双轨；跨重启持久（WAL 回放重建版本链）、版本保留上限可配（默认 16）；读 = 指定版本已提交 ∪ 本 txn staged。  
 3. **IndexMaintenance::Async 已实现**（2026-09-02，P2-04）——延迟索引维护：提交写主 CF + `index_pending` 积压，后台维护线程按 `meta.index_watermark` 追赶索引 CF；读路径水位未追上时回退主 CF 扫描。  
 4. **命名图六置换** 已补（`GraphIndex` 新增 `by_subject`/`by_predicate`/`by_object` + `matching_in_named_graphs`）；默认图语句仍走 `TripleIndexes`。  
-5. **字典 GC / 压缩 / vacuum** 未做。  
+5. **字典 GC / 压缩 / vacuum 已做**（2026-09-19）——`RocksDbStorageEngine::gc_dictionary()` 保守回收未被引用条目（keep-set 覆盖存活 triple/quad、MVCC 留存版本、在途 staged 写入与 blank-node 宾语 id，因此旧版本快照读数仍可解析主语）；`vacuum()` 进一步物理压缩各 CF 回收 tombstone；`next_node_id` 保持单调，GC 掉的词法形式再现时重新 intern 为新 id。两者为手动/计时刻的 inherent 运维 API，**尚未接入管理面端点**（归 P2-05 运维轨）。  
 6. 构建需要本机能编译 `librocksdb-sys`（C++ 工具链）。  
 7. SOP/PSO/OPS 已维护，L3 matching 组合过滤；未单独暴露 SOP 扫描 API。  
 
@@ -193,6 +198,7 @@ ontolith-storage/src/
 | 2026-07-17 | 2.0.0 | 增量六索引、精确删/去重、GraphIndex、Stats、ConsistencyLevel、matching；L3 接入 |
 | 2026-07-17 | 3.0.0 | RocksDB 适配（CF 布局、崩溃恢复、feature 门控、ADR-0001） |
 | 2026-08-06 | 3.1.0 | 命名图六置换索引：`GraphIndex` 位置索引（subject/predicate/object）与组合匹配 API，插入/删除/按主语删除同步维护，+4 测 |
+| 2026-09-19 | 3.2.0 | 字典 GC 与 vacuum 落地（§7 第 5 条收尾）：`RocksDbStorageEngine::collect_referenced_node_ids`（存活 triples/quads + MVCC 留存版本 + 在途 staged 事务 + blank-node 宾语 id 组成 keep-set）、`gc_dictionary`（提交锁下单个耐久 batch 删 fwd/rev 孤儿，返回回收条数，`next_node_id` 单调不重发）、`vacuum`（全 CF `compact_range_cf` 回收 tombstone）；+2 测（孤儿回收/剪枝后回收/存活不误删/reopen 持久/vacuum 后数据完好）；§3.6/§3.7 同步修正过时的“内存索引重建”描述 |
 
 ---
 

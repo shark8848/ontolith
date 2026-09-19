@@ -422,6 +422,124 @@ impl RocksDbStorageEngine {
         Ok(new_epoch)
     }
 
+    /// Collect every `NodeId` still referenced by durable or in-flight data so
+    /// dictionary GC knows what to keep. Covers live default-graph triples and
+    /// named-graph quads, retained MVCC version snapshots (so a read-as-of an
+    /// older retained version still resolves subjects), blank-node object ids,
+    /// and the subjects of pending (staged-but-uncommitted) writes whose ids
+    /// were already interned. Subject positions are the primary consumer of the
+    /// reverse dictionary ([`DictionaryCodec::decode_node`]); predicates and
+    /// IRI/literal objects persist as text and need no id mapping.
+    fn collect_referenced_node_ids(&self) -> Result<BTreeSet<u64>, OntolithError> {
+        let mut used = BTreeSet::new();
+        for t in self.scan_triples_with_prefix(CF_TRIPLES, None)? {
+            note_referenced_ids(&mut used, &t);
+        }
+        for q in self.scan_quads_with_prefix(CF_QUADS, None)? {
+            note_referenced_ids(&mut used, &q.triple);
+        }
+        let cf_v = self.cf(CF_VERSIONS)?;
+        for item in self.db.iterator_cf(cf_v, IteratorMode::Start) {
+            let (_k, v) = item.map_err(rocks_err)?;
+            if let Ok(t) = decode_triple(&v) {
+                note_referenced_ids(&mut used, &t);
+            }
+        }
+        let cf_vq = self.cf(CF_VERSIONS_QUADS)?;
+        for item in self.db.iterator_cf(cf_vq, IteratorMode::Start) {
+            let (_k, v) = item.map_err(rocks_err)?;
+            if let Ok(q) = decode_quad(&v) {
+                note_referenced_ids(&mut used, &q.triple);
+            }
+        }
+        // In-flight staged writes already interned their subject ids; keep them
+        // alive so a concurrent commit cannot resolve against a GC'd entry.
+        if let Ok(state) = self.state.read() {
+            for ops in state.pending_writes.values() {
+                for op in ops {
+                    match op {
+                        WriteOperation::PutTriple(t) | WriteOperation::DeleteTriple(t) => {
+                            note_referenced_ids(&mut used, t);
+                        }
+                        WriteOperation::PutQuad(q) | WriteOperation::DeleteQuad(q) => {
+                            note_referenced_ids(&mut used, &q.triple);
+                        }
+                        WriteOperation::DeleteKey(key) => {
+                            for id in &key.components {
+                                used.insert(id.get());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(used)
+    }
+
+    /// Reclaim dictionary entries that no live data, retained MVCC version, or
+    /// in-flight transaction references (L2 §7 item 5: dict GC). Unreferenced
+    /// fwd (value→id) and rev (id→value) mappings are dropped in a single
+    /// durable batch under the commit lock. `next_node_id` stays monotonic, so a
+    /// GC'd lexical form that reappears later is simply re-interned with a fresh
+    /// id. Returns the number of dictionary entries removed.
+    pub fn gc_dictionary(&self) -> Result<usize, OntolithError> {
+        let _commit = self
+            .commit_lock
+            .lock()
+            .map_err(|_| OntolithError::InvalidState("commit lock poisoned"))?;
+        let used = self.collect_referenced_node_ids()?;
+        let cf_fwd = self.cf(CF_DICT_FWD)?;
+        let cf_rev = self.cf(CF_DICT_REV)?;
+        let mut batch = RocksBatch::default();
+        let mut removed = 0usize;
+        // rev keys are encode_u64(id) → value bytes; iterate to find orphans.
+        let doomed: Vec<(Vec<u8>, Vec<u8>)> = self
+            .db
+            .iterator_cf(cf_rev, IteratorMode::Start)
+            .filter_map(|item| item.ok())
+            .filter_map(|(k, v)| {
+                let id = decode_u64(&k).ok()?;
+                (!used.contains(&id)).then(|| (k.to_vec(), v.to_vec()))
+            })
+            .collect();
+        for (rev_key, fwd_value) in doomed {
+            batch.delete_cf(cf_rev, &rev_key[..]);
+            batch.delete_cf(cf_fwd, &fwd_value[..]);
+            removed += 1;
+        }
+        if removed > 0 {
+            self.durable_write(batch)?;
+        }
+        Ok(removed)
+    }
+
+    /// Physically compact every managed column family (L2 §7: compaction /
+    /// vacuum), reclaiming space held by tombstones from deletes, pruned
+    /// versions, and [`Self::gc_dictionary`]. Safe to call concurrently with
+    /// reads; RocksDB serializes compactions internally.
+    pub fn vacuum(&self) -> Result<(), OntolithError> {
+        for name in [
+            CF_TRIPLES,
+            CF_QUADS,
+            CF_SPO_INDEX,
+            CF_POS_INDEX,
+            CF_OSP_INDEX,
+            CF_GSPO_INDEX,
+            CF_GPOS_INDEX,
+            CF_GOSP_INDEX,
+            CF_DICT_FWD,
+            CF_DICT_REV,
+            CF_VERSIONS,
+            CF_VERSIONS_QUADS,
+            CF_WAL,
+        ] {
+            if let Ok(cf) = self.cf(name) {
+                self.db.compact_range_cf::<&[u8], &[u8]>(cf, None, None);
+            }
+        }
+        Ok(())
+    }
+
     fn cf(&self, name: &str) -> Result<&rocksdb::ColumnFamily, OntolithError> {
         self.db
             .cf_handle(name)
@@ -2138,6 +2256,17 @@ fn rocks_err(err: rocksdb::Error) -> OntolithError {
     OntolithError::Failed(format!("rocksdb: {err}"))
 }
 
+/// Record the dictionary ids a triple still depends on: its subject (reverse
+/// dictionary is required to render it back to a lexical form) and, when the
+/// object is a blank node, that node's id. Used by dictionary GC to build the
+/// keep-set.
+fn note_referenced_ids(used: &mut BTreeSet<u64>, t: &Triple) {
+    used.insert(t.subject.get());
+    if let Term::BlankNode(id) = &t.object {
+        used.insert(id.get());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2986,6 +3115,139 @@ mod tests {
         let id2 = engine.encode_node("urn:dict:epoch");
         assert!(id2.get() > id.get());
         assert_eq!(engine.decode_node(id2).as_deref(), Some("urn:dict:epoch"));
+    }
+
+    #[test]
+    fn rocksdb_dictionary_gc_reclaims_orphans_after_version_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let orphan;
+        {
+            let engine = RocksDbStorageEngine::open(&path).unwrap();
+            orphan = engine.encode_node("urn:dict:orphan");
+            let t = Triple {
+                subject: orphan,
+                predicate: Iri::new("urn:p"),
+                object: Term::Iri(Iri::new("urn:o")),
+            };
+            let put = TxnId::new(1);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: put,
+                    operations: vec![WriteOperation::PutTriple(t.clone())],
+                })
+                .unwrap();
+            engine.commit_transaction(put).unwrap();
+            let del = TxnId::new(2);
+            engine
+                .apply_write_batch(&WriteBatch {
+                    txn_id: del,
+                    operations: vec![WriteOperation::DeleteTriple(t)],
+                })
+                .unwrap();
+            engine.commit_transaction(del).unwrap();
+            // The retained MVCC snapshots still reference the subject id, so a
+            // conservative GC must keep it alive.
+            assert_eq!(engine.gc_dictionary().unwrap(), 0);
+            assert!(engine.contains_value("urn:dict:orphan"));
+            // Once history is pruned down to the newest snapshot the entry is
+            // unreferenced and reclaimable.
+            engine.prune_versions(1).unwrap();
+            assert!(engine.gc_dictionary().unwrap() > 0);
+            assert!(engine.decode_node(orphan).is_none());
+            assert!(!engine.contains_value("urn:dict:orphan"));
+            // Re-interning a GC'd lexical form yields a fresh, larger id
+            // (`next_node_id` stays monotonic).
+            let fresh = engine.encode_node("urn:dict:orphan");
+            assert!(fresh.get() > orphan.get());
+            assert_eq!(
+                engine.decode_node(fresh).as_deref(),
+                Some("urn:dict:orphan")
+            );
+        }
+        // GC results survive reopen.
+        let engine = RocksDbStorageEngine::open(&path).unwrap();
+        assert!(engine.decode_node(orphan).is_none());
+        assert_eq!(engine.stats().triple_count, 0);
+    }
+
+    #[test]
+    fn rocksdb_dictionary_gc_keeps_live_triples_and_quads() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = RocksDbStorageEngine::open(dir.path()).unwrap();
+        let subj = engine.encode_node("urn:dict:live-subject");
+        let quad_subj = engine.encode_node("urn:dict:live-quad-subject");
+        let doomed = engine.encode_node("urn:dict:doomed");
+        let txn = TxnId::new(1);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn,
+                operations: vec![
+                    WriteOperation::PutTriple(Triple {
+                        subject: subj,
+                        predicate: Iri::new("urn:p"),
+                        object: Term::Iri(Iri::new("urn:o")),
+                    }),
+                    WriteOperation::PutQuad(Quad::new(
+                        Triple {
+                            subject: quad_subj,
+                            predicate: Iri::new("urn:p"),
+                            object: Term::Iri(Iri::new("urn:o")),
+                        },
+                        Some(Iri::new("urn:g")),
+                    )),
+                ],
+            })
+            .unwrap();
+        engine.commit_transaction(txn).unwrap();
+        // `doomed` was interned but never referenced by any committed
+        // statement, so GC reclaims it while live subjects survive.
+        assert!(engine.gc_dictionary().unwrap() >= 1);
+        assert!(engine.decode_node(doomed).is_none());
+        assert!(!engine.contains_value("urn:dict:doomed"));
+        assert_eq!(
+            engine.decode_node(subj).as_deref(),
+            Some("urn:dict:live-subject")
+        );
+        assert_eq!(
+            engine.decode_node(quad_subj).as_deref(),
+            Some("urn:dict:live-quad-subject")
+        );
+        // A blank-node object id is dictionary-backed too and must survive GC.
+        let blank = engine.encode_node("_:gcblank");
+        let txn2 = TxnId::new(2);
+        engine
+            .apply_write_batch(&WriteBatch {
+                txn_id: txn2,
+                operations: vec![WriteOperation::PutTriple(Triple {
+                    subject: subj,
+                    predicate: Iri::new("urn:p2"),
+                    object: Term::BlankNode(blank),
+                })],
+            })
+            .unwrap();
+        engine.commit_transaction(txn2).unwrap();
+        engine.prune_versions(1).unwrap();
+        // After pruning history, GC still keeps the live triple/quad subjects
+        // and the blank-node object id referenced by the committed triple.
+        assert_eq!(engine.gc_dictionary().unwrap(), 0);
+        assert_eq!(
+            engine.decode_node(subj).as_deref(),
+            Some("urn:dict:live-subject")
+        );
+        assert_eq!(
+            engine.decode_node(quad_subj).as_deref(),
+            Some("urn:dict:live-quad-subject")
+        );
+        assert_eq!(engine.decode_node(blank).as_deref(), Some("_:gcblank"));
+        // Vacuum compacts CFs and must leave committed data intact.
+        engine.vacuum().unwrap();
+        assert_eq!(engine.stats().triple_count, 2);
+        assert_eq!(engine.default_graph_triples().len(), 2);
+        assert_eq!(
+            engine.decode_node(subj).as_deref(),
+            Some("urn:dict:live-subject")
+        );
     }
 
     #[test]

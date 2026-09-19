@@ -1,9 +1,9 @@
 # L0 — ontolith-core Knowledge Object 基座功能说明
 
 文档 ID: IMPL-L0-0001  
-版本: 1.2.0  
+版本: 1.3.0  
 状态: Implemented  
-日期: 2026-08-29  
+日期: 2026-09-19  
 对应 crate: `crates/ontolith-core`  
 规范依据:
 
@@ -124,7 +124,7 @@ API：
 
 | 类型 | 说明 |
 |------|------|
-| `Iri` | 字符串 IRI；`new` 不校验，`parse` 做 R1 基线校验 |
+| `Iri` | 字符串 IRI；`new` 不校验，`parse` 做 R1 基线校验，`parse_strict`/`is_strict` 做 RFC 子集严格校验（opt-in） |
 | `BlankNodeId` | 数据集局部空白节点标签；`parse` 要求非空且无空白 |
 | `LanguageTag` | BCP 47 子集；规范化为小写 |
 | `LiteralValue` | 紧凑字面量：String / Integer / Decimal(f64) / Boolean（兼容既有存储路径） |
@@ -138,7 +138,17 @@ API：
 2. 不含 ASCII 空白  
 3. 必须包含 `:`（scheme 分隔）  
 
-完整 RFC 3987 留待后续增强。
+#### IRI `parse_strict` / `is_strict`（可选严格校验，2026-09-19）
+
+面向入口校验/导入门禁等场景的 **opt-in** 严格解析，不改动热路径 `parse`/`new` 行为：
+
+1. 非空；  
+2. 必含 `:`，且其前缀为合法 scheme（RFC 3986 §3.1：首字符 ASCII 字母，后续仅 `[A-Za-z0-9+-.]`）；  
+3. 拒绝 `<` `>` `"` `\` `^` 反引号 `{` `}` `|` 与全部 ASCII 空白/控制字符（RFC 3987 §2.2 / RFC 3986 §2.4）；  
+4. 接受非 ASCII 码位（RFC 3987 §2.2 国际化 IRI），因此不强制百分号编码；  
+5. `is_strict()` 为已有 `Iri` 的谓词形式，与 `parse_strict` 一致。  
+
+失败统一返回 `OntolithError::InvalidArgument`（不 panic）。完整百分号编码/host 路径语法级校验仍列为后续可选项。
 
 #### Literal 构造
 
@@ -276,6 +286,9 @@ CanonicalEncode, CanonicalWriter
 | `metadata_canonical_ignores_insertion_order` | 元数据顺序无关 |
 | `node_id_display_and_canonical` | NodeId 展示与编码 |
 | `error_display_includes_code` | 错误码展示 |
+| `iri_parse_strict_accepts_well_formed_absolute_iris` | `parse_strict` 接受合法绝对 IRI（含国际化码位） |
+| `iri_parse_strict_rejects_malformed_iris` | `parse_strict` 拒绝非法 scheme / 禁用字符 / 空白控制符 |
+| `iri_is_strict_predicate_matches_parser` | `is_strict()` 与 `parse_strict` 一致 |
 
 ### 6.2 回归
 
@@ -314,7 +327,7 @@ CanonicalEncode, CanonicalWriter
 | 项 | 现状 | 后续层/工作 |
 |----|------|-------------|
 | Statement KO | 已实现（2026-09-02：`StatementObject` = KO header + Quad，`ObjectType::Statement`，`from_triple`/`from_quad` + 单测） | 字典/审计/版本化等挂载点按需扩展 |
-| IRI 校验 | 基线启发式 | 完整 IRI/URI 规范可选 feature |
+| IRI 校验 | 基线启发式（`parse`）+ **严格子集可选 API 已提供**（`Iri::parse_strict`/`is_strict`，RFC 3986 §3.1 scheme + RFC 3987 §2.2 禁用字符集，2026-09-19） | 百分号编码/host 语法的完整 RFC 3986 §3 解析（按需） |
 | Literal Decimal | `f64` 位型确定性 | 十进制任意精度类型 |
 | Canonical 规范文档 | 代码即规范 | 独立 RFC/编码规范文档（P1-04） |
 | 序列化 Part II | 已做（确定性二进制 `KoCodec`，含 KO 容器全量往返） | 独立编码规范 RFC（P1-04 关联） |
@@ -330,6 +343,7 @@ CanonicalEncode, CanonicalWriter
 | 2026-07-17 | 1.0.0 | 首版：L0 实现同步功能说明 |
 | 2026-08-06 | 1.1.0 | 序列化 Part II：`domain/serialization.rs` 新增无依赖确定性二进制编解码（`KoCodec`/`encode_ko`/`decode_ko`），覆盖 Header/Metadata/Graph/Dataset/Ontology/Rule/Version 往返与损坏拒绝，+8 测 |
 | 2026-08-29 | 1.2.0 | Ontology 载荷联动（P1-01）：`OntologyObject` 角色图引用 → `OntologyPayload` 物化契约（tbox/abox/annotation/rule/provenance）与 `OntologyGraphReader` 读端口；联动实现落在 reasoner/server（见 §7），+4 测（reasoner 98→102） |
+| 2026-09-19 | 1.3.0 | IRI 严格校验可选 API（§8 收尾）：`Iri::parse_strict`（RFC 3986 §3.1 scheme 文法 + RFC 3987 §2.2 禁用 ASCII 字符集，非 ASCII 接受）与 `Iri::is_strict`；opt-in 设计，热路径 `parse`/`new` 语义与性能不变；失败返回 `InvalidArgument`；+3 测（core 20→23） |
 
 ---
 

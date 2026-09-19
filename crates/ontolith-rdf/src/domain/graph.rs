@@ -31,6 +31,44 @@ impl NamedGraph {
         self.triples.push(triple);
     }
 
+    /// Set-semantics insert (L1 §7 dedup follow-up): appends the triple only
+    /// when no equal-by-canonical-bytes member exists. Returns `true` when the
+    /// graph changed. Identity follows the canonical encoding, matching the
+    /// object-dedup rule used by statistics.
+    pub fn insert_unique(&mut self, triple: Triple) -> bool {
+        let key = triple.canonical_bytes();
+        if self.triples.iter().any(|t| t.canonical_bytes() == key) {
+            return false;
+        }
+        self.triples.push(triple);
+        true
+    }
+
+    /// True when an equal-by-canonical-bytes triple is present.
+    pub fn contains(&self, triple: &Triple) -> bool {
+        let key = triple.canonical_bytes();
+        self.triples.iter().any(|t| t.canonical_bytes() == key)
+    }
+
+    /// Remove the first equal-by-canonical-bytes triple; returns it if present.
+    pub fn remove(&mut self, triple: &Triple) -> Option<Triple> {
+        let key = triple.canonical_bytes();
+        let idx = self
+            .triples
+            .iter()
+            .position(|t| t.canonical_bytes() == key)?;
+        Some(self.triples.remove(idx))
+    }
+
+    /// Collapse duplicate members, keeping first occurrences in order.
+    /// Returns the number of duplicates removed.
+    pub fn dedup(&mut self) -> usize {
+        let mut seen = std::collections::BTreeSet::new();
+        let before = self.triples.len();
+        self.triples.retain(|t| seen.insert(t.canonical_bytes()));
+        before - self.triples.len()
+    }
+
     pub fn len(&self) -> usize {
         self.triples.len()
     }
@@ -114,6 +152,117 @@ impl Dataset {
             None => self.insert_default(quad.triple),
             Some(name) => self.insert_named(name, quad.triple),
         }
+    }
+
+    /// Set-semantics insert into the default graph (see [`NamedGraph::insert_unique`]).
+    pub fn insert_default_unique(&mut self, triple: Triple) -> bool {
+        let key = triple.canonical_bytes();
+        if self
+            .default_graph
+            .iter()
+            .any(|t| t.canonical_bytes() == key)
+        {
+            return false;
+        }
+        self.default_graph.push(triple);
+        true
+    }
+
+    /// Set-semantics insert into a named graph, creating the graph on first
+    /// unique insert (see [`NamedGraph::insert_unique`]).
+    pub fn insert_named_unique(&mut self, graph_name: Iri, triple: Triple) -> bool {
+        if let Some(graph) = self.named_graphs.iter_mut().find(|g| g.name == graph_name) {
+            return graph.insert_unique(triple);
+        }
+        let mut graph = NamedGraph::new(graph_name);
+        graph.insert_unique(triple);
+        // insert_unique on a fresh graph always succeeds
+        let changed = !graph.is_empty();
+        self.named_graphs.push(graph);
+        changed
+    }
+
+    /// Set-semantics insert for a quad (default graph when `graph_name` is `None`).
+    pub fn insert_quad_unique(&mut self, quad: Quad) -> bool {
+        match quad.graph_name {
+            None => self.insert_default_unique(quad.triple),
+            Some(name) => self.insert_named_unique(name, quad.triple),
+        }
+    }
+
+    /// True when the dataset contains an equal-by-canonical-bytes quad.
+    pub fn contains_quad(&self, quad: &Quad) -> bool {
+        match &quad.graph_name {
+            None => {
+                let key = quad.triple.canonical_bytes();
+                self.default_graph
+                    .iter()
+                    .any(|t| t.canonical_bytes() == key)
+            }
+            Some(name) => self
+                .named_graph(name)
+                .is_some_and(|g| g.contains(&quad.triple)),
+        }
+    }
+
+    /// Remove an equal-by-canonical-bytes quad; returns `true` when the dataset
+    /// changed. An emptied named graph is dropped from `named_graphs`.
+    pub fn remove_quad(&mut self, quad: &Quad) -> bool {
+        match &quad.graph_name {
+            None => {
+                let key = quad.triple.canonical_bytes();
+                let idx = self
+                    .default_graph
+                    .iter()
+                    .position(|t| t.canonical_bytes() == key);
+                match idx {
+                    Some(i) => {
+                        self.default_graph.remove(i);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            Some(name) => {
+                let gidx = match self.named_graphs.iter().position(|g| &g.name == name) {
+                    Some(i) => i,
+                    None => return false,
+                };
+                if self.named_graphs[gidx].remove(&quad.triple).is_none() {
+                    return false;
+                }
+                if self.named_graphs[gidx].is_empty() {
+                    self.named_graphs.remove(gidx);
+                }
+                true
+            }
+        }
+    }
+
+    /// Deduplicate every graph (default + named). Returns the total number of
+    /// duplicate triples removed.
+    pub fn dedup(&mut self) -> usize {
+        let mut seen = std::collections::BTreeSet::new();
+        let before = self.default_graph.len();
+        self.default_graph
+            .retain(|t| seen.insert(t.canonical_bytes()));
+        let mut removed = before - self.default_graph.len();
+        for graph in &mut self.named_graphs {
+            removed += graph.dedup();
+        }
+        removed
+    }
+
+    /// Set-union merge: inserts `other`'s quads with set semantics, never
+    /// growing duplicates. Returns the number of triples actually added.
+    pub fn merge_set(&mut self, other: Dataset) -> usize {
+        let mut added = 0;
+        for quad in other.quads() {
+            if self.insert_quad_unique(quad) {
+                added += 1;
+            }
+        }
+        added
     }
 
     pub fn named_graph(&self, name: &Iri) -> Option<&NamedGraph> {

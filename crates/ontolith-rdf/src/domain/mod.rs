@@ -160,4 +160,77 @@ mod tests {
         assert_eq!(stats.distinct_predicates, 2);
         assert_eq!(stats.distinct_objects, 2);
     }
+
+    #[test]
+    fn named_graph_set_semantics_insert_contains_remove() {
+        let mut g = NamedGraph::new(Iri::new("urn:g"));
+        let t = sample_triple(1, "urn:p", "urn:o");
+        assert!(g.insert_unique(t.clone()));
+        assert!(!g.insert_unique(sample_triple(1, "urn:p", "urn:o"))); // duplicate by canonical bytes
+        assert_eq!(g.len(), 1);
+        assert!(g.contains(&t));
+        assert_eq!(g.remove(&t), Some(t.clone()));
+        assert!(!g.contains(&t));
+        assert!(g.remove(&t).is_none());
+    }
+
+    #[test]
+    fn named_graph_dedup_keeps_first_occurrences() {
+        let mut g = NamedGraph::new(Iri::new("urn:g"));
+        g.insert(sample_triple(1, "urn:p", "urn:a"));
+        g.insert(sample_triple(2, "urn:p", "urn:b"));
+        g.insert(sample_triple(1, "urn:p", "urn:a")); // dup of first
+        g.insert(sample_triple(3, "urn:p", "urn:c"));
+        g.insert(sample_triple(2, "urn:p", "urn:b")); // dup of second
+        assert_eq!(g.dedup(), 2);
+        assert_eq!(g.len(), 3);
+        assert_eq!(g.triples[0], sample_triple(1, "urn:p", "urn:a"));
+        assert_eq!(g.triples[2], sample_triple(3, "urn:p", "urn:c"));
+    }
+
+    #[test]
+    fn dataset_set_semantics_default_and_named() {
+        let mut ds = Dataset::new();
+        assert!(ds.insert_default_unique(sample_triple(1, "urn:p", "urn:o")));
+        assert!(!ds.insert_default_unique(sample_triple(1, "urn:p", "urn:o")));
+        assert!(ds.insert_named_unique(Iri::new("urn:g"), sample_triple(2, "urn:p", "urn:o")));
+        assert!(!ds.insert_named_unique(Iri::new("urn:g"), sample_triple(2, "urn:p", "urn:o")));
+        // same triple in a different graph is not a duplicate
+        assert!(ds.insert_named_unique(Iri::new("urn:h"), sample_triple(2, "urn:p", "urn:o")));
+        assert_eq!(ds.triple_count(), 3);
+
+        let q = Quad::in_named_graph(sample_triple(2, "urn:p", "urn:o"), Iri::new("urn:g"));
+        assert!(ds.contains_quad(&q));
+        assert!(ds.remove_quad(&q));
+        assert!(!ds.remove_quad(&q));
+        assert!(!ds.contains_quad(&q));
+    }
+
+    #[test]
+    fn dataset_remove_quad_drops_emptied_named_graph() {
+        let mut ds = Dataset::new();
+        ds.insert_named(Iri::new("urn:g"), sample_triple(1, "urn:p", "urn:o"));
+        let q = Quad::in_named_graph(sample_triple(1, "urn:p", "urn:o"), Iri::new("urn:g"));
+        assert!(ds.remove_quad(&q));
+        assert!(ds.named_graph(&Iri::new("urn:g")).is_none());
+        assert_eq!(ds.graph_count(), 1); // only default remains
+    }
+
+    #[test]
+    fn dataset_dedup_and_merge_set_union() {
+        let mut a = Dataset::new();
+        a.insert_default(sample_triple(1, "urn:p", "urn:o"));
+        a.insert_default(sample_triple(1, "urn:p", "urn:o")); // multiset dup via plain insert
+        a.insert_named(Iri::new("urn:g"), sample_triple(2, "urn:p", "urn:o"));
+        assert_eq!(a.dedup(), 1);
+        assert_eq!(a.triple_count(), 2);
+
+        let mut b = Dataset::new();
+        b.insert_default(sample_triple(1, "urn:p", "urn:o")); // overlap with a
+        b.insert_default(sample_triple(3, "urn:p", "urn:o")); // new
+        let added = a.merge_set(b);
+        assert_eq!(added, 1);
+        assert_eq!(a.triple_count(), 3);
+        assert_eq!(a.default_graph.len(), 2);
+    }
 }

@@ -1,9 +1,9 @@
 # L1 — ontolith-rdf Statement / Graph / Dataset 功能说明
 
 文档 ID: IMPL-L1-0001  
-版本: 1.0.0  
+版本: 1.1.0  
 状态: Implemented  
-日期: 2026-07-17  
+日期: 2026-09-19  
 对应 crate: `crates/ontolith-rdf`  
 规范依据:
 
@@ -110,13 +110,28 @@ Dataset API：
 
 | 方法 | 行为 |
 |------|------|
-| `insert_default` / `insert_named` / `insert_quad` | 追加写入（当前 **不去重**） |
+| `insert_default` / `insert_named` / `insert_quad` | 追加写入（多重集语义，**不去重**） |
+| `insert_default_unique` / `insert_named_unique` / `insert_quad_unique` | **set-semantics 写入**：按 canonical 字节判等，已存在则不插入，返回 `bool`（图是否变化） |
+| `contains_quad` | 按 canonical 字节判断 quad 是否在集内 |
+| `remove_quad` | 删除指定 quad；命名图被删空时从 `named_graphs` 摘除，返回是否变化 |
+| `dedup` | 折叠默认图与全部命名图的重复成员（保留首次出现顺序），返回移除条数 |
+| `merge_set` | set-union 合并（不产生重复），返回实际新增条数 |
 | `named_graph` / `named_graph_mut` | 按名查找 |
 | `graph_count` / `triple_count` / `quads` | 聚合视图 |
 | `default_statistics` / `NamedGraph::statistics` | 基数统计 |
 | `to_dataset_object` | 桥接 L0 `DatasetObject`（header + stats，不含 triple 载荷） |
 | `merge` | 合并另一 dataset（追加） |
 | `is_empty` | 是否无三元组 |
+
+NamedGraph set-semantics API（`domain::graph`）：
+
+| 方法 | 行为 |
+|------|------|
+| `insert_unique` | 成员判等基于 canonical 字节，重复则不插入 |
+| `contains` / `remove` | 成员查询 / 删除首条相等三元组 |
+| `dedup` | 去重，返回移除条数 |
+
+> 判等口径与统计的 object 去重规则一致（同一 `CanonicalEncode::canonical_bytes`），因此 set-semantics 不引入第二套身份概念；追加型 API 保持原样，既有依赖（storage/query/parser）行为不变。
 
 Canonical：
 
@@ -165,7 +180,7 @@ L1 **不** 重新定义 `Iri`/`NodeId`/`ObjectId`。
 
 1. Statement 值对象在创建后字段不提供内部可变 API（容器 `Dataset` 可追加）。  
 2. 默认图用 `graph_name = None` / `GraphId::Default` 表达，不用魔法 IRI。  
-3. Canonical 对多重集语义：相同三元组多重出现会保留（排序稳定，但未 set 去重）。  
+3. Canonical 对多重集语义：相同三元组多重出现会保留（排序稳定，但未 set 去重）；set 语义需显式使用 `*_unique` / `dedup` / `merge_set` API，其判等与 canonical 字节一致。  
 4. 热路径类型字段名与布局保持兼容，避免破坏 `ontolith-storage`。  
 5. 不引入第三方依赖。  
 
@@ -188,6 +203,11 @@ L1 **不** 重新定义 `Iri`/`NodeId`/`ObjectId`。
 | `term_kinds_and_resource_projection` | Term 投影 |
 | `statistics_count_distincts` | 统计 |
 | `service_builds_dataset_from_quads` | DatasetService |
+| `named_graph_set_semantics_insert_contains_remove` | NamedGraph `insert_unique`/`contains`/`remove` |
+| `named_graph_dedup_keeps_first_occurrences` | NamedGraph 去重保序 |
+| `dataset_set_semantics_default_and_named` | Dataset 默认图/命名图 set 写入 |
+| `dataset_remove_quad_drops_emptied_named_graph` | 删空命名图自动摘除 |
+| `dataset_dedup_and_merge_set_union` | Dataset 去重与 set-union 合并 |
 
 ### 6.2 回归
 
@@ -208,7 +228,7 @@ L1 **不** 重新定义 `Iri`/`NodeId`/`ObjectId`。
 
 | 项 | 现状 | 后续 |
 |----|------|------|
-| 去重 | 追加型多重集 | 可选 set-semantics API |
+| 去重 | 追加型多重集为默认语义；**set-semantics API 已提供**（`insert_*_unique`/`contains_quad`/`remove_quad`/`dedup`/`merge_set`，判等基于 canonical 字节，2026-09-19） | 大批量场景可换哈希索引降低判等成本（当前线性扫描，语义已冻结） |
 | RDF-star | 未支持 | 标准增强 |
 | 主语为 IRI 文本 | 仅 NodeId | 字典层统一编码 |
 | 字面量完整类型 | 复用 L0 `LiteralValue` | 热路径升级到 `Literal` |
@@ -222,6 +242,7 @@ L1 **不** 重新定义 `Iri`/`NodeId`/`ObjectId`。
 | 日期 | 版本 | 说明 |
 |------|------|------|
 | 2026-07-17 | 1.0.0 | 首版 L1 实现与功能说明 |
+| 2026-09-19 | 1.1.0 | Set-semantics API 落地（§7 去重收尾）：`NamedGraph::{insert_unique, contains, remove, dedup}` 与 `Dataset::{insert_default_unique, insert_named_unique, insert_quad_unique, contains_quad, remove_quad, dedup, merge_set}`，成员判等统一采用 canonical 字节；追加型 API 与热路径布局不变；+5 测（rdf 11→16） |
 
 ---
 

@@ -42,6 +42,71 @@ impl Iri {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Strict RFC 3987 absolute-IRI validation (deferred-grade check, L0 §8).
+    ///
+    /// Unlike [`Iri::parse`] (R1 baseline heuristic) this enforces the grammar
+    /// subset that guards against malformed IRIs leaking into canonical keys:
+    /// - a valid `scheme` per RFC 3986 §3.1 (`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`),
+    ///   so the `:` separator must be present and preceded by a well-formed scheme;
+    /// - no ASCII whitespace and no disallowed ASCII controls or the characters
+    ///   `<`, `>`, `"`, `\\`, `^`, backtick, `{`, `}`, `|` (RFC 3987 §2.2 / 3986 §2.4);
+    /// - non-ASCII code points are accepted (i18n per RFC 3987 §2.2).
+    ///
+    /// It is intentionally opt-in so existing hot-path callers of `parse`/`new`
+    /// are unaffected.
+    pub fn parse_strict(value: impl Into<String>) -> Result<Self, OntolithError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(OntolithError::InvalidArgument("iri must not be empty"));
+        }
+        // Split off the scheme at the first ':' — everything before it must be a
+        // well-formed scheme.
+        let scheme_end = value.find(':').ok_or(OntolithError::InvalidArgument(
+            "iri must include a scheme separator ':'",
+        ))?;
+        if scheme_end == 0 {
+            return Err(OntolithError::InvalidArgument(
+                "iri scheme must not be empty",
+            ));
+        }
+        let scheme = &value[..scheme_end];
+        let mut chars = scheme.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() => {}
+            _ => {
+                return Err(OntolithError::InvalidArgument(
+                    "iri scheme must start with a letter",
+                ));
+            }
+        }
+        for c in chars {
+            if !(c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') {
+                return Err(OntolithError::InvalidArgument(
+                    "iri scheme contains an illegal character",
+                ));
+            }
+        }
+        // Reject characters that must be percent-encoded and are disallowed raw
+        // in IRIs, plus all ASCII control characters and whitespace.
+        for c in value.chars() {
+            let bad = match c {
+                '<' | '>' | '"' | '\\' | '^' | '`' | '{' | '}' | '|' => true,
+                _ => c.is_ascii_whitespace() || c.is_ascii_control(),
+            };
+            if bad {
+                return Err(OntolithError::InvalidArgument(
+                    "iri contains a disallowed character",
+                ));
+            }
+        }
+        Ok(Self(value))
+    }
+
+    /// True when this IRI satisfies [`Iri::parse_strict`].
+    pub fn is_strict(&self) -> bool {
+        Self::parse_strict(self.0.clone()).is_ok()
+    }
 }
 
 impl AsRef<str> for Iri {
@@ -423,5 +488,56 @@ pub struct BoundResource {
 impl BoundResource {
     pub fn new(node_id: NodeId, resource: Resource) -> Self {
         Self { node_id, resource }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iri_parse_strict_accepts_well_formed_absolute_iris() {
+        for good in [
+            "http://example.org/a",
+            "https://example.org/x?y=z#f",
+            "urn:tenant:acme",
+            "ftp://host/path",
+            "a+.-1://x",
+            "http://例え.テスト/アイ",
+        ] {
+            assert!(Iri::parse_strict(good).is_ok(), "should accept {good}");
+        }
+    }
+
+    #[test]
+    fn iri_parse_strict_rejects_malformed_iris() {
+        let bad = [
+            ("", "empty"),
+            ("no-scheme", "missing ':' separator"),
+            (":starting-colon", "empty scheme"),
+            ("1http://x", "scheme must start with a letter"),
+            ("ht tp://x", "whitespace in scheme"),
+            ("http://exa mple", "whitespace in body"),
+            ("http://a<b", "disallowed '<'"),
+            ("http://a>b", "disallowed '>'"),
+            ("http://a{b", "disallowed '{'"),
+            ("http://a|b", "disallowed '|'"),
+            ("http://a\tb", "control char"),
+        ];
+        for (value, why) in bad {
+            assert!(
+                Iri::parse_strict(value).is_err(),
+                "should reject {value}: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn iri_is_strict_predicate_matches_parser() {
+        assert!(Iri::new("urn:x").is_strict());
+        assert!(!Iri::new("bad scheme").is_strict());
+        // baseline parse is looser than strict: contains ':' and no whitespace
+        let loose = Iri::parse("x:{y}").expect("baseline accepts");
+        assert!(!loose.is_strict(), "strict rejects disallowed brace/pipe");
     }
 }
